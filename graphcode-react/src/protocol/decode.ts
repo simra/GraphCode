@@ -8,6 +8,11 @@ import type {
 
 const uuidLike = z.string().min(1);
 const encodedEnum = z.union([z.string(), z.record(z.string(), z.unknown())]);
+const optional = <T extends z.ZodType>(schema: T) =>
+  z.preprocess(
+    (value) => (value === null ? undefined : value),
+    schema.optional(),
+  );
 
 const projectRefSchema = z
   .object({
@@ -22,6 +27,79 @@ const presenceSchema = z
     presence: z.string().min(1),
     confidence: z.string().optional(),
     observedAt: z.union([z.string(), z.number()]).optional(),
+    exitCode: optional(z.number().int()),
+  })
+  .passthrough();
+
+const goalSchema = z
+  .object({
+    summary: z.string(),
+    predicate: optional(z.string()),
+    pollIntervalSeconds: z.number().positive().default(60),
+    stallAfterSeconds: optional(z.number().positive()),
+    metricCommand: optional(z.string()),
+    metricDirection: z.enum(["minimize", "maximize"]).default("maximize"),
+    tokenBudget: optional(z.number().int().positive()),
+    skipsUnchangedWorkspace: z.boolean().default(false),
+  })
+  .passthrough();
+
+const usageSchema = z
+  .object({
+    inputTokens: optional(z.number().int().nonnegative()),
+    outputTokens: optional(z.number().int().nonnegative()),
+    costUSD: optional(z.number().nonnegative()),
+    reportedAt: optional(z.union([z.string(), z.number()])),
+  })
+  .passthrough();
+
+const worktreeSchema = z
+  .object({
+    id: z.string(),
+    repositoryPath: z.string(),
+    worktreePath: z.string(),
+    branch: z.string(),
+  })
+  .passthrough();
+
+const attachmentSchema = z
+  .object({
+    id: uuidLike,
+    path: z.string(),
+  })
+  .passthrough();
+
+const metricSampleSchema = z
+  .object({
+    value: z.number(),
+    recordedAt: z.union([z.string(), z.number()]),
+  })
+  .passthrough();
+
+const templateFollowSchema = z
+  .object({
+    id: uuidLike,
+    name: z.string(),
+    missing: z.boolean().default(false),
+  })
+  .passthrough();
+
+const loopSummarySchema = z
+  .object({
+    beats: z.array(z.unknown()).default([]),
+    passes: z.array(z.unknown()).default([]),
+    currentPass: z.number().int().nonnegative().default(0),
+    lastTurnAt: optional(z.union([z.string(), z.number()])),
+  })
+  .passthrough();
+
+const summaryBoardSchema = z
+  .object({
+    form: encodedEnum,
+    title: optional(z.string()),
+    pass: z.number().int().nonnegative(),
+    composedAt: optional(z.union([z.string(), z.number()])),
+    source: optional(z.string()),
   })
   .passthrough();
 
@@ -32,10 +110,34 @@ const loopNodeSchema: z.ZodType<LoopNode> = z.lazy(() =>
       title: z.string(),
       loopType: z.string().optional(),
       state: encodedEnum.default("idle"),
-      backend: z.string().optional(),
-      activity: z.string().optional(),
-      presence: presenceSchema.optional(),
-      pilotState: z.string().optional(),
+      checkDescription: optional(z.string()),
+      triggerPrompt: optional(z.string()),
+      heartbeatIntervalSeconds: optional(z.number().positive()),
+      firstInstruction: optional(z.string()),
+      pausesBeforeWritesOnly: z.boolean().optional(),
+      attachments: z.array(attachmentSchema).optional(),
+      goal: optional(goalSchema),
+      backend: optional(z.string()),
+      modelTier: optional(z.string()),
+      worktreeBinding: optional(worktreeSchema),
+      activity: optional(z.string()),
+      summary: optional(loopSummarySchema),
+      board: optional(summaryBoardSchema),
+      presence: optional(presenceSchema),
+      hasActiveDependents: z.boolean().optional(),
+      metricHistory: z.array(metricSampleSchema).optional(),
+      createdBy: optional(uuidLike),
+      createdFromTemplateID: optional(uuidLike),
+      templateFollow: optional(templateFollowSchema),
+      lastMailroomRead: optional(z.number().int()),
+      mailroomWatch: optional(encodedEnum),
+      stallReason: optional(z.string()),
+      launchFailure: optional(encodedEnum),
+      resolution: optional(encodedEnum),
+      pendingCompletion: optional(encodedEnum),
+      goalSetAt: optional(z.union([z.string(), z.number()])),
+      pilotState: optional(encodedEnum),
+      usage: optional(usageSchema),
       sessionRestarts: z.number().int().nonnegative().optional(),
       createdAt: z.union([z.string(), z.number()]).optional(),
       subGraph: loopGraphSchema.optional(),
