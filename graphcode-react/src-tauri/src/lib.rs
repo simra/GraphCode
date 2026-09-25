@@ -8,6 +8,7 @@ use serde::Serialize;
 use serde_json::{json, Value};
 use thiserror::Error;
 use tokio::time::{timeout, Duration};
+use uuid::Uuid;
 
 #[derive(Debug, Error)]
 enum BridgeError {
@@ -37,6 +38,14 @@ struct InitialDaemonState {
     frames: Vec<Value>,
 }
 
+fn response_matches_request(frame: &Value, request_id: Uuid) -> bool {
+    frame
+        .get("requestID")
+        .and_then(Value::as_str)
+        .and_then(|value| Uuid::parse_str(value).ok())
+        == Some(request_id)
+}
+
 #[tauri::command]
 async fn connect_initial_daemon_state() -> Result<InitialDaemonState, BridgeError> {
     let endpoint = discover()?;
@@ -57,15 +66,14 @@ async fn connect_initial_daemon_state() -> Result<InitialDaemonState, BridgeErro
     let collect = async {
         loop {
             let frame = read_frame(&mut stream).await?;
-            let is_recent_response =
-                frame.get("requestID") == Some(&Value::String(recent_id.to_string()));
+            let is_recent_response = response_matches_request(&frame, recent_id);
             frames.push(frame);
             if is_recent_response {
                 return Ok::<(), protocol::ProtocolError>(());
             }
         }
     };
-    timeout(Duration::from_secs(5), collect)
+    timeout(Duration::from_secs(15), collect)
         .await
         .map_err(|_| BridgeError::InitialStateTimeout)??;
 
@@ -81,4 +89,46 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![connect_initial_daemon_state])
         .run(tauri::generate_context!())
         .expect("failed to run GraphCode React");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn request_correlation_accepts_swift_uppercase_uuid_encoding() {
+        let request_id = Uuid::parse_str("69ecfae8-e0d0-48f3-ae5c-bba390bd0b30").unwrap();
+        let frame = json!({
+            "version": 2,
+            "kind": "response",
+            "requestID": "69ECFAE8-E0D0-48F3-AE5C-BBA390BD0B30",
+            "success": true
+        });
+
+        assert!(response_matches_request(&frame, request_id));
+    }
+
+    #[tokio::test]
+    async fn live_daemon_lists_recent_projects_when_requested() {
+        if std::env::var_os("GRAPHCODE_RUN_LIVE_DAEMON_TEST").is_none() {
+            return;
+        }
+
+        let endpoint = discover().unwrap();
+        let mut stream = transport::connect(&endpoint).await.unwrap();
+        negotiate(&mut stream).await.unwrap();
+        let (request_id, request) = request(json!({ "listRecentProjects": {} }));
+        write_frame(&mut stream, &request).await.unwrap();
+        let response = timeout(Duration::from_secs(15), read_frame(&mut stream))
+            .await
+            .expect("live daemon response timed out")
+            .unwrap();
+
+        assert!(response_matches_request(&response, request_id));
+        assert_eq!(
+            response.get("kind"),
+            Some(&Value::String("response".into()))
+        );
+        assert!(response["event"].get("recentProjectsListed").is_some());
+    }
 }

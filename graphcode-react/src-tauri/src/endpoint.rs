@@ -85,6 +85,23 @@ fn sha256_hex(bytes: &[u8]) -> String {
 }
 
 #[cfg(windows)]
+fn swift_standardized_support_identity(path: &Path) -> String {
+    normalize_lexically(path)
+        .to_string_lossy()
+        .replace('\\', "/")
+        .to_lowercase()
+}
+
+#[cfg(windows)]
+fn windows_pipe_name(sid: &str, support_hash: &str, rendezvous_hash: &str) -> String {
+    format!(
+        r"\\.\pipe\graphcode-{sid}-{}-{}",
+        &support_hash[..24],
+        &rendezvous_hash[..24]
+    )
+}
+
+#[cfg(windows)]
 fn discover_windows() -> Result<DaemonEndpoint, EndpointError> {
     if let Some(value) =
         env::var_os("GRAPHCODE_DAEMON_PIPE").or_else(|| env::var_os("GRAPHCODE_SOCKET"))
@@ -102,8 +119,7 @@ fn discover_windows() -> Result<DaemonEndpoint, EndpointError> {
             support.display().to_string(),
         ));
     }
-    let normalized = normalize_lexically(&support);
-    let support_identity = normalized.to_string_lossy().to_lowercase();
+    let support_identity = swift_standardized_support_identity(&support);
     let support_hash = sha256_hex(support_identity.as_bytes());
     let secret_path = support.join(".graphcode-rendezvous.secret");
     let secret = std::fs::read(&secret_path).map_err(|error| {
@@ -116,10 +132,10 @@ fn discover_windows() -> Result<DaemonEndpoint, EndpointError> {
     }
     let rendezvous_hash = sha256_hex(&secret);
     let sid = current_windows_sid()?;
-    Ok(DaemonEndpoint::NamedPipe(format!(
-        r"\\.\pipe\graphcode-{sid}-{}-{}",
-        &support_hash[..24],
-        &rendezvous_hash[..24]
+    Ok(DaemonEndpoint::NamedPipe(windows_pipe_name(
+        &sid,
+        &support_hash,
+        &rendezvous_hash,
     )))
 }
 
@@ -227,6 +243,35 @@ mod tests {
         assert_eq!(
             sha256_hex(b"graphcode"),
             "8f19c93e35d40aea60fc26b3f078e4d824ccc9254ee066bfb7fd50474805b8cf"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn support_identity_matches_swift_standardized_file_url_on_windows() {
+        let identity = swift_standardized_support_identity(Path::new(r"C:\Users\rsim\.graphcode"));
+
+        assert_eq!(identity, "c:/users/rsim/.graphcode");
+        assert_eq!(
+            &sha256_hex(identity.as_bytes())[..24],
+            "7ad9235de28c7263ad224621"
+        );
+        assert_ne!(
+            &sha256_hex(r"c:\users\rsim\.graphcode".as_bytes())[..24],
+            "7ad9235de28c7263ad224621"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn measured_windows_endpoint_matches_graphcodekit_identity() {
+        assert_eq!(
+            windows_pipe_name(
+                "S-1-12-1-26826728-1292762066-611294080-2095150415",
+                "7ad9235de28c7263ad2246210000000000000000000000000000000000000000",
+                "4b0610f0cafaa34bb20004830000000000000000000000000000000000000000",
+            ),
+            r"\\.\pipe\graphcode-S-1-12-1-26826728-1292762066-611294080-2095150415-7ad9235de28c7263ad224621-4b0610f0cafaa34bb2000483"
         );
     }
 }

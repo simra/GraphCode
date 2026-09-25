@@ -32,6 +32,52 @@ describe("decodeEnvelope", () => {
     expect(envelope.event.graph.nodes[0].state).toEqual({ running: {} });
   });
 
+  it("decodes Swift Codable single associated values wrapped under _0", () => {
+    const graphEnvelope = decodeEnvelope({
+      version: 2,
+      kind: "event",
+      sequence: 13,
+      event: {
+        graphChanged: {
+          _0: {
+            id: "graph-live",
+            project: { path: "C:\\work\\live", name: "Live Graph" },
+            nodes: [],
+            edges: [],
+          },
+        },
+      },
+    });
+    const projectsEnvelope = decodeEnvelope({
+      version: 2,
+      kind: "response",
+      requestID: "69ECFAE8-E0D0-48F3-AE5C-BBA390BD0B30",
+      event: {
+        recentProjectsListed: {
+          _0: [{ path: "C:\\work\\live", name: "Live Graph" }],
+        },
+      },
+    });
+
+    expect(graphEnvelope.kind).toBe("event");
+    if (
+      graphEnvelope.kind !== "event" ||
+      graphEnvelope.event.type !== "graphChanged"
+    ) {
+      throw new Error("Expected graphChanged event");
+    }
+    expect(graphEnvelope.event.graph.project.name).toBe("Live Graph");
+
+    expect(projectsEnvelope.kind).toBe("response");
+    if (
+      projectsEnvelope.kind !== "response" ||
+      projectsEnvelope.event?.type !== "recentProjectsListed"
+    ) {
+      throw new Error("Expected recentProjectsListed response");
+    }
+    expect(projectsEnvelope.event.projects[0].path).toBe("C:\\work\\live");
+  });
+
   it("rejects malformed response envelopes instead of silently defaulting", () => {
     expect(() =>
       decodeEnvelope({
