@@ -30,6 +30,7 @@ on a daemon-focused branch and must preserve v1/v2 compatibility.
 | DT-005 | Remote-aware templates and attachments | Needs investigation before classification | Remote New Loop template/attachment parity |
 | DT-006 | Remote zmx terminal streaming | Needs investigation before classification | Remote terminal parity |
 | DT-007 | Export/import and session transplantation | Needs investigation before classification | Remote/transactional import/export parity |
+| DT-008 | Shared settings-store bridging | Needs investigation before classification | Settings mutation and cross-client refresh |
 
 ## Confirmed daemon work
 
@@ -488,6 +489,71 @@ remote-host semantics need classification before React implements the workflow.
 - The decision names any new metadata-only daemon commands or proves existing
   `importNodes` is sufficient.
 
+### DT-008 — Shared settings-store bridging
+
+**Problem**
+
+The React UI can render settings controls, but it must not write
+`~/.graphcode/settings.json` until ownership between graphcoded, the existing native
+clients and a Tauri Rust adapter is explicit. A naive read-modify-write adapter can
+lose unknown fields, race another writer, or leave the daemon running with stale
+values that the UI presents as active.
+
+**Evidence and current limitation**
+
+- `GraphcodeSettingsStore` is the authoritative decoder/default/migration contract.
+- The current daemon protocol has no settings read/write event or revision.
+- Existing clients write the shared file directly, while graphcoded reads settings
+  at feature-specific points; live reload behavior is not one uniform contract.
+- Reimplementing Swift defaults and migrations independently in TypeScript or Rust
+  risks schema drift and destructive writes.
+
+**Investigation questions**
+
+1. Is one process intended to own writes, or may clients coordinate through atomic
+   file replacement and optimistic revision checks?
+2. Which settings take effect immediately, on the next command, or only after daemon
+   restart?
+3. How are unknown future fields preserved by an older Tauri client?
+4. Should the bridge invoke a small shared Swift settings helper, duplicate the
+   schema in Rust with golden fixtures, or add bounded settings commands/events?
+5. How do all clients learn that another writer changed the file?
+6. What validation and recovery behavior applies to corrupt or partially migrated
+   files?
+
+**Likely daemon/native files and types**
+
+- `GraphcodeKit/Sources/Domain/GraphcodeSettings.swift`
+- `GraphcodeKit/Sources/GraphcodeSettingsStore.swift`
+- feature-specific settings reads in `ProjectRegistry`, `GraphStore` and session
+  launch paths
+- Tauri Rust settings adapter if file ownership remains client-side
+- `DaemonProtocol.swift` only if graphcoded becomes the settings authority
+
+**Compatibility and security**
+
+- Preserve unknown fields and existing defaults/migrations.
+- Use atomic replacement, same-user permissions and explicit parse/validation
+  errors; never silently reset a corrupt file.
+- Do not log provider credentials, paths or future sensitive settings fields.
+- Surface restart-required versus live-applied values accurately.
+
+**Dependencies**
+
+- None for read-only presentation from a proven adapter.
+- Native menu/settings entry points may be built before mutation, but save/apply
+  remains blocked.
+
+**Acceptance criteria for classification**
+
+- A written ownership decision covers concurrent writers, revisions, unknown-field
+  preservation, live reload and restart-required values.
+- Golden fixtures prove the chosen adapter preserves Swift defaults, migrations and
+  unknown fields.
+- Concurrent-write and corrupt-file tests produce explicit recoverable errors.
+- The decision names exact daemon cases if graphcoded owns settings, or the exact
+  atomic native API if it does not.
+
 ## Existing daemon support is sufficient
 
 These are not daemon backlog items. They remain frontend/native tasks and must not
@@ -501,12 +567,15 @@ be used to justify protocol changes without new evidence.
 | DS-004 | Mailroom | Existing mailbox query/response and post/watch commands provide bounded read and mutations |
 | DS-005 | Persistent connection and replay | Existing v2 hello, stable client ID, `resumeFrom`, sequencing, subscriptions and replay errors are sufficient; implementation belongs in Rust |
 | DS-006 | Local zmx streaming | Direct Rust-to-zmx attach/read/write/resize/scrollback is the intended boundary; no graph daemon byte proxy is needed |
-| DS-007 | Settings-store bridging | `GraphcodeSettingsStore` is the established shared file contract; use a narrow atomic Rust adapter unless a separate multi-writer design review finds evidence otherwise |
 | DS-008 | Local templates and attachment staging | Existing filesystem formats and `NodeDraft` references are sufficient through narrow native adapters |
 | DS-009 | Local export/import bytes | Bundle construction/session installation remain native/client-side; existing `importNodes` performs the final graph mutation |
 | DS-010 | Project open/close/forget/delete/global/recents | Existing `DaemonCommand` cases are sufficient |
 | DS-011 | Quick Chats | Existing commands/events are sufficient |
 | DS-012 | Edge create/delete | Existing commands are sufficient; only editing an existing edge is DT-002 |
+
+DS-007 is retired and intentionally not reused. Settings-store bridging is now
+tracked by DT-008 because cross-client write authority, schema preservation and
+change notification were not proven by the existence of the file format alone.
 
 ## Investigation discipline
 
@@ -520,4 +589,3 @@ For each DT item:
 5. Do not create a parallel REST service or a second graph authority.
 6. Close the item by changing its classification, recording the decision, and
    linking the implementation commit or design document.
-

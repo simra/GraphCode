@@ -59,6 +59,70 @@ the fragmented native layout.
 Complexity is relative: **S** days, **M** roughly one focused engineering week,
 **L** multi-week or cross-layer work, **XL** a subsystem.
 
+## Remaining-work implementation boundary
+
+This register classifies every remaining capability at the layer where its next
+authoritative change belongs. "Frontend-only" includes React and narrow Tauri/Rust
+native integration that does not change `graphcoded` or its wire protocol.
+"Existing protocol" means the UI must send or consume the named current command or
+event and wait for authoritative daemon state. "Daemon/protocol" includes open
+ownership investigations where implementing a local-only approximation would create
+different local and remote behavior.
+
+### 1. Frontend/native only
+
+| Remaining capability | Correct implementation boundary |
+| --- | --- |
+| v1 fallback policy, daemon restart fault tests and byte-bounded client queues | Rust connection actor; current v1/v2 wire cases are sufficient |
+| Sidebar hierarchy, open/recent grouping, selection synchronization and attention aggregation | React state derived from existing project/graph snapshots |
+| Native Tauri menu, command palette destinations, contextual menus, shortcut reference and additional accelerators | Project the typed React command registry through Tauri menu events; do not add daemon commands |
+| Graph pan/zoom/fit, client layout, node positioning and local layout persistence | React SVG viewport plus a versioned Tauri app-data store |
+| Textual graph outline, live regions, axe/Narrator gates, focus restoration and color-independent status presentation | React/WebView accessibility work |
+| Responsive inspector/sheets, resizable panes, DPI handling, theme/high contrast and CSS token alignment | React/CSS and WebView monitor testing |
+| Local zmx byte streaming and xterm workspace UI | Dedicated Rust-to-zmx channel plus React/xterm; graph daemon byte proxy is not required for local sessions, while remote ownership remains DT-006 |
+| Tabs, splits, workspace layout and client-side workspace focus/navigation | React/native state after the terminal bridge exists |
+| Native picker/process shells for local folder ingress, Explorer integration, notifications, tray, updates, diagnostics collection, onboarding and packaging | Tauri/Rust/platform integration; project registration still uses existing daemon commands |
+| Local template discovery, local attachment staging and local export bundle bytes | Narrow Rust filesystem adapters using existing formats; remote semantics remain DT-005/DT-007 |
+| Error center, UI preferences, expansion state and recoverable client persistence | React plus atomic/versioned Tauri app-data files |
+
+### 2. Implementable with the existing daemon protocol
+
+| Remaining capability | Existing authoritative command/event |
+| --- | --- |
+| Open folder and recent/open project UX | `openProject`, `listRecentProjects`, `recentProjectsListed`, `graphChanged` |
+| Close, forget and delete project graph | `closeProject`, `forgetProject`, `deleteProjectGraph` |
+| Global overview | `openGlobalGraph` and ordinary `graphChanged` |
+| Quick Chats | `listQuickChats`, create/open/rename/delete commands and Quick Chat events |
+| Inspector rename/edit/message/memo/complete/restart/resume/delete/template detach | Existing `GraphCommand` cases; UI waits for `graphChanged`/`nodesChanged` |
+| Inspector usage refresh | `refreshUsage` plus authoritative node usage fields |
+| Inspector Mailroom read/post/watch | `mailbox`, `mailroomPost`, `mailroomWatch`, and `mailbox` event |
+| Composite drill-in and lifecycle | Snapshot `subGraph` plus `subGraphCommand`, `pilotComposite`, `armComposite` |
+| Sketch promotion | `promoteNode` with typed `SketchPromotion` |
+| Edge creation and deletion | `createEdge` and `deleteEdge`; editing an existing edge is excluded by DT-002 |
+| Graph rendering, state/attention, activity, summary, board and metrics | Existing `LoopGraph`/`LoopNode` snapshots and deltas |
+| New Loop fields already represented by `NodeDraft` | Existing `createNode`; local adapters may later populate attachments/template references |
+| Import's final authoritative graph merge | Existing `importNodes`; bundle/session transaction remains DT-007 |
+| Reconnect/replay and correlated mutation errors | Existing v2 hello, sequence, replay and response envelopes |
+
+### 3. Requires daemon/protocol or unresolved authority work
+
+| Backlog ID | Blocked capability | Boundary |
+| --- | --- | --- |
+| DT-001 | Bounded memory/playbook history | New daemon read API required |
+| DT-002 | Atomic edit of an existing edge | New `updateEdge`-style graph command required |
+| DT-003 | Project relocation | New authoritative relocation transaction/event required |
+| DT-004 | Transcript/session history | Ownership/channel decision and likely bounded daemon or authenticated native API required |
+| DT-005 | Remote-aware templates and attachments | Remote filesystem/upload authority is unresolved |
+| DT-006 | Remote zmx terminal streaming | Remote authenticated terminal channel/tunnel ownership is unresolved |
+| DT-007 | Export/import and session transplantation | Transaction, rollback and remote byte ownership are unresolved |
+| DT-008 | Shared settings-store bridging | Multi-writer authority, validation and notification contract must be resolved before React writes settings |
+
+The following must not be represented as working UI until the corresponding DT
+item closes: memory history, transcript/history, Move Project, atomic edge edit,
+remote template/attachment staging, remote terminal attach, transactional
+import/export, and settings mutation. Disabled surfaces may link to the DT item but
+must not fabricate data or perform delete/recreate/file-write approximations.
+
 ## Executive findings
 
 The React client is currently a live, read-only protocol demonstration:
