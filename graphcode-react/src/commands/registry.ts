@@ -41,6 +41,7 @@ export type CommandId =
   | "view.zoomOut"
   | "view.resetZoom"
   | "view.fitGraph"
+  | "view.resetLayout"
   | "selection.clear"
   | "selection.nextLoop"
   | "selection.previousLoop";
@@ -103,6 +104,7 @@ export interface CommandActions {
   zoomOut?(): void;
   resetZoom?(): void;
   fitGraph?(): void;
+  resetLayout?(): void;
   openNewEdge?(): void;
 }
 
@@ -756,6 +758,19 @@ export function createCommandRegistry(
       surfaces: ["canvas"],
       ...(graph && actions.fitGraph
         ? { enabled: true, execute: actions.fitGraph }
+        : {
+            ...unavailable("Select a graph first"),
+            execute: () => undefined,
+          }),
+    },
+    {
+      id: "view.resetLayout",
+      label: "Reset Layout",
+      description: "Return loops to the automatic dependency layout",
+      category: "View",
+      surfaces: ["canvas"],
+      ...(graph && actions.resetLayout
+        ? { enabled: true, execute: actions.resetLayout }
         : {
             ...unavailable("Select a graph first"),
             execute: () => undefined,

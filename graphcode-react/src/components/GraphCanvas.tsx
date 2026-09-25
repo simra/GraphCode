@@ -18,8 +18,9 @@ const verticalGap = 64;
 const padding = 52;
 const defaultViewportWidth = 900;
 const defaultViewportHeight = 420;
+const emptyNodePositions: Record<string, Position> = {};
 
-interface Position {
+export interface Position {
   x: number;
   y: number;
 }
@@ -44,6 +45,15 @@ interface PinchGesture {
   anchor: Position;
 }
 
+interface NodeDrag {
+  nodeId: string;
+  pointerId: number;
+  clientX: number;
+  clientY: number;
+  origin: Position;
+  moved: boolean;
+}
+
 export interface GraphLayout {
   positions: Map<string, Position>;
   width: number;
@@ -62,6 +72,7 @@ export interface GraphCanvasHandle {
   zoomOut(): void;
   resetZoom(): void;
   fitGraph(): void;
+  resetLayout(): void;
 }
 
 export function edgeTargetAtPoint(
@@ -191,6 +202,33 @@ export function buildGraphLayout(
   };
 }
 
+export function applyNodePositions(
+  layout: GraphLayout,
+  nodes: LoopNode[],
+  savedPositions: Record<string, Position>,
+): GraphLayout {
+  const nodeIds = new Set(nodes.map((node) => node.id));
+  const positions = new Map(layout.positions);
+  for (const [nodeId, position] of Object.entries(savedPositions)) {
+    if (nodeIds.has(nodeId)) positions.set(nodeId, position);
+  }
+  return {
+    positions,
+    width: Math.max(
+      layout.width,
+      ...[...positions.values()].map(
+        (position) => position.x + cardWidth + padding,
+      ),
+    ),
+    height: Math.max(
+      layout.height,
+      ...[...positions.values()].map(
+        (position) => position.y + cardHeight + padding,
+      ),
+    ),
+  };
+}
+
 function fittedViewport(layout: GraphLayout): Viewport {
   return {
     x: 0,
@@ -235,11 +273,13 @@ export const GraphCanvas = forwardRef<
     commands?: AppCommand[];
     pendingCommandId?: string;
     initialViewport?: Viewport;
+    initialNodePositions?: Record<string, Position>;
     viewportKey?: string;
     onSelectNode?(nodeId: string): void;
     onExecuteCommand?(command: AppCommand): void;
     onCreateEdge?(from: string, to: string): void;
     onViewportChange?(viewport: Viewport): void;
+    onNodePositionsChange?(positions: Record<string, Position>): void;
     edgeCommands?(edge: LoopEdge): AppCommand[];
   }
 >(function GraphCanvas(
@@ -249,18 +289,29 @@ export const GraphCanvas = forwardRef<
     commands = [],
     pendingCommandId,
     initialViewport,
+    initialNodePositions = emptyNodePositions,
     viewportKey,
     onSelectNode,
     onExecuteCommand = () => undefined,
     onCreateEdge,
     onViewportChange,
+    onNodePositionsChange,
     edgeCommands = () => [],
   },
   ref,
 ) {
-  const layout = useMemo(
+  const automaticLayout = useMemo(
     () => buildGraphLayout(graph?.nodes ?? [], graph?.edges ?? []),
     [graph?.edges, graph?.nodes],
+  );
+  const [nodePositions, setNodePositions] =
+    useState<Record<string, Position>>(initialNodePositions);
+  const nodePositionsRef = useRef(nodePositions);
+  nodePositionsRef.current = nodePositions;
+  const layout = useMemo(
+    () =>
+      applyNodePositions(automaticLayout, graph?.nodes ?? [], nodePositions),
+    [automaticLayout, graph?.nodes, nodePositions],
   );
   const [viewport, setViewport] = useState<Viewport>(() =>
     fittedViewport(layout),
@@ -269,15 +320,18 @@ export const GraphCanvas = forwardRef<
   const [edgeDrag, setEdgeDrag] = useState<EdgeDrag>();
   const dragRef = useRef<{ x: number; y: number } | undefined>(undefined);
   const edgeDragRef = useRef<EdgeDrag | undefined>(undefined);
+  const nodeDragRef = useRef<NodeDrag | undefined>(undefined);
   const touchPointersRef = useRef(new Map<number, PointerSample>());
   const pinchRef = useRef<PinchGesture | undefined>(undefined);
   const suppressClickRef = useRef(false);
   const svgRef = useRef<SVGSVGElement>(null);
   const onViewportChangeRef = useRef(onViewportChange);
+  const onNodePositionsChangeRef = useRef(onNodePositionsChange);
   onViewportChangeRef.current = onViewportChange;
+  onNodePositionsChangeRef.current = onNodePositionsChange;
 
   useEffect(() => {
-    const next = initialViewport ?? fittedViewport(layout);
+    const next = initialViewport ?? fittedViewport(automaticLayout);
     setViewport((current) =>
       current.x === next.x &&
       current.y === next.y &&
@@ -297,9 +351,25 @@ export const GraphCanvas = forwardRef<
     initialViewport?.width,
     initialViewport?.x,
     initialViewport?.y,
-    layout,
+    automaticLayout,
     viewportKey,
   ]);
+
+  useEffect(() => {
+    setNodePositions((current) => {
+      const currentEntries = Object.entries(current);
+      const nextEntries = Object.entries(initialNodePositions);
+      return currentEntries.length === nextEntries.length &&
+        nextEntries.every(
+          ([nodeId, position]) =>
+            current[nodeId]?.x === position.x &&
+            current[nodeId]?.y === position.y,
+        )
+        ? current
+        : initialNodePositions;
+    });
+    nodeDragRef.current = undefined;
+  }, [graph?.id, initialNodePositions, viewportKey]);
 
   useEffect(() => {
     onViewportChangeRef.current?.(viewport);
@@ -339,6 +409,11 @@ export const GraphCanvas = forwardRef<
           height: defaultViewportHeight,
         }),
       fitGraph: () => setViewport(fittedViewport(layout)),
+      resetLayout: () => {
+        nodePositionsRef.current = {};
+        setNodePositions({});
+        onNodePositionsChangeRef.current?.({});
+      },
     }),
     [layout],
   );
@@ -422,6 +497,10 @@ export const GraphCanvas = forwardRef<
     dragRef.current = undefined;
     edgeDragRef.current = undefined;
     setEdgeDrag(undefined);
+    if (nodeDragRef.current?.moved) {
+      onNodePositionsChangeRef.current?.(nodePositionsRef.current);
+    }
+    nodeDragRef.current = undefined;
   }
 
   function movePinch(event: ReactPointerEvent<SVGSVGElement>) {
@@ -479,6 +558,55 @@ export const GraphCanvas = forwardRef<
         suppressClickRef.current = false;
       }, 0);
     }
+  }
+
+  function moveNode(event: ReactPointerEvent<SVGSVGElement>) {
+    const current = nodeDragRef.current;
+    const bounds = svgRef.current?.getBoundingClientRect();
+    if (
+      !current ||
+      current.pointerId !== event.pointerId ||
+      !bounds?.width ||
+      !bounds.height
+    ) {
+      return false;
+    }
+    const deltaX =
+      ((event.clientX - current.clientX) / bounds.width) * viewport.width;
+    const deltaY =
+      ((event.clientY - current.clientY) / bounds.height) * viewport.height;
+    const next = {
+      x: Math.max(0, current.origin.x + deltaX),
+      y: Math.max(0, current.origin.y + deltaY),
+    };
+    const moved =
+      current.moved ||
+      Math.hypot(
+        event.clientX - current.clientX,
+        event.clientY - current.clientY,
+      ) >= 3;
+    nodeDragRef.current = { ...current, moved };
+    if (moved) {
+      const positions = {
+        ...nodePositionsRef.current,
+        [current.nodeId]: next,
+      };
+      nodePositionsRef.current = positions;
+      setNodePositions(positions);
+    }
+    return true;
+  }
+
+  function finishNode(pointerId: number) {
+    const current = nodeDragRef.current;
+    if (!current || current.pointerId !== pointerId) return;
+    nodeDragRef.current = undefined;
+    if (!current.moved) return;
+    suppressClickRef.current = true;
+    window.setTimeout(() => {
+      suppressClickRef.current = false;
+    }, 0);
+    onNodePositionsChangeRef.current?.(nodePositionsRef.current);
   }
 
   function moveEdge(event: ReactPointerEvent<SVGSVGElement>) {
@@ -566,8 +694,9 @@ export const GraphCanvas = forwardRef<
       </div>
       <p id="graph-keyboard-instructions" className="canvas-help">
         Tab to a loop or edge. Arrow keys move between nearby loops; Home and
-        End jump to the first and last loop. Enter or Space selects. Wheel and
-        pinch zoom stay anchored beneath the pointer or touch midpoint.
+        End jump to the first and last loop. Alt+Arrow repositions a loop, and
+        Enter or Space selects. Wheel and pinch zoom stay anchored beneath the
+        pointer or touch midpoint.
       </p>
       <div className="canvas-scroll">
         <svg
@@ -596,10 +725,13 @@ export const GraphCanvas = forwardRef<
           }}
           onPointerMove={pan}
           onPointerMoveCapture={(event) => {
-            if (movePinch(event) || moveEdge(event)) event.stopPropagation();
+            if (movePinch(event) || moveNode(event) || moveEdge(event)) {
+              event.stopPropagation();
+            }
           }}
           onPointerUp={(event) => {
             endTouch(event);
+            finishNode(event.pointerId);
             finishEdge(event.pointerId);
             dragRef.current = undefined;
             if (event.currentTarget.hasPointerCapture(event.pointerId)) {
@@ -608,6 +740,7 @@ export const GraphCanvas = forwardRef<
           }}
           onPointerCancel={(event) => {
             endTouch(event);
+            finishNode(event.pointerId);
             dragRef.current = undefined;
             edgeDragRef.current = undefined;
             setEdgeDrag(undefined);
@@ -618,9 +751,10 @@ export const GraphCanvas = forwardRef<
             {graph.nodes.length} loops connected by {graph.edges.length} edges.
             Use the toolbar or keyboard shortcuts to zoom, and drag the
             background to pan. Wheel and pinch zoom remain anchored beneath the
-            pointer or touch midpoint. Drag from a loop connection handle to
-            another loop to configure an edge, or use New Edge for a keyboard
-            accessible alternative.
+            pointer or touch midpoint. Drag a loop to reposition it, or use
+            Alt+Arrow. Drag from a loop connection handle to another loop to
+            configure an edge, or use New Edge for a keyboard accessible
+            alternative.
           </desc>
           <defs>
             <pattern
@@ -725,13 +859,55 @@ export const GraphCanvas = forwardRef<
                 role="button"
                 aria-label={`${node.title}, ${node.loopType ?? "loop"}, ${state}${selected ? ", selected" : ""}`}
                 aria-pressed={selected}
-                aria-keyshortcuts="ArrowLeft ArrowRight ArrowUp ArrowDown Home End Enter Space"
+                aria-keyshortcuts="ArrowLeft ArrowRight ArrowUp ArrowDown Alt+ArrowLeft Alt+ArrowRight Alt+ArrowUp Alt+ArrowDown Home End Enter Space"
                 tabIndex={selected || (!selectedNodeId && index === 0) ? 0 : -1}
                 onClick={selectNode}
+                onPointerDown={(event) => {
+                  if (
+                    event.button !== 0 ||
+                    (event.target as Element).closest(".edge-drag-handle")
+                  ) {
+                    return;
+                  }
+                  event.stopPropagation();
+                  nodeDragRef.current = {
+                    nodeId: node.id,
+                    pointerId: event.pointerId,
+                    clientX: event.clientX,
+                    clientY: event.clientY,
+                    origin: position,
+                    moved: false,
+                  };
+                  svgRef.current?.setPointerCapture(event.pointerId);
+                }}
                 onKeyDown={(event) => {
                   if (event.key === "Enter" || event.key === " ") {
                     event.preventDefault();
                     selectNode();
+                    return;
+                  }
+                  const nudge =
+                    event.key === "ArrowRight"
+                      ? { x: 24, y: 0 }
+                      : event.key === "ArrowLeft"
+                        ? { x: -24, y: 0 }
+                        : event.key === "ArrowDown"
+                          ? { x: 0, y: 24 }
+                          : event.key === "ArrowUp"
+                            ? { x: 0, y: -24 }
+                            : undefined;
+                  if (event.altKey && nudge) {
+                    event.preventDefault();
+                    const positions = {
+                      ...nodePositionsRef.current,
+                      [node.id]: {
+                        x: Math.max(0, position.x + nudge.x),
+                        y: Math.max(0, position.y + nudge.y),
+                      },
+                    };
+                    nodePositionsRef.current = positions;
+                    setNodePositions(positions);
+                    onNodePositionsChangeRef.current?.(positions);
                     return;
                   }
                   const direction: GraphDirection | undefined =
