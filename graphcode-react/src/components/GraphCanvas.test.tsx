@@ -6,6 +6,7 @@ import {
   buildGraphLayout,
   edgeTargetAtPoint,
   GraphCanvas,
+  zoomedViewport,
 } from "./GraphCanvas";
 
 const nodes: LoopNode[] = [
@@ -69,6 +70,33 @@ describe("graph layout", () => {
         y: target.y + 20,
       }),
     ).toBeUndefined();
+  });
+
+  it("keeps the graph point beneath the pointer fixed while zooming", () => {
+    const viewport = { x: 0, y: 0, width: 1000, height: 500 };
+    const anchor = { x: 250, y: 100 };
+    const zoomed = zoomedViewport(viewport, 2, 100, 4000, anchor);
+
+    expect(zoomed).toEqual({
+      x: 125,
+      y: 50,
+      width: 500,
+      height: 250,
+    });
+    expect((anchor.x - zoomed.x) / zoomed.width).toBe(0.25);
+    expect((anchor.y - zoomed.y) / zoomed.height).toBe(0.2);
+  });
+
+  it("supports a moved pinch midpoint without changing its graph anchor", () => {
+    const viewport = { x: 0, y: 0, width: 1000, height: 500 };
+    const anchor = { x: 500, y: 250 };
+    const zoomed = zoomedViewport(viewport, 2, 100, 4000, anchor, {
+      x: 0.6,
+      y: 0.4,
+    });
+
+    expect(zoomed.x + zoomed.width * 0.6).toBe(anchor.x);
+    expect(zoomed.y + zoomed.height * 0.4).toBe(anchor.y);
   });
 
   it("exposes pointer connection handles and describes the keyboard alternative", () => {
