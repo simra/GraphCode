@@ -82,3 +82,9 @@ until DT-002 defines an atomic daemon contract.
 Run `npm run test:a11y` for the axe-core/jsdom semantic gate. The packaged Windows
 Narrator, touch, DPI, contrast-theme, and focus-restoration procedure is documented in
 [`ACCESSIBILITY.md`](ACCESSIBILITY.md).
+
+A single atomic polite live region announces connection transitions, stable
+loop/edge/chat selection changes, and successful mutations only after their
+correlated daemon command completes. Visible errors remain assertive alerts. Project
+local/remote grouping is intentionally blocked on DT-010 because current `ProjectRef`
+snapshots contain no authoritative location kind.

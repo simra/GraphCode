@@ -592,6 +592,40 @@ Mailroom or a child graph Mailroom.
 - A nested cursor advance cannot mark parent or sibling mail read accidentally.
 - Old clients retain their current top-level project behavior.
 
+### DT-010 — Authoritative project location classification
+
+**Problem**
+
+The sidebar cannot group open or recent projects as local, SSH remote, or Codespace
+without an authoritative project location field.
+
+**Evidence and current limitation**
+
+- `ProjectRef` carries only `path`, `name`, and optional `lastOpenedAt`.
+- `LoopGraph.project` reuses `ProjectRef`; graph snapshots add no host or location
+  metadata.
+- Inferring locality from Windows paths, URI schemes, names, environment variables, or
+  worktree bindings would misclassify valid projects and duplicate ingress authority.
+- React therefore keeps one Open/Recent grouping and does not label projects as local
+  or remote.
+
+**Investigation questions**
+
+1. Which existing project registry type owns local/SSH/Codespace classification?
+2. Should `ProjectRef` gain an additive location enum, or should a separate project
+   metadata event carry location and display-host details?
+3. Which capability fields are needed for Explorer/reveal, templates, attachments,
+   terminals, and diagnostics without exposing credentials?
+4. How are older persisted recent-project entries migrated when location metadata is
+   absent?
+
+**Acceptance criteria**
+
+- Open and recent project events expose a stable additive location classification.
+- Local, SSH, and Codespace fixtures cover identical-looking paths and names.
+- No credential, SSH command, token, or sensitive host configuration is serialized.
+- Old clients continue decoding project references and retain their current grouping.
+
 ## Existing daemon support is sufficient
 
 These are not daemon backlog items. They remain frontend/native tasks and must not
