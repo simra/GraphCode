@@ -53,6 +53,12 @@ export type AppAction =
   | { type: "selectQuickChat"; id: string }
   | { type: "selectMailroom" }
   | { type: "selectProject"; path: string }
+  | {
+      type: "selectGraphLocation";
+      projectPath: string;
+      compositePath: string[];
+      nodeId?: string;
+    }
   | { type: "enterComposite"; nodeId: string }
   | { type: "leaveComposite"; depth: number }
   | {
@@ -324,6 +330,28 @@ export function appReducer(state: AppState, action: AppAction): AppState {
             selectedNodeId: undefined,
           }
         : state;
+    case "selectGraphLocation": {
+      const root = state.graphs[action.projectPath];
+      if (!root) return state;
+      const compositePath = validCompositePath(root, action.compositePath);
+      if (compositePath.length !== action.compositePath.length) return state;
+      const graph = graphAtPath(root, compositePath);
+      if (
+        action.nodeId &&
+        !graph?.nodes.some((node) => node.id === action.nodeId)
+      ) {
+        return state;
+      }
+      return {
+        ...state,
+        quickChatsSelected: false,
+        mailroomSelected: false,
+        selectedQuickChatId: undefined,
+        selectedProjectPath: action.projectPath,
+        compositePath,
+        selectedNodeId: action.nodeId,
+      };
+    }
     case "enterComposite": {
       const graph = currentGraph(state);
       const node = graph?.nodes.find(

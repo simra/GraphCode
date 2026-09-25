@@ -234,6 +234,106 @@ button:focus-visible,
   align-self: center;
 }
 
+.project-graph-tree {
+  margin: 5px 0 0 30px;
+  padding-left: 8px;
+  border-left: 1px solid #343b31;
+}
+
+.project-graph-tree ul {
+  display: grid;
+  gap: 3px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.project-graph-tree ul ul {
+  margin: 3px 0 2px 16px;
+  padding-left: 8px;
+  border-left: 1px solid #343b31;
+}
+
+.project-tree-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 26px 26px;
+  gap: 2px;
+}
+
+.project-tree-node {
+  display: grid;
+  min-width: 0;
+  grid-column: 1;
+  grid-template-columns: 16px minmax(0, 1fr);
+  gap: 5px;
+  padding: 6px 7px;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  color: #c4cbc0;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
+
+.project-tree-node > span:last-child {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.project-tree-node strong,
+.project-tree-node small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.project-tree-node small {
+  color: #899285;
+  text-transform: capitalize;
+}
+
+.project-tree-node:hover,
+.project-tree-node.project-selected {
+  border-color: #465743;
+  background: #252d23;
+}
+
+.project-tree-open,
+.project-tree-toggle {
+  display: grid;
+  width: 26px;
+  height: 26px;
+  align-self: center;
+  place-items: center;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  color: #aeb8aa;
+  background: transparent;
+  cursor: pointer;
+}
+
+.project-tree-open:hover,
+.project-tree-toggle:hover {
+  border-color: #465743;
+  background: #252d23;
+}
+
+.project-tree-open {
+  grid-column: 2;
+}
+
+.project-tree-toggle {
+  grid-column: 3;
+}
+
+.project-graph-tree p {
+  margin: 6px 8px;
+  color: #899285;
+  font-size: 0.76rem;
+}
+
 .project-row-actions {
   position: absolute;
   top: 7px;

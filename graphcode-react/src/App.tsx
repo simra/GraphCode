@@ -46,6 +46,7 @@ import { NewLoopDialog } from "./components/NewLoopDialog";
 import { NewQuickChatDialog } from "./components/NewQuickChatDialog";
 import { NewEdgeDialog } from "./components/NewEdgeDialog";
 import { NodeInspector } from "./components/NodeInspector";
+import { ProjectGraphTree } from "./components/ProjectGraphTree";
 import { ProjectRowActions } from "./components/ProjectRowActions";
 import { QuickChatsView } from "./components/QuickChatsView";
 import { initialSnapshotFixture } from "./fixtures/initialSnapshot";
@@ -902,31 +903,54 @@ export default function App() {
                   onExecute={(command) => void executeCommand(command)}
                 />
                 {project.path === state.selectedProjectPath ? (
-                  <button
-                    className={`project-mailroom-link ${
-                      state.mailroomSelected ? "project-selected" : ""
-                    }`}
-                    type="button"
-                    disabled={
-                      !commands.find(
-                        (command) => command.id === "project.openMailroom",
-                      )?.enabled
-                    }
-                    onClick={() => {
-                      const command = commands.find(
-                        (candidate) => candidate.id === "project.openMailroom",
-                      );
-                      if (command) void executeCommand(command);
-                    }}
-                  >
-                    <span aria-hidden="true">✉</span>
-                    <span>Mailroom</span>
-                    <small>
-                      {state.mailboxes[project.path]?.digest.count ??
-                        state.graphs[project.path]?.mailroomDigest?.count ??
-                        0}
-                    </small>
-                  </button>
+                  <>
+                    <button
+                      className={`project-mailroom-link ${
+                        state.mailroomSelected ? "project-selected" : ""
+                      }`}
+                      type="button"
+                      disabled={
+                        !commands.find(
+                          (command) => command.id === "project.openMailroom",
+                        )?.enabled
+                      }
+                      onClick={() => {
+                        const command = commands.find(
+                          (candidate) =>
+                            candidate.id === "project.openMailroom",
+                        );
+                        if (command) void executeCommand(command);
+                      }}
+                    >
+                      <span aria-hidden="true">✉</span>
+                      <span>Mailroom</span>
+                      <small>
+                        {state.mailboxes[project.path]?.digest.count ??
+                          state.graphs[project.path]?.mailroomDigest?.count ??
+                          0}
+                      </small>
+                    </button>
+                    <ProjectGraphTree
+                      graph={state.graphs[project.path]}
+                      compositePath={state.compositePath}
+                      selectedNodeId={state.selectedNodeId}
+                      onSelectNode={(compositePath, nodeId) =>
+                        dispatch({
+                          type: "selectGraphLocation",
+                          projectPath: project.path,
+                          compositePath,
+                          nodeId,
+                        })
+                      }
+                      onOpenGraph={(compositePath) =>
+                        dispatch({
+                          type: "selectGraphLocation",
+                          projectPath: project.path,
+                          compositePath,
+                        })
+                      }
+                    />
+                  </>
                 ) : null}
               </li>
             ))}
