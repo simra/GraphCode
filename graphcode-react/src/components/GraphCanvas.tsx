@@ -71,6 +71,42 @@ export function edgeTargetAtPoint(
   })?.id;
 }
 
+type GraphDirection = "left" | "right" | "up" | "down";
+
+export function adjacentNodeId(
+  nodeId: string,
+  direction: GraphDirection,
+  positions: Map<string, Position>,
+): string | undefined {
+  const origin = positions.get(nodeId);
+  if (!origin) return undefined;
+  let best: { id: string; score: number } | undefined;
+  for (const [candidateId, candidate] of positions) {
+    if (candidateId === nodeId) continue;
+    const dx = candidate.x - origin.x;
+    const dy = candidate.y - origin.y;
+    const primary =
+      direction === "right"
+        ? dx
+        : direction === "left"
+          ? -dx
+          : direction === "down"
+            ? dy
+            : -dy;
+    if (primary <= 0) continue;
+    const cross =
+      direction === "left" || direction === "right"
+        ? Math.abs(dy)
+        : Math.abs(dx);
+    if (cross > primary * 2) continue;
+    const score = primary + cross * 2;
+    if (!best || score < best.score) {
+      best = { id: candidateId, score };
+    }
+  }
+  return best?.id;
+}
+
 function stateLabel(node: LoopNode): string {
   if (typeof node.state === "string") return node.state;
   return Object.keys(node.state)[0] ?? "unknown";
@@ -349,6 +385,10 @@ export const GraphCanvas = forwardRef<
           ))}
         </div>
       </div>
+      <p id="graph-keyboard-instructions" className="canvas-help">
+        Tab to a loop or edge. Arrow keys move between nearby loops; Home and
+        End jump to the first and last loop. Enter or Space selects.
+      </p>
       <div className="canvas-scroll">
         <svg
           ref={svgRef}
@@ -356,7 +396,7 @@ export const GraphCanvas = forwardRef<
           viewBox={`${viewport.x} ${viewport.y} ${viewport.width} ${viewport.height}`}
           role="group"
           aria-labelledby="graph-svg-title graph-svg-description"
-          tabIndex={0}
+          aria-describedby="graph-keyboard-instructions"
           onWheel={wheelZoom}
           onPointerDown={(event) => {
             if (
@@ -393,6 +433,33 @@ export const GraphCanvas = forwardRef<
             alternative.
           </desc>
           <defs>
+            <pattern
+              id="goal-pattern"
+              width="6"
+              height="6"
+              patternUnits="userSpaceOnUse"
+            >
+              <rect width="6" height="6" fill="#c88d58" />
+              <path d="M-1,1 L1,-1 M0,6 L6,0 M5,7 L7,5" stroke="#1b1f19" />
+            </pattern>
+            <pattern
+              id="turn-pattern"
+              width="6"
+              height="6"
+              patternUnits="userSpaceOnUse"
+            >
+              <rect width="6" height="6" fill="#74a4c7" />
+              <circle cx="3" cy="3" r="1.3" fill="#1b1f19" />
+            </pattern>
+            <pattern
+              id="proactive-pattern"
+              width="6"
+              height="6"
+              patternUnits="userSpaceOnUse"
+            >
+              <rect width="6" height="6" fill="#a987c7" />
+              <path d="M0,3 H6 M3,0 V6" stroke="#1b1f19" />
+            </pattern>
             <marker
               id="arrow"
               markerWidth="10"
@@ -424,8 +491,9 @@ export const GraphCanvas = forwardRef<
                 style={{ pointerEvents: "stroke" }}
                 role="button"
                 tabIndex={0}
-                aria-label={`Edge from ${fromTitle} to ${toTitle}`}
+                aria-label={`Edge from ${fromTitle} to ${toTitle}, ${edge.kind ?? "connection"}${edge.fireCount ? `, fired ${edge.fireCount} time${edge.fireCount === 1 ? "" : "s"}` : ""}`}
                 aria-pressed={selectedEdgeKey === edgeKey}
+                aria-keyshortcuts="Enter Space Escape"
                 onClick={(event) => {
                   event.stopPropagation();
                   setSelectedEdgeKey(
@@ -465,8 +533,9 @@ export const GraphCanvas = forwardRef<
                 className={`graph-node${selected ? " graph-node-selected" : ""}${edgeDrag?.sourceId === node.id ? " graph-node-edge-source" : ""}${edgeDrag?.targetId === node.id ? " graph-node-edge-target" : ""}`}
                 transform={`translate(${position.x} ${position.y})`}
                 role="button"
-                aria-label={`${node.title}, ${state}`}
+                aria-label={`${node.title}, ${node.loopType ?? "loop"}, ${state}${selected ? ", selected" : ""}`}
                 aria-pressed={selected}
+                aria-keyshortcuts="ArrowLeft ArrowRight ArrowUp ArrowDown Home End Enter Space"
                 tabIndex={selected || (!selectedNodeId && index === 0) ? 0 : -1}
                 onClick={selectNode}
                 onKeyDown={(event) => {
@@ -475,22 +544,29 @@ export const GraphCanvas = forwardRef<
                     selectNode();
                     return;
                   }
-                  const direction =
-                    event.key === "ArrowRight" || event.key === "ArrowDown"
-                      ? 1
-                      : event.key === "ArrowLeft" || event.key === "ArrowUp"
-                        ? -1
-                        : 0;
-                  if (!direction) return;
+                  const direction: GraphDirection | undefined =
+                    event.key === "ArrowRight"
+                      ? "right"
+                      : event.key === "ArrowLeft"
+                        ? "left"
+                        : event.key === "ArrowDown"
+                          ? "down"
+                          : event.key === "ArrowUp"
+                            ? "up"
+                            : undefined;
+                  const nextId =
+                    event.key === "Home"
+                      ? graph.nodes[0]?.id
+                      : event.key === "End"
+                        ? graph.nodes.at(-1)?.id
+                        : direction
+                          ? adjacentNodeId(node.id, direction, layout.positions)
+                          : undefined;
+                  if (!nextId) return;
                   event.preventDefault();
-                  const next =
-                    graph.nodes[
-                      (index + direction + graph.nodes.length) %
-                        graph.nodes.length
-                    ];
-                  onSelectNode?.(next.id);
+                  onSelectNode?.(nextId);
                   requestAnimationFrame(() =>
-                    document.getElementById(`graph-node-${next.id}`)?.focus(),
+                    document.getElementById(`graph-node-${nextId}`)?.focus(),
                   );
                 }}
               >
@@ -510,6 +586,25 @@ export const GraphCanvas = forwardRef<
                 <text className={`node-state state-${state}`} x="22" y="86">
                   {state.toUpperCase()}
                 </text>
+                <text
+                  className="node-kind"
+                  x={cardWidth - 16}
+                  y="86"
+                  textAnchor="end"
+                >
+                  {node.loopType ?? "loop"}
+                </text>
+                {selected ? (
+                  <text
+                    className="node-selection-indicator"
+                    x={cardWidth - 17}
+                    y="27"
+                    textAnchor="end"
+                    aria-hidden="true"
+                  >
+                    ✓
+                  </text>
+                ) : null}
                 {onCreateEdge ? (
                   <circle
                     className="edge-drag-handle"

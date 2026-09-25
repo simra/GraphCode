@@ -1045,6 +1045,16 @@ kbd {
   overflow: hidden;
 }
 
+.canvas-help {
+  margin: 0;
+  padding: 8px 18px;
+  border-top: 1px solid #2d322b;
+  border-bottom: 1px solid #2d322b;
+  color: #98a194;
+  background: #171a16;
+  font-size: 0.76rem;
+}
+
 .graph-canvas {
   display: block;
   width: 100%;
@@ -1070,6 +1080,7 @@ kbd {
 
 .graph-edge-fired {
   stroke: #799b70;
+  stroke-dasharray: 9 5;
 }
 
 .graph-edge:hover,
@@ -1078,6 +1089,10 @@ kbd {
   stroke: #b9d5ae;
   stroke-width: 4;
   outline: none;
+}
+
+.graph-edge-selected {
+  stroke-dasharray: 2 3;
 }
 
 .graph-edge-preview {
@@ -1103,9 +1118,10 @@ kbd {
   stroke-width: 1.5;
 }
 
-.graph-node:focus rect:first-child {
+.graph-node:focus-visible rect:first-child {
   stroke: #9ecb91;
-  stroke-width: 2.5;
+  stroke-width: 3.5;
+  stroke-dasharray: 7 4;
 }
 
 .graph-node {
@@ -1162,15 +1178,27 @@ kbd {
 }
 
 .node-goalBased {
-  fill: #c88d58;
+  fill: url("#goal-pattern");
 }
 
 .node-turnBased {
-  fill: #74a4c7;
+  fill: url("#turn-pattern");
 }
 
 .node-proactive {
-  fill: #9a7bc0;
+  fill: url("#proactive-pattern");
+}
+
+.node-kind {
+  fill: #899285;
+  font-size: 10px;
+  text-transform: uppercase;
+}
+
+.node-selection-indicator {
+  fill: #d5e8cf;
+  font-size: 18px;
+  font-weight: 700;
 }
 
 .node-title {
