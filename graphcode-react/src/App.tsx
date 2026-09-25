@@ -25,6 +25,7 @@ import {
 } from "./commands/nativeMenu";
 import { CommandPalette } from "./components/CommandPalette";
 import { ConnectionBanner } from "./components/ConnectionBanner";
+import { EditLoopDialog } from "./components/EditLoopDialog";
 import { GraphCanvas, type GraphCanvasHandle } from "./components/GraphCanvas";
 import { LoopTextDialog } from "./components/LoopTextDialog";
 import { NewLoopDialog } from "./components/NewLoopDialog";
@@ -41,6 +42,7 @@ import {
   resumeSessionCommand,
   stopNodeCommand,
   type NodeDraftPayload,
+  updateNodeCommand,
 } from "./protocol/commands";
 import { appReducer, initialAppState, selectedNode } from "./state/graphState";
 import { deriveProjectNavigation } from "./state/projectNavigation";
@@ -49,6 +51,10 @@ export default function App() {
   const [state, dispatch] = useReducer(appReducer, initialAppState);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [newLoopOpen, setNewLoopOpen] = useState(false);
+  const [editingLoop, setEditingLoop] = useState<{
+    projectPath: string;
+    node: NonNullable<ReturnType<typeof selectedNode>>;
+  }>();
   const [pendingCreatedNode, setPendingCreatedNode] = useState<{
     projectPath: string;
     nodeId: string;
@@ -194,6 +200,14 @@ export default function App() {
                   projectPath: selectedProjectPath,
                   nodeId: inspectedNode.id,
                   nodeTitle: inspectedNode.title,
+                })
+            : undefined,
+        editNode:
+          selectedProjectPath && inspectedNode
+            ? () =>
+                setEditingLoop({
+                  projectPath: selectedProjectPath,
+                  node: inspectedNode,
                 })
             : undefined,
         restartSession:
@@ -562,6 +576,21 @@ export default function App() {
               setPendingCreatedNode(undefined);
               throw error;
             }
+          }}
+        />
+      ) : null}
+      {editingLoop ? (
+        <EditLoopDialog
+          node={editingLoop.node}
+          onClose={() => setEditingLoop(undefined)}
+          onSave={async (update) => {
+            await sendDaemonCommand(
+              updateNodeCommand(
+                editingLoop.projectPath,
+                editingLoop.node.id,
+                update,
+              ),
+            );
           }}
         />
       ) : null}

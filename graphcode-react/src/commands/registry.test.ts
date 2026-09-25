@@ -59,6 +59,7 @@ describe("command registry", () => {
       clearSelection: vi.fn(),
       selectNode: vi.fn(),
       renameNode: vi.fn(),
+      editNode: vi.fn(),
       restartSession: vi.fn(async () => undefined),
       completeNode: vi.fn(),
       deleteNode: vi.fn(async () => undefined),
@@ -68,6 +69,7 @@ describe("command registry", () => {
 
     for (const id of [
       "loop.rename",
+      "loop.edit",
       "loop.restartSession",
       "loop.delete",
       "loop.refreshUsage",
