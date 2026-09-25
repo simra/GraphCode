@@ -335,6 +335,23 @@ describe("appReducer", () => {
     expect(mailroom.compositePath).toEqual([]);
     expect(mailroom.selectedNodeId).toBeUndefined();
 
+    const sidebarSelection = appReducer(mailroom, {
+      type: "selectGraphLocation",
+      projectPath: "C:\\work\\nested",
+      compositePath: ["parent"],
+      nodeId: "child-node",
+    });
+    expect(currentGraph(sidebarSelection)?.id).toBe("child");
+    expect(selectedNode(sidebarSelection)?.title).toBe("Child");
+    expect(sidebarSelection.mailroomSelected).toBe(false);
+    expect(
+      appReducer(sidebarSelection, {
+        type: "selectGraphLocation",
+        projectPath: "C:\\work\\nested",
+        compositePath: ["missing"],
+      }),
+    ).toBe(sidebarSelection);
+
     const refreshed = appReducer(selected, {
       type: "envelopeReceived",
       envelope: {

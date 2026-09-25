@@ -71,3 +71,6 @@ a responsive Mailroom destination with post navigation and an authoritative
 single-post deep read when a board response contains trimmed bodies. Nested Mailroom
 ownership is not established, so those controls fail closed while drilled into a
 composite.
+The selected project's sidebar entry expands into a nested root/composite loop
+hierarchy. Sidebar selection, composite routing, canvas selection, breadcrumbs, and
+the inspector share the same reducer-validated graph location.
