@@ -28,6 +28,7 @@ import { ConnectionBanner } from "./components/ConnectionBanner";
 import { EditLoopDialog } from "./components/EditLoopDialog";
 import { GraphCanvas, type GraphCanvasHandle } from "./components/GraphCanvas";
 import { LoopTextDialog } from "./components/LoopTextDialog";
+import { MessageLoopDialog } from "./components/MessageLoopDialog";
 import { NewLoopDialog } from "./components/NewLoopDialog";
 import { NodeInspector } from "./components/NodeInspector";
 import { initialSnapshotFixture } from "./fixtures/initialSnapshot";
@@ -35,6 +36,8 @@ import {
   completeNodeCommand,
   createNodeCommand,
   deleteNodeCommand,
+  memoNodeCommand,
+  messageNodeCommand,
   openProjectCommand,
   refreshUsageCommand,
   renameNodeCommand,
@@ -55,6 +58,11 @@ export default function App() {
     projectPath: string;
     node: NonNullable<ReturnType<typeof selectedNode>>;
   }>();
+  const [messagingLoop, setMessagingLoop] = useState<{
+    projectPath: string;
+    nodeId: string;
+    nodeTitle: string;
+  }>();
   const [pendingCreatedNode, setPendingCreatedNode] = useState<{
     projectPath: string;
     nodeId: string;
@@ -64,7 +72,7 @@ export default function App() {
   const [openingProjectPath, setOpeningProjectPath] = useState<string>();
   const [textDialog, setTextDialog] = useState<
     | {
-        kind: "rename" | "complete";
+        kind: "rename" | "complete" | "memo";
         projectPath: string;
         nodeId: string;
         nodeTitle: string;
@@ -208,6 +216,25 @@ export default function App() {
                 setEditingLoop({
                   projectPath: selectedProjectPath,
                   node: inspectedNode,
+                })
+            : undefined,
+        messageNode:
+          selectedProjectPath && inspectedNode
+            ? () =>
+                setMessagingLoop({
+                  projectPath: selectedProjectPath,
+                  nodeId: inspectedNode.id,
+                  nodeTitle: inspectedNode.title,
+                })
+            : undefined,
+        memoNode:
+          selectedProjectPath && inspectedNode
+            ? () =>
+                setTextDialog({
+                  kind: "memo",
+                  projectPath: selectedProjectPath,
+                  nodeId: inspectedNode.id,
+                  nodeTitle: inspectedNode.title,
                 })
             : undefined,
         restartSession:
@@ -594,6 +621,22 @@ export default function App() {
           }}
         />
       ) : null}
+      {messagingLoop ? (
+        <MessageLoopDialog
+          nodeTitle={messagingLoop.nodeTitle}
+          onClose={() => setMessagingLoop(undefined)}
+          onSend={async (text, followUp) => {
+            await sendDaemonCommand(
+              messageNodeCommand(
+                messagingLoop.projectPath,
+                messagingLoop.nodeId,
+                text,
+                followUp,
+              ),
+            );
+          }}
+        />
+      ) : null}
       {textDialog?.kind === "rename" ? (
         <LoopTextDialog
           title={`Rename ${textDialog.nodeTitle}`}
@@ -629,6 +672,22 @@ export default function App() {
                 textDialog.nodeId,
                 result || null,
               ),
+            );
+          }}
+        />
+      ) : null}
+      {textDialog?.kind === "memo" ? (
+        <LoopTextDialog
+          title={`Add memo to ${textDialog.nodeTitle}`}
+          description="Append a durable note to this loop's memory. Reading memory history remains blocked on DT-001 and is not approximated here."
+          label="Memo"
+          multiline
+          required
+          submitLabel="Add memo"
+          onClose={() => setTextDialog(undefined)}
+          onSubmit={async (text) => {
+            await sendDaemonCommand(
+              memoNodeCommand(textDialog.projectPath, textDialog.nodeId, text),
             );
           }}
         />
