@@ -4,6 +4,8 @@ import {
   createNodeCommand,
   deleteNodeCommand,
   openProjectCommand,
+  memoNodeCommand,
+  messageNodeCommand,
   refreshUsageCommand,
   renameNodeCommand,
   restartNodeCommand,
@@ -130,6 +132,40 @@ describe("daemon commands", () => {
               updatedBy: null,
             },
           },
+        },
+      },
+    });
+  });
+
+  it("encodes immediate, follow-up, and memo writes with human attribution", () => {
+    const project = "C:\\work\\graph";
+    const node = "11111111-1111-4111-8111-111111111111";
+    expect(messageNodeCommand(project, node, "Now", false)).toEqual({
+      graphCommand: {
+        projectPath: project,
+        command: {
+          messageNode: { _0: node, text: "Now", from: null },
+        },
+      },
+    });
+    expect(messageNodeCommand(project, node, "Later", true)).toEqual({
+      graphCommand: {
+        projectPath: project,
+        command: {
+          messageNode: {
+            _0: node,
+            text: "Later",
+            from: null,
+            followUp: true,
+          },
+        },
+      },
+    });
+    expect(memoNodeCommand(project, node, "Remember this")).toEqual({
+      graphCommand: {
+        projectPath: project,
+        command: {
+          memoNode: { _0: node, text: "Remember this", from: null },
         },
       },
     });

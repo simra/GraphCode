@@ -117,6 +117,23 @@ export type UpdateNodeCommand = GraphCommandEnvelope<{
   };
 }>;
 
+export type MessageNodeCommand = GraphCommandEnvelope<{
+  messageNode: {
+    _0: string;
+    text: string;
+    from: null;
+    followUp?: true;
+  };
+}>;
+
+export type MemoNodeCommand = GraphCommandEnvelope<{
+  memoNode: {
+    _0: string;
+    text: string;
+    from: null;
+  };
+}>;
+
 export function stopNodeCommand(
   projectPath: string,
   nodeId: string,
@@ -232,6 +249,42 @@ export function updateNodeCommand(
       projectPath,
       command: {
         updateNode: { _0: nodeId, update },
+      },
+    },
+  };
+}
+
+export function messageNodeCommand(
+  projectPath: string,
+  nodeId: string,
+  text: string,
+  followUp: boolean,
+): MessageNodeCommand {
+  return {
+    graphCommand: {
+      projectPath,
+      command: {
+        messageNode: {
+          _0: nodeId,
+          text,
+          from: null,
+          ...(followUp ? { followUp: true as const } : {}),
+        },
+      },
+    },
+  };
+}
+
+export function memoNodeCommand(
+  projectPath: string,
+  nodeId: string,
+  text: string,
+): MemoNodeCommand {
+  return {
+    graphCommand: {
+      projectPath,
+      command: {
+        memoNode: { _0: nodeId, text, from: null },
       },
     },
   };

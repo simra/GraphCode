@@ -13,6 +13,7 @@ export type CommandId =
   | "loop.refreshUsage"
   | "loop.edit"
   | "loop.message"
+  | "loop.memo"
   | "loop.openTerminal"
   | "view.zoomIn"
   | "view.zoomOut"
@@ -57,6 +58,8 @@ export interface CommandActions {
   stopNode?(): Promise<void>;
   renameNode?(): void;
   editNode?(): void;
+  messageNode?(): void;
+  memoNode?(): void;
   restartSession?(): Promise<void>;
   completeNode?(): void;
   deleteNode?(): Promise<void>;
@@ -229,10 +232,33 @@ export function createCommandRegistry(
       category: "Loop",
       shortcut: { key: "m", ctrl: true, label: "Ctrl+M" },
       surfaces: ["node"],
-      ...unavailable(
-        node ? "Loop messaging is not implemented yet" : "Select a loop first",
-      ),
-      execute: () => undefined,
+      ...(node && connected && actions.messageNode
+        ? { enabled: true, execute: actions.messageNode }
+        : {
+            ...unavailable(
+              node
+                ? "Reconnect to graphcoded before messaging this loop"
+                : "Select a loop first",
+            ),
+            execute: () => undefined,
+          }),
+    },
+    {
+      id: "loop.memo",
+      label: "Add Memo",
+      description: "Append a durable note to the selected loop's memory",
+      category: "Loop",
+      surfaces: ["node"],
+      ...(node && connected && actions.memoNode
+        ? { enabled: true, execute: actions.memoNode }
+        : {
+            ...unavailable(
+              node
+                ? "Reconnect to graphcoded before adding a memo"
+                : "Select a loop first",
+            ),
+            execute: () => undefined,
+          }),
     },
     {
       id: "loop.restartSession",
