@@ -134,6 +134,7 @@ export const GraphCanvas = forwardRef<
     pendingCommandId?: string;
     onSelectNode?(nodeId: string): void;
     onExecuteCommand?(command: AppCommand): void;
+    edgeCommands?(edge: LoopEdge): AppCommand[];
   }
 >(function GraphCanvas(
   {
@@ -143,6 +144,7 @@ export const GraphCanvas = forwardRef<
     pendingCommandId,
     onSelectNode,
     onExecuteCommand = () => undefined,
+    edgeCommands = () => [],
   },
   ref,
 ) {
@@ -153,12 +155,19 @@ export const GraphCanvas = forwardRef<
   const [viewport, setViewport] = useState<Viewport>(() =>
     fittedViewport(layout),
   );
+  const [selectedEdgeKey, setSelectedEdgeKey] = useState<string>();
   const dragRef = useRef<{ x: number; y: number } | undefined>(undefined);
   const svgRef = useRef<SVGSVGElement>(null);
 
   useEffect(() => {
     setViewport(fittedViewport(layout));
+    setSelectedEdgeKey(undefined);
   }, [graph?.id, layout]);
+
+  const selectedEdge = graph?.edges.find(
+    (edge, index) =>
+      (edge.id ?? `${edge.from}-${edge.to}-${index}`) === selectedEdgeKey,
+  );
 
   function zoom(factor: number) {
     setViewport((current) => {
@@ -232,6 +241,20 @@ export const GraphCanvas = forwardRef<
         </div>
         <div className="canvas-toolbar" aria-label="Graph viewport">
           <span>{graph.nodes.length} loops</span>
+          {selectedEdge
+            ? edgeCommands(selectedEdge).map((command) => (
+                <button
+                  key={command.id}
+                  className={command.danger ? "danger-command" : undefined}
+                  type="button"
+                  disabled={!command.enabled || pendingCommandId === command.id}
+                  title={command.disabledReason ?? command.description}
+                  onClick={() => onExecuteCommand(command)}
+                >
+                  {command.label}
+                </button>
+              ))
+            : null}
           {commands.map((command) => (
             <button
               key={command.id}
@@ -254,14 +277,14 @@ export const GraphCanvas = forwardRef<
           ref={svgRef}
           className="graph-canvas"
           viewBox={`${viewport.x} ${viewport.y} ${viewport.width} ${viewport.height}`}
-          role="img"
+          role="group"
           aria-labelledby="graph-svg-title graph-svg-description"
           tabIndex={0}
           onWheel={wheelZoom}
           onPointerDown={(event) => {
             if (
               event.button !== 0 ||
-              (event.target as Element).closest(".graph-node")
+              (event.target as Element).closest(".graph-node, .graph-edge")
             )
               return;
             event.currentTarget.setPointerCapture(event.pointerId);
@@ -301,14 +324,39 @@ export const GraphCanvas = forwardRef<
             const from = layout.positions.get(edge.from);
             const to = layout.positions.get(edge.to);
             if (!from || !to) return null;
+            const edgeKey = edge.id ?? `${edge.from}-${edge.to}-${index}`;
+            const fromTitle =
+              graph.nodes.find((node) => node.id === edge.from)?.title ??
+              edge.from;
+            const toTitle =
+              graph.nodes.find((node) => node.id === edge.to)?.title ?? edge.to;
             return (
               <path
-                key={edge.id ?? `${edge.from}-${edge.to}-${index}`}
-                className={
-                  edge.fireCount ? "graph-edge graph-edge-fired" : "graph-edge"
-                }
+                key={edgeKey}
+                className={`${edge.fireCount ? "graph-edge graph-edge-fired" : "graph-edge"}${selectedEdgeKey === edgeKey ? " graph-edge-selected" : ""}`}
                 d={`M ${from.x + cardWidth} ${from.y + cardHeight / 2} C ${from.x + cardWidth + 42} ${from.y + cardHeight / 2}, ${to.x - 42} ${to.y + cardHeight / 2}, ${to.x} ${to.y + cardHeight / 2}`}
                 markerEnd="url(#arrow)"
+                style={{ pointerEvents: "stroke" }}
+                role="button"
+                tabIndex={0}
+                aria-label={`Edge from ${fromTitle} to ${toTitle}`}
+                aria-pressed={selectedEdgeKey === edgeKey}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  setSelectedEdgeKey(
+                    selectedEdgeKey === edgeKey ? undefined : edgeKey,
+                  );
+                }}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" || event.key === " ") {
+                    event.preventDefault();
+                    setSelectedEdgeKey(
+                      selectedEdgeKey === edgeKey ? undefined : edgeKey,
+                    );
+                  } else if (event.key === "Escape") {
+                    setSelectedEdgeKey(undefined);
+                  }
+                }}
               />
             );
           })}

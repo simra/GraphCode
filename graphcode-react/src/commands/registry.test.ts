@@ -1,7 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
 import type { AppState } from "../state/graphState";
 import { initialAppState } from "../state/graphState";
-import { createCommandRegistry, createProjectRowCommands } from "./registry";
+import {
+  createCommandRegistry,
+  createEdgeCommands,
+  createProjectRowCommands,
+} from "./registry";
 
 function stateWithSelectedNode(): AppState {
   return {
@@ -195,5 +199,23 @@ describe("command registry", () => {
     expect(
       recent.find((command) => command.id === "project.forget")?.enabled,
     ).toBe(true);
+  });
+
+  it("enables edge creation and refuses deletion without a stable edge ID", () => {
+    const state = stateWithSelectedNode();
+    const commands = createCommandRegistry(state, {
+      openPalette: vi.fn(),
+      clearSelection: vi.fn(),
+      selectNode: vi.fn(),
+      openNewEdge: vi.fn(),
+    });
+    expect(commands.find((command) => command.id === "edge.new")?.enabled).toBe(
+      true,
+    );
+
+    const missingId = createEdgeCommands(true, undefined, {
+      deleteEdge: vi.fn(async () => undefined),
+    });
+    expect(missingId[0].disabledReason).toContain("no stable ID");
   });
 });

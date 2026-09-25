@@ -452,10 +452,27 @@ kbd {
   fill: none;
   stroke: #4e564b;
   stroke-width: 2;
+  cursor: pointer;
+  transition:
+    stroke 120ms ease,
+    stroke-width 120ms ease;
 }
 
 .graph-edge-fired {
   stroke: #799b70;
+}
+
+.graph-edge:hover,
+.graph-edge:focus,
+.graph-edge-selected {
+  stroke: #b9d5ae;
+  stroke-width: 4;
+  outline: none;
+}
+
+.canvas-toolbar .danger-command {
+  color: #ffaaa2;
+  border-color: #6d3e39;
 }
 
 .edge-arrow {
