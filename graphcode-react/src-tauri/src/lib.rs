@@ -2,6 +2,7 @@ mod connection;
 mod endpoint;
 mod protocol;
 mod transport;
+mod ui_layout;
 
 use std::sync::Mutex;
 
@@ -18,6 +19,7 @@ use thiserror::Error;
 #[derive(Default)]
 struct BridgeState {
     connection: Mutex<Option<ConnectionHandle>>,
+    ui_layout: Mutex<()>,
 }
 
 #[derive(Debug, Error)]
@@ -34,6 +36,8 @@ enum BridgeError {
     NotStarted,
     #[error("failed to update native menu: {0}")]
     Menu(String),
+    #[error("failed to access persistent UI layout: {0}")]
+    UiLayout(String),
     #[error(transparent)]
     Connection(#[from] connection::ConnectionError),
 }
@@ -170,6 +174,42 @@ fn set_native_menu(
     Ok(())
 }
 
+#[tauri::command]
+fn load_ui_layout(
+    app: tauri::AppHandle,
+    state: State<'_, BridgeState>,
+) -> Result<ui_layout::LayoutState, BridgeError> {
+    let _guard = state
+        .ui_layout
+        .lock()
+        .expect("UI layout state mutex poisoned");
+    let state_directory = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| BridgeError::AppData(error.to_string()))?;
+    ui_layout::load(&state_directory).map_err(|error| BridgeError::UiLayout(error.to_string()))
+}
+
+#[tauri::command]
+fn save_ui_viewport(
+    app: tauri::AppHandle,
+    state: State<'_, BridgeState>,
+    project_path: String,
+    view_key: String,
+    viewport: ui_layout::Viewport,
+) -> Result<(), BridgeError> {
+    let _guard = state
+        .ui_layout
+        .lock()
+        .expect("UI layout state mutex poisoned");
+    let state_directory = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| BridgeError::AppData(error.to_string()))?;
+    ui_layout::save_viewport(&state_directory, project_path, view_key, viewport)
+        .map_err(|error| BridgeError::UiLayout(error.to_string()))
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -182,7 +222,9 @@ pub fn run() {
             start_daemon_connection,
             send_daemon_command,
             acknowledge_daemon_sequence,
-            set_native_menu
+            set_native_menu,
+            load_ui_layout,
+            save_ui_viewport
         ])
         .run(tauri::generate_context!())
         .expect("failed to run GraphCode React");

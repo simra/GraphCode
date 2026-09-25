@@ -13,6 +13,11 @@ import {
 } from "./bridge/daemon";
 import { pickProjectFolder } from "./bridge/projects";
 import {
+  loadUiLayout,
+  saveUiViewport,
+  type UiLayoutState,
+} from "./bridge/uiLayout";
+import {
   commandMatchesShortcut,
   createCommandRegistry,
   createEdgeCommands,
@@ -129,6 +134,8 @@ export default function App() {
     id: string;
     title: string;
   }>();
+  const [uiLayout, setUiLayout] = useState<UiLayoutState>();
+  const layoutSaveTimers = useRef(new Map<string, number>());
   const [textDialog, setTextDialog] = useState<
     | {
         kind: "rename" | "complete" | "memo" | "refine" | "mailSearch";
@@ -188,11 +195,41 @@ export default function App() {
     };
   }, []);
 
+  useEffect(() => {
+    let active = true;
+    void loadUiLayout()
+      .then((layout) => {
+        if (active) setUiLayout(layout);
+      })
+      .catch((error: unknown) => {
+        if (active) {
+          setCommandError(
+            `UI layout load failed: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          );
+        }
+      });
+    return () => {
+      active = false;
+      for (const timer of layoutSaveTimers.current.values()) {
+        window.clearTimeout(timer);
+      }
+      layoutSaveTimers.current.clear();
+    };
+  }, []);
+
   const rootGraph = state.selectedProjectPath
     ? state.graphs[state.selectedProjectPath]
     : undefined;
   const selectedGraph = currentGraph(state);
   const selectedProjectPath = state.selectedProjectPath;
+  const selectedViewKey = state.compositePath.length
+    ? `composite:${JSON.stringify(state.compositePath)}`
+    : "root";
+  const savedViewport = selectedProjectPath
+    ? uiLayout?.projects[selectedProjectPath]?.views[selectedViewKey]
+    : undefined;
   const inspectedNode = selectedNode(state);
   const inspectedQuickChat = selectedQuickChat(state);
   const inspectedNodeState =
@@ -1058,6 +1095,12 @@ export default function App() {
               selectedNodeId={state.selectedNodeId}
               commands={canvasCommands}
               pendingCommandId={pendingCommandId}
+              initialViewport={savedViewport}
+              viewportKey={
+                selectedProjectPath
+                  ? `${selectedProjectPath}\0${selectedViewKey}`
+                  : undefined
+              }
               onExecuteCommand={(command) => void executeCommand(command)}
               onCreateEdge={
                 state.connection.phase === "connected"
@@ -1067,6 +1110,57 @@ export default function App() {
                     }
                   : undefined
               }
+              onViewportChange={(viewport) => {
+                if (!uiLayout || !selectedProjectPath) return;
+                const projectPath = selectedProjectPath;
+                const viewKey = selectedViewKey;
+                setUiLayout((current) => {
+                  if (!current) return current;
+                  const existing =
+                    current.projects[projectPath]?.views[viewKey];
+                  if (
+                    existing?.x === viewport.x &&
+                    existing.y === viewport.y &&
+                    existing.width === viewport.width &&
+                    existing.height === viewport.height
+                  ) {
+                    return current;
+                  }
+                  return {
+                    ...current,
+                    projects: {
+                      ...current.projects,
+                      [projectPath]: {
+                        views: {
+                          ...current.projects[projectPath]?.views,
+                          [viewKey]: viewport,
+                        },
+                      },
+                    },
+                  };
+                });
+                const timerKey = `${projectPath}\0${viewKey}`;
+                const existingTimer = layoutSaveTimers.current.get(timerKey);
+                if (existingTimer !== undefined) {
+                  window.clearTimeout(existingTimer);
+                }
+                layoutSaveTimers.current.set(
+                  timerKey,
+                  window.setTimeout(() => {
+                    layoutSaveTimers.current.delete(timerKey);
+                    void saveUiViewport(projectPath, viewKey, viewport).catch(
+                      (error: unknown) =>
+                        setCommandError(
+                          `UI layout save failed: ${
+                            error instanceof Error
+                              ? error.message
+                              : String(error)
+                          }`,
+                        ),
+                    );
+                  }, 250),
+                );
+              }}
               edgeCommands={(edge) =>
                 createEdgeCommands(
                   state.connection.phase === "connected",

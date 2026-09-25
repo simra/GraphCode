@@ -38,7 +38,7 @@ export interface GraphLayout {
   height: number;
 }
 
-interface Viewport {
+export interface Viewport {
   x: number;
   y: number;
   width: number;
@@ -195,9 +195,12 @@ export const GraphCanvas = forwardRef<
     selectedNodeId?: string;
     commands?: AppCommand[];
     pendingCommandId?: string;
+    initialViewport?: Viewport;
+    viewportKey?: string;
     onSelectNode?(nodeId: string): void;
     onExecuteCommand?(command: AppCommand): void;
     onCreateEdge?(from: string, to: string): void;
+    onViewportChange?(viewport: Viewport): void;
     edgeCommands?(edge: LoopEdge): AppCommand[];
   }
 >(function GraphCanvas(
@@ -206,9 +209,12 @@ export const GraphCanvas = forwardRef<
     selectedNodeId,
     commands = [],
     pendingCommandId,
+    initialViewport,
+    viewportKey,
     onSelectNode,
     onExecuteCommand = () => undefined,
     onCreateEdge,
+    onViewportChange,
     edgeCommands = () => [],
   },
   ref,
@@ -225,13 +231,35 @@ export const GraphCanvas = forwardRef<
   const dragRef = useRef<{ x: number; y: number } | undefined>(undefined);
   const edgeDragRef = useRef<EdgeDrag | undefined>(undefined);
   const svgRef = useRef<SVGSVGElement>(null);
+  const onViewportChangeRef = useRef(onViewportChange);
+  onViewportChangeRef.current = onViewportChange;
 
   useEffect(() => {
-    setViewport(fittedViewport(layout));
+    const next = initialViewport ?? fittedViewport(layout);
+    setViewport((current) =>
+      current.x === next.x &&
+      current.y === next.y &&
+      current.width === next.width &&
+      current.height === next.height
+        ? current
+        : next,
+    );
     setSelectedEdgeKey(undefined);
     setEdgeDrag(undefined);
     edgeDragRef.current = undefined;
-  }, [graph?.id, layout]);
+  }, [
+    graph?.id,
+    initialViewport?.height,
+    initialViewport?.width,
+    initialViewport?.x,
+    initialViewport?.y,
+    layout,
+    viewportKey,
+  ]);
+
+  useEffect(() => {
+    onViewportChangeRef.current?.(viewport);
+  }, [viewport]);
 
   const selectedEdge = graph?.edges.find(
     (edge, index) =>
