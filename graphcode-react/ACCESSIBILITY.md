@@ -27,6 +27,21 @@ When adding a destination or interaction:
 3. Do not suppress an axe rule globally unless the browser-less environment cannot
    evaluate it. Document that limitation here.
 
+## Packaged WebView automation boundary
+
+This repository does not currently have an executable packaged-WebView automation
+harness. It has no `tauri-driver`, WebDriver, Playwright browser project, desktop CI
+session, or fixture-daemon lifecycle for an installed application, and Tauri bundling
+is currently disabled. Optional browser-provider names in Vitest's lockfile metadata
+do not constitute a configured runner.
+
+Do not treat the jsdom axe suite as a packaged-app result. Adding reliable automation
+is a separate packaging task that must first establish a bundled test artifact, pin a
+driver compatible with the supported WebView2 runtime, provision an interactive Windows
+CI desktop, and start a protocol-valid fixture daemon. Until that infrastructure exists,
+the Narrator, focus, touch, DPI, contrast, and real-WebView gates below remain manual
+release checks.
+
 ## Windows Narrator smoke test
 
 Use a packaged or `npm run tauri dev` build on Windows with display scaling at both
