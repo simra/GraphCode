@@ -4,6 +4,9 @@ import { selectedNode } from "../state/graphState";
 export type CommandId =
   | "app.commandPalette"
   | "project.openFolder"
+  | "project.close"
+  | "project.forget"
+  | "project.deleteGraph"
   | "loop.new"
   | "loop.stop"
   | "loop.rename"
@@ -72,6 +75,12 @@ export interface CommandActions {
   zoomOut?(): void;
   resetZoom?(): void;
   fitGraph?(): void;
+}
+
+export interface ProjectRowCommandActions {
+  closeProject?(): Promise<void>;
+  forgetProject?(): Promise<void>;
+  deleteProjectGraph?(): Promise<void>;
 }
 
 function unavailable(reason: string) {
@@ -512,6 +521,63 @@ export function createCommandRegistry(
         ? undefined
         : "The selected graph has fewer than two loops",
       execute: () => selectRelativeNode(-1),
+    },
+  ];
+}
+
+export function createProjectRowCommands(
+  connected: boolean,
+  isOpen: boolean,
+  actions: ProjectRowCommandActions,
+): AppCommand[] {
+  return [
+    {
+      id: "project.close",
+      label: "Close Project",
+      description: "Remove this project from the open list but keep it recent",
+      category: "Project",
+      surfaces: [],
+      ...(isOpen && connected && actions.closeProject
+        ? { enabled: true, execute: actions.closeProject }
+        : {
+            ...unavailable(
+              isOpen
+                ? "Reconnect to graphcoded before closing this project"
+                : "This project is not open",
+            ),
+            execute: () => undefined,
+          }),
+    },
+    {
+      id: "project.forget",
+      label: "Forget Project",
+      description: "Close this project and remove it from recents",
+      category: "Project",
+      surfaces: [],
+      ...(connected && actions.forgetProject
+        ? { enabled: true, execute: actions.forgetProject }
+        : {
+            ...unavailable(
+              "Reconnect to graphcoded before forgetting this project",
+            ),
+            execute: () => undefined,
+          }),
+    },
+    {
+      id: "project.deleteGraph",
+      label: "Delete Saved Graph",
+      description: "Permanently delete the project's saved loops and sessions",
+      category: "Project",
+      surfaces: [],
+      danger: true,
+      ...(connected && actions.deleteProjectGraph
+        ? { enabled: true, execute: actions.deleteProjectGraph }
+        : {
+            ...unavailable(
+              "Reconnect to graphcoded before deleting this project's graph",
+            ),
+            execute: () => undefined,
+          }),
     },
   ];
 }

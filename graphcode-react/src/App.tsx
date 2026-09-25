@@ -15,6 +15,7 @@ import { pickProjectFolder } from "./bridge/projects";
 import {
   commandMatchesShortcut,
   createCommandRegistry,
+  createProjectRowCommands,
   isEditableTarget,
   type AppCommand,
   type CommandId,
@@ -31,12 +32,16 @@ import { LoopTextDialog } from "./components/LoopTextDialog";
 import { MessageLoopDialog } from "./components/MessageLoopDialog";
 import { NewLoopDialog } from "./components/NewLoopDialog";
 import { NodeInspector } from "./components/NodeInspector";
+import { ProjectRowActions } from "./components/ProjectRowActions";
 import { initialSnapshotFixture } from "./fixtures/initialSnapshot";
 import {
   armCompositeCommand,
+  closeProjectCommand,
   completeNodeCommand,
   createNodeCommand,
   deleteNodeCommand,
+  deleteProjectGraphCommand,
+  forgetProjectCommand,
   memoNodeCommand,
   messageNodeCommand,
   openProjectCommand,
@@ -376,6 +381,42 @@ export default function App() {
     }
   }, []);
 
+  function projectRowCommands(
+    project: { path: string; name: string },
+    isOpen: boolean,
+  ) {
+    const confirmedRemoval = async (mode: "close" | "forget" | "delete") => {
+      const prompt =
+        mode === "close"
+          ? `Close "${project.name}"? Its saved graph remains available in Recent.`
+          : mode === "forget"
+            ? `Forget "${project.name}"? Its saved graph is preserved, but the folder is removed from Recent until opened again.`
+            : `Permanently delete the saved graph for "${project.name}"? Its loops and detached sessions will be ended and cannot be restored.`;
+      if (!window.confirm(prompt)) return;
+      await sendDaemonCommand(
+        mode === "close"
+          ? closeProjectCommand(project.path)
+          : mode === "forget"
+            ? forgetProjectCommand(project.path)
+            : deleteProjectGraphCommand(project.path),
+      );
+      dispatch({
+        type: "projectRemoved",
+        path: project.path,
+        removeFromRecents: mode !== "close",
+      });
+    };
+    return createProjectRowCommands(
+      state.connection.phase === "connected",
+      isOpen,
+      {
+        closeProject: isOpen ? () => confirmedRemoval("close") : undefined,
+        forgetProject: () => confirmedRemoval("forget"),
+        deleteProjectGraph: () => confirmedRemoval("delete"),
+      },
+    );
+  }
+
   useEffect(() => {
     void syncNativeMenu(commands).catch((error: unknown) => {
       setCommandError(
@@ -491,7 +532,7 @@ export default function App() {
           <p className="project-group-label">Open</p>
           <ul className="project-list" aria-label="Open projects">
             {projectNavigation.open.map((project) => (
-              <li key={project.path}>
+              <li className="project-row" key={project.path}>
                 <button
                   className={
                     project.path === state.selectedProjectPath
@@ -508,6 +549,12 @@ export default function App() {
                     <small>{project.path}</small>
                   </span>
                 </button>
+                <ProjectRowActions
+                  projectName={project.name}
+                  commands={projectRowCommands(project, true)}
+                  pendingCommandId={pendingCommandId}
+                  onExecute={(command) => void executeCommand(command)}
+                />
               </li>
             ))}
           </ul>
@@ -517,7 +564,7 @@ export default function App() {
             aria-label="Recent projects"
           >
             {projectNavigation.recent.map((project) => (
-              <li key={project.path}>
+              <li className="project-row" key={project.path}>
                 <button
                   type="button"
                   disabled={openingProjectPath === project.path}
@@ -543,6 +590,12 @@ export default function App() {
                     </small>
                   </span>
                 </button>
+                <ProjectRowActions
+                  projectName={project.name}
+                  commands={projectRowCommands(project, false)}
+                  pendingCommandId={pendingCommandId}
+                  onExecute={(command) => void executeCommand(command)}
+                />
               </li>
             ))}
           </ul>

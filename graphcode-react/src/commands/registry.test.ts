@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { AppState } from "../state/graphState";
 import { initialAppState } from "../state/graphState";
-import { createCommandRegistry } from "./registry";
+import { createCommandRegistry, createProjectRowCommands } from "./registry";
 
 function stateWithSelectedNode(): AppState {
   return {
@@ -171,6 +171,29 @@ describe("command registry", () => {
     commands = createCommandRegistry(state, actions);
     expect(
       commands.find((command) => command.id === "loop.armComposite")?.enabled,
+    ).toBe(true);
+  });
+
+  it("distinguishes open and recent project lifecycle actions", () => {
+    const actions = {
+      closeProject: vi.fn(async () => undefined),
+      forgetProject: vi.fn(async () => undefined),
+      deleteProjectGraph: vi.fn(async () => undefined),
+    };
+    const open = createProjectRowCommands(true, true, actions);
+    expect(
+      open.find((command) => command.id === "project.close")?.enabled,
+    ).toBe(true);
+    expect(
+      open.find((command) => command.id === "project.deleteGraph")?.danger,
+    ).toBe(true);
+
+    const recent = createProjectRowCommands(true, false, actions);
+    expect(
+      recent.find((command) => command.id === "project.close")?.disabledReason,
+    ).toContain("not open");
+    expect(
+      recent.find((command) => command.id === "project.forget")?.enabled,
     ).toBe(true);
   });
 });

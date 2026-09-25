@@ -94,6 +94,12 @@ export interface OpenProjectCommand {
   };
 }
 
+export interface ProjectPathCommand {
+  closeProject?: { path: string };
+  forgetProject?: { path: string };
+  deleteProjectGraph?: { path: string };
+}
+
 export interface NodeUpdatePayload {
   goalSummary?: string;
   goalPredicate?: string;
@@ -245,6 +251,18 @@ export function openProjectCommand(path: string): OpenProjectCommand {
   return {
     openProject: { path },
   };
+}
+
+export function closeProjectCommand(path: string): ProjectPathCommand {
+  return { closeProject: { path } };
+}
+
+export function forgetProjectCommand(path: string): ProjectPathCommand {
+  return { forgetProject: { path } };
+}
+
+export function deleteProjectGraphCommand(path: string): ProjectPathCommand {
+  return { deleteProjectGraph: { path } };
 }
 
 export function updateNodeCommand(
