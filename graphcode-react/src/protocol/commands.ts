@@ -88,6 +88,12 @@ export type RefreshUsageCommand = GraphCommandEnvelope<{
   refreshUsage: Record<string, never>;
 }>;
 
+export interface OpenProjectCommand {
+  openProject: {
+    path: string;
+  };
+}
+
 export function stopNodeCommand(
   projectPath: string,
   nodeId: string,
@@ -184,5 +190,11 @@ export function refreshUsageCommand(projectPath: string): RefreshUsageCommand {
       projectPath,
       command: { refreshUsage: {} },
     },
+  };
+}
+
+export function openProjectCommand(path: string): OpenProjectCommand {
+  return {
+    openProject: { path },
   };
 }

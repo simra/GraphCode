@@ -11,6 +11,7 @@ import {
   startDaemonConnection,
   type DaemonConnection,
 } from "./bridge/daemon";
+import { pickProjectFolder } from "./bridge/projects";
 import {
   commandMatchesShortcut,
   createCommandRegistry,
@@ -33,6 +34,7 @@ import {
   completeNodeCommand,
   createNodeCommand,
   deleteNodeCommand,
+  openProjectCommand,
   refreshUsageCommand,
   renameNodeCommand,
   restartNodeCommand,
@@ -41,6 +43,7 @@ import {
   type NodeDraftPayload,
 } from "./protocol/commands";
 import { appReducer, initialAppState, selectedNode } from "./state/graphState";
+import { deriveProjectNavigation } from "./state/projectNavigation";
 
 export default function App() {
   const [state, dispatch] = useReducer(appReducer, initialAppState);
@@ -52,6 +55,7 @@ export default function App() {
   }>();
   const [pendingCommandId, setPendingCommandId] = useState<CommandId>();
   const [commandError, setCommandError] = useState<string>();
+  const [openingProjectPath, setOpeningProjectPath] = useState<string>();
   const [textDialog, setTextDialog] = useState<
     | {
         kind: "rename" | "complete";
@@ -125,19 +129,37 @@ export default function App() {
     inspectedNodeState &&
     ["succeeded", "failed", "stalled", "stopped"].includes(inspectedNodeState),
   );
-  const projects = useMemo(() => {
-    const byPath = new Map(
-      state.recentProjects.map((project) => [project.path, project]),
-    );
-    for (const graph of Object.values(state.graphs)) {
-      byPath.set(graph.project.path, graph.project);
+  const projectNavigation = useMemo(
+    () => deriveProjectNavigation(state.recentProjects, state.graphs),
+    [state.graphs, state.recentProjects],
+  );
+  const requestOpenProject = useCallback(async (path: string) => {
+    setOpeningProjectPath(path);
+    try {
+      const response = await sendDaemonCommand(openProjectCommand(path));
+      if (
+        response.kind === "response" &&
+        response.event?.type === "graphChanged"
+      ) {
+        setOpeningProjectPath(response.event.graph.project.path);
+        dispatch({ type: "envelopeReceived", envelope: response });
+      }
+    } catch (error) {
+      setOpeningProjectPath(undefined);
+      throw error;
     }
-    return [...byPath.values()];
-  }, [state.graphs, state.recentProjects]);
+  }, []);
   const commands = useMemo(
     () =>
       createCommandRegistry(state, {
         openPalette: () => setPaletteOpen(true),
+        openProjectFolder:
+          "__TAURI_INTERNALS__" in window
+            ? async () => {
+                const path = await pickProjectFolder();
+                if (path) await requestOpenProject(path);
+              }
+            : undefined,
         openNewLoop: () => setNewLoopOpen(true),
         clearSelection: () => dispatch({ type: "clearNodeSelection" }),
         selectNode: (nodeId) => {
@@ -225,7 +247,13 @@ export default function App() {
             }
           : undefined,
       }),
-    [inspectedNode, inspectedNodeResolved, selectedProjectPath, state],
+    [
+      inspectedNode,
+      inspectedNodeResolved,
+      requestOpenProject,
+      selectedProjectPath,
+      state,
+    ],
   );
   const commandsRef = useRef(commands);
   commandsRef.current = commands;
@@ -243,6 +271,16 @@ export default function App() {
     });
     setPendingCreatedNode(undefined);
   }, [pendingCreatedNode, state.graphs]);
+
+  useEffect(() => {
+    if (!openingProjectPath) return;
+    const openedPath = Object.keys(state.graphs).find(
+      (path) => path.toLowerCase() === openingProjectPath.toLowerCase(),
+    );
+    if (!openedPath) return;
+    dispatch({ type: "selectProject", path: openedPath });
+    setOpeningProjectPath(undefined);
+  }, [openingProjectPath, state.graphs]);
 
   const executeCommand = useCallback(async (command: AppCommand) => {
     if (!command.enabled) return;
@@ -343,10 +381,35 @@ export default function App() {
         <nav aria-labelledby="projects-heading">
           <div className="section-heading">
             <h2 id="projects-heading">Projects</h2>
-            <span>{projects.length}</span>
+            <span>
+              {projectNavigation.open.length + projectNavigation.recent.length}
+            </span>
           </div>
-          <ul className="project-list">
-            {projects.map((project) => (
+          {projectNavigation.global ? (
+            <button
+              className={`overview-link ${
+                state.selectedProjectPath === projectNavigation.global.path
+                  ? "project-selected"
+                  : ""
+              }`}
+              type="button"
+              onClick={() =>
+                dispatch({
+                  type: "selectProject",
+                  path: projectNavigation.global!.path,
+                })
+              }
+            >
+              <span aria-hidden="true">⌘</span>
+              <span>
+                <strong>Overview</strong>
+                <small>All open projects</small>
+              </span>
+            </button>
+          ) : null}
+          <p className="project-group-label">Open</p>
+          <ul className="project-list" aria-label="Open projects">
+            {projectNavigation.open.map((project) => (
               <li key={project.path}>
                 <button
                   className={
@@ -362,6 +425,41 @@ export default function App() {
                   <span>
                     <strong>{project.name}</strong>
                     <small>{project.path}</small>
+                  </span>
+                </button>
+              </li>
+            ))}
+          </ul>
+          <p className="project-group-label">Recent</p>
+          <ul
+            className="project-list recent-project-list"
+            aria-label="Recent projects"
+          >
+            {projectNavigation.recent.map((project) => (
+              <li key={project.path}>
+                <button
+                  type="button"
+                  disabled={openingProjectPath === project.path}
+                  onClick={() => {
+                    setCommandError(undefined);
+                    void requestOpenProject(project.path).catch(
+                      (error: unknown) =>
+                        setCommandError(
+                          error instanceof Error
+                            ? error.message
+                            : String(error),
+                        ),
+                    );
+                  }}
+                >
+                  <span aria-hidden="true">＋</span>
+                  <span>
+                    <strong>{project.name}</strong>
+                    <small>
+                      {openingProjectPath === project.path
+                        ? "Opening…"
+                        : project.path}
+                    </small>
                   </span>
                 </button>
               </li>

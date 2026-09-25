@@ -3,6 +3,7 @@ import { selectedNode } from "../state/graphState";
 
 export type CommandId =
   | "app.commandPalette"
+  | "project.openFolder"
   | "loop.new"
   | "loop.stop"
   | "loop.rename"
@@ -17,7 +18,7 @@ export type CommandId =
   | "selection.nextLoop"
   | "selection.previousLoop";
 
-export type CommandCategory = "Application" | "Loop" | "Navigation";
+export type CommandCategory = "Application" | "Project" | "Loop" | "Navigation";
 export type CommandSurface = "header" | "node";
 
 export interface CommandShortcut {
@@ -44,6 +45,7 @@ export interface AppCommand {
 
 export interface CommandActions {
   openPalette(): void;
+  openProjectFolder?(): Promise<void>;
   openNewLoop?(): void;
   clearSelection(): void;
   selectNode(nodeId: string): void;
@@ -72,6 +74,8 @@ export function createCommandRegistry(
   const graph = state.selectedProjectPath
     ? state.graphs[state.selectedProjectPath]
     : undefined;
+  const projectGraph =
+    graph?.project.path === "graphcode://global" ? undefined : graph;
   const node = selectedNode(state);
   const connected = state.connection.phase === "connected";
   const nodeResolved =
@@ -107,13 +111,31 @@ export function createCommandRegistry(
       execute: actions.openPalette,
     },
     {
+      id: "project.openFolder",
+      label: "Open Folder",
+      description: "Choose a local folder and open its GraphCode project",
+      category: "Project",
+      shortcut: { key: "o", ctrl: true, label: "Ctrl+O" },
+      surfaces: ["header"],
+      ...(connected && actions.openProjectFolder
+        ? { enabled: true, execute: actions.openProjectFolder }
+        : {
+            ...unavailable(
+              connected
+                ? "Folder selection requires the Tauri desktop client"
+                : "Reconnect to graphcoded before opening a project",
+            ),
+            execute: () => undefined,
+          }),
+    },
+    {
       id: "loop.new",
       label: "New Loop",
       description: "Create a loop in the selected project",
       category: "Loop",
       shortcut: { key: "n", ctrl: true, label: "Ctrl+N" },
       surfaces: ["header"],
-      ...(graph
+      ...(projectGraph
         ? actions.openNewLoop
           ? { enabled: true, execute: actions.openNewLoop }
           : {

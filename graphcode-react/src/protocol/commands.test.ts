@@ -3,6 +3,7 @@ import {
   completeNodeCommand,
   createNodeCommand,
   deleteNodeCommand,
+  openProjectCommand,
   refreshUsageCommand,
   renameNodeCommand,
   restartNodeCommand,
@@ -94,6 +95,12 @@ describe("daemon commands", () => {
     });
     expect(refreshUsageCommand(project).graphCommand.command).toEqual({
       refreshUsage: {},
+    });
+  });
+
+  it("encodes project opening with the authoritative labeled path", () => {
+    expect(openProjectCommand("C:\\work\\graph")).toEqual({
+      openProject: { path: "C:\\work\\graph" },
     });
   });
 });

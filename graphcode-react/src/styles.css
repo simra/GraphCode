@@ -110,7 +110,8 @@ button:focus-visible,
   list-style: none;
 }
 
-.project-list button {
+.project-list button,
+.overview-link {
   display: grid;
   width: 100%;
   grid-template-columns: 24px minmax(0, 1fr);
@@ -124,19 +125,44 @@ button:focus-visible,
   cursor: pointer;
 }
 
-.project-list button:hover {
+.project-list button:hover,
+.overview-link:hover {
   background: #1d211c;
 }
 
-.project-list button.project-selected {
+.project-list button.project-selected,
+.overview-link.project-selected {
   border-color: #465743;
   background: #252d23;
 }
 
-.project-list button span:last-child {
+.project-list button span:last-child,
+.overview-link span:last-child {
   display: grid;
   min-width: 0;
   gap: 3px;
+}
+
+.overview-link {
+  margin-bottom: 18px;
+}
+
+.project-group-label {
+  margin: 14px 10px 7px;
+  color: #717a6f;
+  font-size: 0.67rem;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.recent-project-list button {
+  color: #aeb5aa;
+}
+
+.project-list button:disabled {
+  cursor: wait;
+  opacity: 0.65;
 }
 
 .project-list small {

@@ -136,7 +136,7 @@ fn set_native_menu(
     commands: Vec<NativeMenuCommand>,
 ) -> Result<(), BridgeError> {
     let mut menu = MenuBuilder::new(&app);
-    for category in ["GraphCode", "Loop", "Navigation"] {
+    for category in ["GraphCode", "Project", "Loop", "Navigation"] {
         let category_commands: Vec<_> = commands
             .iter()
             .filter(|command| command.category == category)
@@ -173,6 +173,7 @@ fn set_native_menu(
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .manage(BridgeState::default())
         .on_menu_event(|app, event| {
             let _ = app.emit("menu://command", event.id().as_ref());
