@@ -73,18 +73,17 @@ The React client is currently a live, read-only protocol demonstration:
 
 It is not yet an application-equivalent client. A persistent connection actor,
 stable canvas selection, and a responsive read-only node inspector now exist, but
-there is no New Loop dialog, edit/message forms, native Tauri menu, project ingress,
+there are no edit/message forms, native Tauri menu, project ingress,
 Quick Chats, global overview, graph pan/zoom/layout persistence, terminals,
 workspaces, settings, updates, native lifecycle, or packaging integration.
 
-The highest-value next slice is:
+The first usable vertical slice is now implemented:
 
-> **stable node selection + right-side inspector + visible New Loop flow + typed
-> `createNode` command**
+> **persistent connection + stable node selection + right-side inspector + shared
+> command registry + visible New Loop flow + typed `createNode` command**
 
-That slice converts the React build from a passive preview into a minimally useful
-graph client while establishing the command/state architecture needed by every
-later feature.
+The next highest-value slice is inspector mutation parity (edit, message, memo,
+restart/resume and delete), followed by project ingress and graph viewport/layout.
 
 ## Complete capability matrix
 
@@ -104,6 +103,7 @@ later feature.
 | Graph pan/zoom/fit | Pointer pan, wheel/pinch anchored zoom, zoom controls, persisted canvas layout | Client-local persistence | **Missing** | Pointer/keyboard viewport controls; visible fit/zoom actions | P1 | M | 60 fps target; focus and hit testing remain aligned at all zooms |
 | Graph layout persistence | Per-project canvas pan/zoom and node layout | Client-local `CanvasLayoutStore` | **Missing** | Tauri app-data layout store versioned by project/graph | P1 | M | Restart restores layout; corrupt entries fail visibly and reset locally |
 | Node inspector | Win32 information/actions are fragmented across card, context menu, forms, loop bar and workspace | Most fields already in `LoopNode`; mailbox is separate | **Partial**: responsive inspector shows snapshot-backed overview, brief, goal/metrics/budget, usage, worktree, attachments, activity/summary/board, Mailroom metadata, composite state and provenance; registry-driven Stop works while remaining mutations and memory history are disabled explicitly | Add remaining registry actions and DT-001 memory pages | P0 | M | Selecting a node exposes complete supported data/actions without opening a modal |
+| New Loop creation | Native modal creates Turn, Timed, Goal and Composite drafts with backend/model/worktree/template/attachment support | Existing `createNode(NodeDraft)` | **Partial**: visible header/`Ctrl+N`/palette action opens a four-step accessible dialog for all five domain types, validates backend capabilities, recurrence, complete goal policy and worktree tuples, sends typed `NodeDraft`, surfaces refusal, and selects the authoritative created node; templates/attachments await DT-005/native staging | Add native template/attachment adapters and installed-backend discovery | P0 | M | Every supported non-template/non-attachment draft round-trips and appears only from daemon state |
 | Node state and attention | Idle/running/awaiting/blocked/waiting/succeeded/failed/stalled/stopped, presence, active dependents, reasons | `LoopNode.state`, `presence`, `stallReason`, `launchFailure`, `resolution`, edges | **Partial**: inspector exposes state, presence, active dependents, stall/launch/resolution reasons; cross-project Needs You remains | Add attention aggregation and color-independent icons | P0 | M | Every enum case has distinct label, color-independent icon and explanation |
 | Open terminal | Context action and workspace transition | No daemon command required for attach; zmx session identity from node UUID | **Missing/Blocked** | Primary inspector action; opens/reuses workspace pane | P1 | XL; zmx streaming | Real attach/input/resize/reconnect gate passes; closing pane preserves session |
 | Node stop | Context/menu/shortcut | Existing `stopNode` | **Implemented** for selected unresolved loops through registry, overflow, `Ctrl+S`, confirmation and correlated errors | Add state-sensitive wording only if user testing requires it | P0 | S | Correlated refusal shown; node remains and transcript survives |
@@ -114,13 +114,13 @@ later feature.
 | Message node | Keyboard/action vocabulary; daemon supports immediate/follow-up; native popup does not expose it consistently | Existing `messageNode(... followUp:)` | **Missing** | Inspector Message action with Immediate / When idle choice | P1 | M | Follow-up flag mapped; delivery/refusal status visible |
 | Memo and playbook | Memo command exists; refine/rollback supported by daemon; no unified native viewer | Existing `memoNode`, `refineNode`, `rollbackRefinement`; no memory-read event | **Blocked/partial protocol** | Inspector Memory tab with write actions; read history requires new API | P1 | L | Memo/refine commands work; history is not fabricated when unavailable |
 | Goal completion | Daemon can report completion/result | Existing `completeNode` | **Missing** | Goal-only “Mark complete” action with optional result | P1 | S | Only goal-compatible states expose action; result reaches authoritative snapshot |
-| Goal/predicate/metric/budget | Native forms expose summary, predicate, poll, stall, metric; current domain also has token budget and skip-unchanged | Existing `GoalSpec`, `NodeUpdate` | **Missing** | Inspector Goal section and New Loop advanced goal controls | P0 | M | Full `GoalSpec` round-trips, including budget and skip-unchanged |
-| Prompt/check/recurrence | Turn instruction/check/pause, timed prompt, optional daemon heartbeat | Existing `NodeDraft`, `NodeUpdate`; heartbeat gated by setting/capability | **Missing** | Type-specific Brief section; cadence choice is explicit | P0 | M | Invalid/unsupported recurrence cannot submit |
-| Backend and model | Native create offers default, Claude, Copilot, Codex; domain has Claude/Copilot/Codex/OpenCode/pi and model tiers | Existing `CLISessionBackendKind`, `ModelTier`; backend immutable in `NodeUpdate` | **Missing** | Show all offerable installed backends; distinguish inherited/default model | P0 | M; capability discovery | Payload uses null for inherited choices; unavailable backends explain why |
-| Worktree binding | Native create can bind complete repository/path/branch tuple; management dialog and policy | Existing `WorktreeRef`; no live update by design | **Missing** | New Loop execution section plus project Worktrees surface | P1 | L | Partial binding impossible; immutable binding is explained after creation |
+| Goal/predicate/metric/budget | Native forms expose summary, predicate, poll, stall, metric; current domain also has token budget and skip-unchanged | Existing `GoalSpec`, `NodeUpdate` | **Partial**: complete create flow and read-only inspector; update form remains | Reuse New Loop controls for section-level `NodeUpdate` | P0 | M | Full `GoalSpec` round-trips, including budget and skip-unchanged |
+| Prompt/check/recurrence | Turn instruction/check/pause, timed prompt, optional daemon heartbeat | Existing `NodeDraft`, `NodeUpdate`; heartbeat gated by setting/capability | **Partial**: create flow supports Main/Turn prompts, checks, pause policy, timed task, session cadence and daemon heartbeat; edit remains | Add shared settings read for heartbeat gating and reuse controls for edit | P0 | M | Invalid/unsupported recurrence cannot submit |
+| Backend and model | Native create offers default, Claude, Copilot, Codex; domain has Claude/Copilot/Codex/OpenCode/pi and model tiers | Existing `CLISessionBackendKind`, `ModelTier`; backend immutable in `NodeUpdate` | **Partial**: all domain choices and host-capability rules are encoded; installed/version capability discovery remains | Add native availability/version discovery and keep inherited/default distinct | P0 | M; capability discovery | Payload uses null for inherited choices; unavailable backends explain why |
+| Worktree binding | Native create can bind complete repository/path/branch tuple; management dialog and policy | Existing `WorktreeRef`; no live update by design | **Partial**: create flow validates and sends complete existing-worktree tuples; picker/management/policy surface remains | Replace manual fields with native project Worktrees selection | P1 | L | Partial binding impossible; immutable binding is explained after creation |
 | Attachments and drag/drop | Attach/remove up to 8, 10 MB each, supported image/text/document types, staged cleanup | Existing `[PromptAttachment]` in `NodeDraft`; native file staging required | **Missing** | Drop zone + picker + ordered attachment list | P1 | L; lifecycle/security | Limits enforced before copy; cancel removes staged files; placeholders stay consistent |
 | Templates | Project/user Markdown library, picker, save as template, detach following template | Existing filesystem format; `createdFromTemplateID`, `templateFollow`, `detachTemplate` | **Missing** | Template-first New Loop path and inspector attribution | P1 | L; local/remote filesystem semantics | Precedence/deduplication match; follow allowed only for timed/composite |
-| Composite loops | Create composite, open group, pilot once, arm schedule, nested command routing | Existing subgraph, `subGraphCommand`, `pilotComposite`, `armComposite` | **Missing** | Inspector Composite section and breadcrumb/drill-in canvas | P1 | L | Arm disabled until piloted; nested mutations address parent chain correctly |
+| Composite loops | Create composite, open group, pilot once, arm schedule, nested command routing | Existing subgraph, `subGraphCommand`, `pilotComposite`, `armComposite` | **Partial**: New Loop creates named composites with optional intended schedule and inspector shows pilot/child state; drill-in, pilot and arm remain | Add breadcrumb/drill-in and registry actions | P1 | L | Arm disabled until piloted; nested mutations address parent chain correctly |
 | Edge creation/edit/delete | Drag connector and modal spec editor; context actions | Existing `createEdge`, `deleteEdge`; no atomic `updateEdge` command | **Missing/Blocked for edit** | Connector drag plus accessible Create/Edit Edge dialog; add atomic update rather than delete/recreate | P1 | L | Keyboard alternative exists; invalid cycles/specs show daemon refusal; edit preserves edge identity |
 | Entry/unwired actions | Native context offers Wire it up / Mark as entry for unwired loops | Primarily client topology/layout; authoritative mutation must use existing edge/ordering support | **Missing** | Contextual inspector/canvas guidance, not permanent toolbar actions | P2 | M | Only unwired nodes expose actions; resulting topology persists |
 | Memory history | Session memory exists on disk and export bundles include it | No current daemon read command/event | **Blocked** | Add `nodeMemory(projectPath,nodeID,cursor,limit)` response or narrow native reader | P1 | L; privacy and remote access | Bounded pagination, redaction/logging policy, local and remote semantics |
@@ -748,9 +748,9 @@ K. zmx streaming spike
    - Tray, notifications, onboarding, updates, diagnostics, import/export and package
      integration.
 
-### Next vertical slice
+### Implemented vertical slice
 
-Deliver this as the next independently testable milestone:
+The following milestone is implemented on `simra/tauri`:
 
 1. persistent daemon connection with a typed `sendCommand`;
 2. node selection by click and keyboard;
@@ -759,18 +759,21 @@ Deliver this as the next independently testable milestone:
 5. New Loop dialog for all five domain loop types;
 6. correlated `createNode` submission;
 7. authoritative snapshot selects and displays the new node;
-8. native Loop > New Loop item, Ctrl+N and command-palette entry all invoke the same
-   command.
+8. header, Ctrl+N and command-palette entry all invoke the same registry command.
 
-Acceptance:
+Current acceptance:
 
 - A user can connect, select a real node, understand its state/configuration, create a
   valid loop without raw JSON, see daemon validation errors, and inspect the created
   loop.
-- The flow is keyboard- and Narrator-operable.
+- The flow is keyboard-operable with dialog semantics and focus trapping; a Windows
+  Narrator smoke test remains a release gate.
 - No fixture or client-only graph mutation is used.
 - Daemon restart during a draft preserves the draft locally, reconnects, and requires
   explicit resubmission rather than guessing whether creation succeeded.
+
+Native Tauri menu projection remains intentionally separate; the React client does
+not recreate the full Win32 menu bar.
 
 ## Protocol changes and blockers
 

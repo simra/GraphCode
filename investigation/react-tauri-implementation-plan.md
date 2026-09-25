@@ -26,7 +26,8 @@ The connection layer now has a persistent Rust actor with stable client identity
 request correlation, acknowledged replay cursors, reconnect/resync handling and
 explicit unknown-outcome errors. It still needs daemon-restart integration tests
 and byte-based queue limits. The slice does **not** yet provide graph mutation
-forms, settings, terminal streaming, packaging, or production parity.
+parity beyond typed Stop and New Loop creation, settings, terminal streaming,
+packaging, or production parity.
 
 ## Goals
 
