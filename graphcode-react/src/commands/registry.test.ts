@@ -138,4 +138,39 @@ describe("command registry", () => {
     expect(zoomIn).toHaveBeenCalledOnce();
     expect(fitGraph).toHaveBeenCalledOnce();
   });
+
+  it("requires a completed pilot before a composite can be armed", () => {
+    const state = stateWithSelectedNode();
+    const node = state.graphs["C:\\work\\graph"].nodes[0];
+    node.loopType = "proactive";
+    node.subGraph = {
+      id: "child",
+      project: { path: "C:\\work\\graph", name: "Child" },
+      nodes: [],
+      edges: [],
+    };
+    node.pilotState = "notPiloted";
+    const actions = {
+      openPalette: vi.fn(),
+      clearSelection: vi.fn(),
+      selectNode: vi.fn(),
+      pilotComposite: vi.fn(async () => undefined),
+      armComposite: vi.fn(async () => undefined),
+    };
+
+    let commands = createCommandRegistry(state, actions);
+    expect(
+      commands.find((command) => command.id === "loop.pilotComposite")?.enabled,
+    ).toBe(true);
+    expect(
+      commands.find((command) => command.id === "loop.armComposite")
+        ?.disabledReason,
+    ).toContain("Pilot");
+
+    node.pilotState = "piloted";
+    commands = createCommandRegistry(state, actions);
+    expect(
+      commands.find((command) => command.id === "loop.armComposite")?.enabled,
+    ).toBe(true);
+  });
 });

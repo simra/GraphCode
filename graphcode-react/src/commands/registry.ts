@@ -14,6 +14,8 @@ export type CommandId =
   | "loop.edit"
   | "loop.message"
   | "loop.memo"
+  | "loop.pilotComposite"
+  | "loop.armComposite"
   | "loop.openTerminal"
   | "view.zoomIn"
   | "view.zoomOut"
@@ -60,6 +62,8 @@ export interface CommandActions {
   editNode?(): void;
   messageNode?(): void;
   memoNode?(): void;
+  pilotComposite?(): Promise<void>;
+  armComposite?(): Promise<void>;
   restartSession?(): Promise<void>;
   completeNode?(): void;
   deleteNode?(): Promise<void>;
@@ -96,6 +100,10 @@ export function createCommandRegistry(
     ["succeeded", "failed", "stalled", "stopped"].includes(
       encodedCase(node.state) ?? "",
     );
+  const pilotState = node?.pilotState
+    ? encodedCase(node.pilotState)
+    : "notPiloted";
+  const isComposite = node?.loopType === "proactive" && Boolean(node.subGraph);
   const selectedIndex = graph?.nodes.findIndex(
     (candidate) => candidate.id === node?.id,
   );
@@ -257,6 +265,66 @@ export function createCommandRegistry(
                 ? "Reconnect to graphcoded before adding a memo"
                 : "Select a loop first",
             ),
+            execute: () => undefined,
+          }),
+    },
+    {
+      id: "loop.pilotComposite",
+      label: "Pilot Composite Once",
+      description: "Run the child graph once before enabling its live trigger",
+      category: "Loop",
+      surfaces: ["node"],
+      ...(isComposite
+        ? pilotState === "piloting"
+          ? {
+              ...unavailable("This composite pilot is already running"),
+              execute: () => undefined,
+            }
+          : pilotState === "armed"
+            ? {
+                ...unavailable("This composite is already armed"),
+                execute: () => undefined,
+              }
+            : connected && actions.pilotComposite
+              ? { enabled: true, execute: actions.pilotComposite }
+              : {
+                  ...unavailable(
+                    "Reconnect to graphcoded before piloting this composite",
+                  ),
+                  execute: () => undefined,
+                }
+        : {
+            ...unavailable("Select a composite with a child graph first"),
+            execute: () => undefined,
+          }),
+    },
+    {
+      id: "loop.armComposite",
+      label: "Arm Composite Schedule",
+      description: "Enable the piloted child graph against its live trigger",
+      category: "Loop",
+      surfaces: ["node"],
+      danger: true,
+      ...(isComposite
+        ? pilotState === "piloted"
+          ? connected && actions.armComposite
+            ? { enabled: true, execute: actions.armComposite }
+            : {
+                ...unavailable(
+                  "Reconnect to graphcoded before arming this composite",
+                ),
+                execute: () => undefined,
+              }
+          : {
+              ...unavailable(
+                pilotState === "armed"
+                  ? "This composite is already armed"
+                  : "Pilot this composite successfully before arming it",
+              ),
+              execute: () => undefined,
+            }
+        : {
+            ...unavailable("Select a composite with a child graph first"),
             execute: () => undefined,
           }),
     },

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  armCompositeCommand,
   completeNodeCommand,
   createNodeCommand,
   deleteNodeCommand,
@@ -7,6 +8,7 @@ import {
   memoNodeCommand,
   messageNodeCommand,
   refreshUsageCommand,
+  pilotCompositeCommand,
   renameNodeCommand,
   restartNodeCommand,
   resumeSessionCommand,
@@ -167,6 +169,23 @@ describe("daemon commands", () => {
         command: {
           memoNode: { _0: node, text: "Remember this", from: null },
         },
+      },
+    });
+  });
+
+  it("encodes composite pilot and arm commands as unary UUID cases", () => {
+    const project = "C:\\work\\graph";
+    const node = "11111111-1111-4111-8111-111111111111";
+    expect(pilotCompositeCommand(project, node)).toEqual({
+      graphCommand: {
+        projectPath: project,
+        command: { pilotComposite: { _0: node } },
+      },
+    });
+    expect(armCompositeCommand(project, node)).toEqual({
+      graphCommand: {
+        projectPath: project,
+        command: { armComposite: { _0: node } },
       },
     });
   });

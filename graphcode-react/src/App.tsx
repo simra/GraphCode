@@ -33,12 +33,14 @@ import { NewLoopDialog } from "./components/NewLoopDialog";
 import { NodeInspector } from "./components/NodeInspector";
 import { initialSnapshotFixture } from "./fixtures/initialSnapshot";
 import {
+  armCompositeCommand,
   completeNodeCommand,
   createNodeCommand,
   deleteNodeCommand,
   memoNodeCommand,
   messageNodeCommand,
   openProjectCommand,
+  pilotCompositeCommand,
   refreshUsageCommand,
   renameNodeCommand,
   restartNodeCommand,
@@ -236,6 +238,36 @@ export default function App() {
                   nodeId: inspectedNode.id,
                   nodeTitle: inspectedNode.title,
                 })
+            : undefined,
+        pilotComposite:
+          selectedProjectPath && inspectedNode
+            ? async () => {
+                if (
+                  !window.confirm(
+                    `Pilot "${inspectedNode.title}" once now? Its unattended child loops will run and incur real backend usage.`,
+                  )
+                ) {
+                  return;
+                }
+                await sendDaemonCommand(
+                  pilotCompositeCommand(selectedProjectPath, inspectedNode.id),
+                );
+              }
+            : undefined,
+        armComposite:
+          selectedProjectPath && inspectedNode
+            ? async () => {
+                if (
+                  !window.confirm(
+                    `Arm "${inspectedNode.title}" against its live trigger? This enables its piloted child graph to run on schedule.`,
+                  )
+                ) {
+                  return;
+                }
+                await sendDaemonCommand(
+                  armCompositeCommand(selectedProjectPath, inspectedNode.id),
+                );
+              }
             : undefined,
         restartSession:
           selectedProjectPath && inspectedNode

@@ -134,6 +134,14 @@ export type MemoNodeCommand = GraphCommandEnvelope<{
   };
 }>;
 
+export type PilotCompositeCommand = GraphCommandEnvelope<{
+  pilotComposite: { _0: string };
+}>;
+
+export type ArmCompositeCommand = GraphCommandEnvelope<{
+  armComposite: { _0: string };
+}>;
+
 export function stopNodeCommand(
   projectPath: string,
   nodeId: string,
@@ -286,6 +294,30 @@ export function memoNodeCommand(
       command: {
         memoNode: { _0: nodeId, text, from: null },
       },
+    },
+  };
+}
+
+export function pilotCompositeCommand(
+  projectPath: string,
+  nodeId: string,
+): PilotCompositeCommand {
+  return {
+    graphCommand: {
+      projectPath,
+      command: { pilotComposite: { _0: nodeId } },
+    },
+  };
+}
+
+export function armCompositeCommand(
+  projectPath: string,
+  nodeId: string,
+): ArmCompositeCommand {
+  return {
+    graphCommand: {
+      projectPath,
+      command: { armComposite: { _0: nodeId } },
     },
   };
 }
