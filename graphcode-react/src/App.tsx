@@ -14,14 +14,24 @@ import {
 import { CommandPalette } from "./components/CommandPalette";
 import { ConnectionBanner } from "./components/ConnectionBanner";
 import { GraphCanvas } from "./components/GraphCanvas";
+import { NewLoopDialog } from "./components/NewLoopDialog";
 import { NodeInspector } from "./components/NodeInspector";
 import { initialSnapshotFixture } from "./fixtures/initialSnapshot";
-import { stopNodeCommand } from "./protocol/commands";
+import {
+  createNodeCommand,
+  stopNodeCommand,
+  type NodeDraftPayload,
+} from "./protocol/commands";
 import { appReducer, initialAppState, selectedNode } from "./state/graphState";
 
 export default function App() {
   const [state, dispatch] = useReducer(appReducer, initialAppState);
   const [paletteOpen, setPaletteOpen] = useState(false);
+  const [newLoopOpen, setNewLoopOpen] = useState(false);
+  const [pendingCreatedNode, setPendingCreatedNode] = useState<{
+    projectPath: string;
+    nodeId: string;
+  }>();
   const [pendingCommandId, setPendingCommandId] = useState<CommandId>();
   const [commandError, setCommandError] = useState<string>();
 
@@ -91,6 +101,7 @@ export default function App() {
     () =>
       createCommandRegistry(state, {
         openPalette: () => setPaletteOpen(true),
+        openNewLoop: () => setNewLoopOpen(true),
         clearSelection: () => dispatch({ type: "clearNodeSelection" }),
         selectNode: (nodeId) => {
           if (!state.selectedProjectPath) return;
@@ -118,6 +129,20 @@ export default function App() {
       }),
     [inspectedNode, selectedProjectPath, state],
   );
+
+  useEffect(() => {
+    if (!pendingCreatedNode) return;
+    const graph = state.graphs[pendingCreatedNode.projectPath];
+    if (!graph?.nodes.some((node) => node.id === pendingCreatedNode.nodeId)) {
+      return;
+    }
+    dispatch({
+      type: "selectNode",
+      projectPath: pendingCreatedNode.projectPath,
+      nodeId: pendingCreatedNode.nodeId,
+    });
+    setPendingCreatedNode(undefined);
+  }, [pendingCreatedNode, state.graphs]);
 
   const executeCommand = useCallback(async (command: AppCommand) => {
     if (!command.enabled) return;
@@ -270,6 +295,26 @@ export default function App() {
         onClose={() => setPaletteOpen(false)}
         onExecute={(command) => void executeCommand(command)}
       />
+      {newLoopOpen && selectedGraph && selectedProjectPath ? (
+        <NewLoopDialog
+          projectName={selectedGraph.project.name}
+          onClose={() => setNewLoopOpen(false)}
+          onCreate={async (draft: NodeDraftPayload) => {
+            setPendingCreatedNode({
+              projectPath: selectedProjectPath,
+              nodeId: draft.id,
+            });
+            try {
+              await sendDaemonCommand(
+                createNodeCommand(selectedProjectPath, draft),
+              );
+            } catch (error) {
+              setPendingCreatedNode(undefined);
+              throw error;
+            }
+          }}
+        />
+      ) : null}
     </main>
   );
 }
