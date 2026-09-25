@@ -4,6 +4,7 @@ import type {
   DaemonWireEnvelope,
   LoopGraph,
   LoopNode,
+  Mailbox,
 } from "./domain";
 
 const uuidLike = z.string().min(1);
@@ -103,6 +104,32 @@ const summaryBoardSchema = z
   })
   .passthrough();
 
+const mailroomDigestSchema = z.object({
+  count: z.number().int().nonnegative(),
+  latestID: z.number().int().nonnegative(),
+  fingerprint: z.number().nonnegative(),
+});
+
+const mailroomPostSchema = z.object({
+  id: z.number().int().positive(),
+  at: z.union([z.string(), z.number()]),
+  authorID: optional(uuidLike),
+  author: z.string(),
+  topic: optional(z.string()),
+  body: z.string(),
+  kind: z.enum(["notice", "letter"]).default("notice"),
+});
+
+const mailboxSchema: z.ZodType<Mailbox> = z.object({
+  posts: z.array(mailroomPostSchema),
+  bodiesTrimmed: z.boolean(),
+  digest: mailroomDigestSchema,
+  lastRead: optional(z.number().int().nonnegative()),
+  highestDeliveredID: optional(z.number().int().nonnegative()),
+  remaining: z.number().int().nonnegative().default(0),
+  prunedUnread: z.number().int().nonnegative().default(0),
+});
+
 const loopNodeSchema: z.ZodType<LoopNode> = z.lazy(() =>
   z
     .object({
@@ -164,6 +191,7 @@ const loopGraphSchema: z.ZodType<LoopGraph> = z.lazy(() =>
       project: projectRefSchema,
       nodes: z.array(loopNodeSchema).default([]),
       edges: z.array(loopEdgeSchema).default([]),
+      mailroomDigest: optional(mailroomDigestSchema),
       revision: z.number().int().nonnegative().optional(),
     })
     .passthrough(),
@@ -239,6 +267,15 @@ function decodeEvent(raw: Record<string, unknown>): DaemonEvent {
       };
     case "nodesChanged":
       return { type: name, change: nodesChangedSchema.parse(payload) };
+    case "mailbox": {
+      const decoded = z
+        .object({
+          projectPath: z.string().min(1),
+          mailbox: mailboxSchema,
+        })
+        .parse(payload);
+      return { type: name, ...decoded };
+    }
     case "errorOccurred":
       return {
         type: name,

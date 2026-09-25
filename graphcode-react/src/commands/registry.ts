@@ -19,6 +19,8 @@ export type CommandId =
   | "loop.memo"
   | "loop.pilotComposite"
   | "loop.armComposite"
+  | "loop.mailroomRefresh"
+  | "loop.mailroomPost"
   | "loop.openTerminal"
   | "view.zoomIn"
   | "view.zoomOut"
@@ -67,6 +69,8 @@ export interface CommandActions {
   memoNode?(): void;
   pilotComposite?(): Promise<void>;
   armComposite?(): Promise<void>;
+  refreshMailroom?(): Promise<void>;
+  postMailroom?(): void;
   restartSession?(): Promise<void>;
   completeNode?(): void;
   deleteNode?(): Promise<void>;
@@ -334,6 +338,40 @@ export function createCommandRegistry(
             }
         : {
             ...unavailable("Select a composite with a child graph first"),
+            execute: () => undefined,
+          }),
+    },
+    {
+      id: "loop.mailroomRefresh",
+      label: "Refresh Mailroom",
+      description: "Load the bounded project Mailroom board",
+      category: "Loop",
+      surfaces: ["node"],
+      ...(node && connected && actions.refreshMailroom
+        ? { enabled: true, execute: actions.refreshMailroom }
+        : {
+            ...unavailable(
+              node
+                ? "Reconnect to graphcoded before reading the Mailroom"
+                : "Select a loop first",
+            ),
+            execute: () => undefined,
+          }),
+    },
+    {
+      id: "loop.mailroomPost",
+      label: "Post to Mailroom",
+      description: "Post an unaddressed note to this project's loops",
+      category: "Loop",
+      surfaces: ["node"],
+      ...(node && connected && actions.postMailroom
+        ? { enabled: true, execute: actions.postMailroom }
+        : {
+            ...unavailable(
+              node
+                ? "Reconnect to graphcoded before posting to the Mailroom"
+                : "Select a loop first",
+            ),
             execute: () => undefined,
           }),
     },

@@ -3,6 +3,7 @@ import type {
   DaemonWireEnvelope,
   LoopGraph,
   LoopNode,
+  Mailbox,
   ProjectRef,
 } from "../protocol/domain";
 
@@ -24,6 +25,7 @@ export interface AppState {
   };
   recentProjects: ProjectRef[];
   graphs: Record<string, LoopGraph>;
+  mailboxes: Record<string, Mailbox>;
   selectedProjectPath?: string;
   selectedNodeId?: string;
   lastSequence: number;
@@ -55,6 +57,7 @@ export const initialAppState: AppState = {
   connection: { phase: "idle", usingFixture: false },
   recentProjects: [],
   graphs: {},
+  mailboxes: {},
   lastSequence: 0,
   protocolWarnings: [],
 };
@@ -108,6 +111,14 @@ function applyDaemonEvent(state: AppState, event: DaemonEvent): AppState {
         graphs: { ...state.graphs, [event.change.projectPath]: graph },
       };
     }
+    case "mailbox":
+      return {
+        ...state,
+        mailboxes: {
+          ...state.mailboxes,
+          [event.projectPath]: event.mailbox,
+        },
+      };
     case "errorOccurred":
       return {
         ...state,
@@ -186,6 +197,8 @@ export function appReducer(state: AppState, action: AppAction): AppState {
     case "projectRemoved": {
       const graphs = { ...state.graphs };
       delete graphs[action.path];
+      const mailboxes = { ...state.mailboxes };
+      delete mailboxes[action.path];
       const recentProjects = action.removeFromRecents
         ? state.recentProjects.filter(
             (project) =>
@@ -193,7 +206,7 @@ export function appReducer(state: AppState, action: AppAction): AppState {
           )
         : state.recentProjects;
       if (state.selectedProjectPath !== action.path) {
-        return { ...state, graphs, recentProjects };
+        return { ...state, graphs, mailboxes, recentProjects };
       }
       const fallback =
         graphs["graphcode://global"]?.project.path ??
@@ -204,6 +217,7 @@ export function appReducer(state: AppState, action: AppAction): AppState {
       return {
         ...state,
         graphs,
+        mailboxes,
         recentProjects,
         selectedProjectPath: fallback,
         selectedNodeId: undefined,

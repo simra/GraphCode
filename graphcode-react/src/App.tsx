@@ -29,6 +29,7 @@ import { ConnectionBanner } from "./components/ConnectionBanner";
 import { EditLoopDialog } from "./components/EditLoopDialog";
 import { GraphCanvas, type GraphCanvasHandle } from "./components/GraphCanvas";
 import { LoopTextDialog } from "./components/LoopTextDialog";
+import { MailroomPostDialog } from "./components/MailroomPostDialog";
 import { MessageLoopDialog } from "./components/MessageLoopDialog";
 import { NewLoopDialog } from "./components/NewLoopDialog";
 import { NodeInspector } from "./components/NodeInspector";
@@ -42,6 +43,8 @@ import {
   deleteNodeCommand,
   deleteProjectGraphCommand,
   forgetProjectCommand,
+  mailboxCommand,
+  mailroomPostCommand,
   memoNodeCommand,
   messageNodeCommand,
   openProjectCommand,
@@ -69,6 +72,10 @@ export default function App() {
     projectPath: string;
     nodeId: string;
     nodeTitle: string;
+  }>();
+  const [mailroomPosting, setMailroomPosting] = useState<{
+    projectPath: string;
+    projectName: string;
   }>();
   const [pendingCreatedNode, setPendingCreatedNode] = useState<{
     projectPath: string;
@@ -274,6 +281,19 @@ export default function App() {
                 );
               }
             : undefined,
+        refreshMailroom: selectedProjectPath
+          ? async () => {
+              await sendDaemonCommand(mailboxCommand(selectedProjectPath));
+            }
+          : undefined,
+        postMailroom:
+          selectedProjectPath && selectedGraph
+            ? () =>
+                setMailroomPosting({
+                  projectPath: selectedProjectPath,
+                  projectName: selectedGraph.project.name,
+                })
+            : undefined,
         restartSession:
           selectedProjectPath && inspectedNode
             ? async () => {
@@ -335,6 +355,7 @@ export default function App() {
       inspectedNodeResolved,
       requestOpenProject,
       selectedProjectPath,
+      selectedGraph,
       state,
     ],
   );
@@ -657,6 +678,11 @@ export default function App() {
           <NodeInspector
             graph={selectedGraph}
             node={inspectedNode}
+            mailbox={
+              selectedProjectPath
+                ? state.mailboxes[selectedProjectPath]
+                : undefined
+            }
             commands={nodeCommands}
             pendingCommandId={pendingCommandId}
             onClose={() => dispatch({ type: "clearNodeSelection" })}
@@ -718,6 +744,20 @@ export default function App() {
                 text,
                 followUp,
               ),
+            );
+          }}
+        />
+      ) : null}
+      {mailroomPosting ? (
+        <MailroomPostDialog
+          projectName={mailroomPosting.projectName}
+          onClose={() => setMailroomPosting(undefined)}
+          onPost={async (body, topic) => {
+            await sendDaemonCommand(
+              mailroomPostCommand(mailroomPosting.projectPath, body, topic),
+            );
+            await sendDaemonCommand(
+              mailboxCommand(mailroomPosting.projectPath),
             );
           }}
         />
