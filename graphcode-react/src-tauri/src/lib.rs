@@ -1,25 +1,36 @@
+mod connection;
 mod endpoint;
 mod protocol;
 mod transport;
 
+use std::sync::Mutex;
+
+use connection::ConnectionHandle;
 use endpoint::discover;
-use protocol::{negotiate, read_frame, request, write_frame};
 use serde::Serialize;
-use serde_json::{json, Value};
+use serde_json::Value;
+use tauri::{Manager, State};
 use thiserror::Error;
-use tokio::time::{timeout, Duration};
-use uuid::Uuid;
+
+#[derive(Default)]
+struct BridgeState {
+    connection: Mutex<Option<ConnectionHandle>>,
+}
 
 #[derive(Debug, Error)]
 enum BridgeError {
     #[error(transparent)]
     Endpoint(#[from] endpoint::EndpointError),
+    #[error("failed to resolve Tauri application data directory: {0}")]
+    AppData(String),
+    #[error("failed to load persistent daemon client identity: {0}")]
+    ClientIdentity(String),
+    #[error("failed to load persistent daemon replay state: {0}")]
+    ReplayState(String),
+    #[error("daemon connection has not been started")]
+    NotStarted,
     #[error(transparent)]
-    Transport(#[from] transport::TransportError),
-    #[error(transparent)]
-    Protocol(#[from] protocol::ProtocolError),
-    #[error("graphcoded did not answer the initial state request before the deadline")]
-    InitialStateTimeout,
+    Connection(#[from] connection::ConnectionError),
 }
 
 impl Serialize for BridgeError {
@@ -33,60 +44,86 @@ impl Serialize for BridgeError {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct InitialDaemonState {
+struct ConnectionStart {
     endpoint: String,
-    frames: Vec<Value>,
-}
-
-fn response_matches_request(frame: &Value, request_id: Uuid) -> bool {
-    frame
-        .get("requestID")
-        .and_then(Value::as_str)
-        .and_then(|value| Uuid::parse_str(value).ok())
-        == Some(request_id)
+    client_id: String,
+    resume_from: Option<u64>,
 }
 
 #[tauri::command]
-async fn connect_initial_daemon_state() -> Result<InitialDaemonState, BridgeError> {
+async fn start_daemon_connection(
+    app: tauri::AppHandle,
+    state: State<'_, BridgeState>,
+) -> Result<ConnectionStart, BridgeError> {
     let endpoint = discover()?;
     let endpoint_name = endpoint.display_name();
-    let mut stream = transport::connect(&endpoint).await?;
-    negotiate(&mut stream).await?;
+    let state_directory = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| BridgeError::AppData(error.to_string()))?;
+    let client_id = connection::load_or_create_client_id(&state_directory)
+        .map_err(|error| BridgeError::ClientIdentity(error.to_string()))?;
+    let resume_from = connection::load_replay_cursor(&state_directory)
+        .map_err(|error| BridgeError::ReplayState(error.to_string()))?;
 
-    let (_, announce) = request(json!({
-        "announce": { "capabilities": ["nodesChanged"] }
-    }));
-    write_frame(&mut stream, &announce).await?;
-    let (_, restore) = request(json!({ "restoreOpenProjects": {} }));
-    write_frame(&mut stream, &restore).await?;
-    let (recent_id, recent) = request(json!({ "listRecentProjects": {} }));
-    write_frame(&mut stream, &recent).await?;
+    let mut guard = state
+        .connection
+        .lock()
+        .expect("bridge state mutex poisoned");
+    if guard.is_none() {
+        *guard = Some(connection::spawn(
+            app,
+            endpoint,
+            state_directory,
+            client_id,
+            resume_from,
+        ));
+    }
 
-    let mut frames = Vec::new();
-    let collect = async {
-        loop {
-            let frame = read_frame(&mut stream).await?;
-            let is_recent_response = response_matches_request(&frame, recent_id);
-            frames.push(frame);
-            if is_recent_response {
-                return Ok::<(), protocol::ProtocolError>(());
-            }
-        }
-    };
-    timeout(Duration::from_secs(15), collect)
-        .await
-        .map_err(|_| BridgeError::InitialStateTimeout)??;
-
-    Ok(InitialDaemonState {
+    Ok(ConnectionStart {
         endpoint: endpoint_name,
-        frames,
+        client_id: client_id.to_string(),
+        resume_from,
     })
+}
+
+#[tauri::command]
+async fn send_daemon_command(
+    state: State<'_, BridgeState>,
+    command: Value,
+) -> Result<Value, BridgeError> {
+    let connection = state
+        .connection
+        .lock()
+        .expect("bridge state mutex poisoned")
+        .clone()
+        .ok_or(BridgeError::NotStarted)?;
+    connection.request(command).await.map_err(Into::into)
+}
+
+#[tauri::command]
+async fn acknowledge_daemon_sequence(
+    state: State<'_, BridgeState>,
+    sequence: u64,
+) -> Result<(), BridgeError> {
+    let connection = state
+        .connection
+        .lock()
+        .expect("bridge state mutex poisoned")
+        .clone()
+        .ok_or(BridgeError::NotStarted)?;
+    connection.acknowledge(sequence).await.map_err(Into::into)
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![connect_initial_daemon_state])
+        .manage(BridgeState::default())
+        .invoke_handler(tauri::generate_handler![
+            start_daemon_connection,
+            send_daemon_command,
+            acknowledge_daemon_sequence
+        ])
         .run(tauri::generate_context!())
         .expect("failed to run GraphCode React");
 }
@@ -94,6 +131,18 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol::{negotiate, read_frame, request, write_frame};
+    use serde_json::json;
+    use tokio::time::{timeout, Duration};
+    use uuid::Uuid;
+
+    fn response_matches_request(frame: &Value, request_id: Uuid) -> bool {
+        frame
+            .get("requestID")
+            .and_then(Value::as_str)
+            .and_then(|value| Uuid::parse_str(value).ok())
+            == Some(request_id)
+    }
 
     #[test]
     fn request_correlation_accepts_swift_uppercase_uuid_encoding() {

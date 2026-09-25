@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useReducer } from "react";
-import { connectInitialDaemonState } from "./bridge/daemon";
+import { startDaemonConnection, type DaemonConnection } from "./bridge/daemon";
 import { ConnectionBanner } from "./components/ConnectionBanner";
 import { GraphCanvas } from "./components/GraphCanvas";
 import { initialSnapshotFixture } from "./fixtures/initialSnapshot";
@@ -10,25 +10,49 @@ export default function App() {
 
   useEffect(() => {
     let active = true;
+    let connection: DaemonConnection | undefined;
     dispatch({ type: "connectionStarted" });
-    connectInitialDaemonState()
-      .then(({ endpoint, frames }) => {
+    startDaemonConnection({
+      onEnvelope(envelope) {
         if (!active) return;
-        dispatch({ type: "connectionReady", endpoint });
-        for (const envelope of frames) {
-          dispatch({ type: "envelopeReceived", envelope });
+        dispatch({ type: "envelopeReceived", envelope });
+      },
+      onStatus(status) {
+        if (!active) return;
+        dispatch({
+          type: "connectionStatus",
+          phase: status.phase,
+          endpoint: status.endpoint,
+          message: status.message,
+        });
+      },
+      onError(error) {
+        if (!active) return;
+        dispatch({ type: "connectionFailed", message: error.message });
+      },
+    })
+      .then((startedConnection) => {
+        if (!active) {
+          void startedConnection.dispose();
+          return;
         }
+        connection = startedConnection;
       })
       .catch((error: unknown) => {
         if (!active) return;
         const message = error instanceof Error ? error.message : String(error);
-        dispatch({ type: "fixtureLoaded", reason: message });
-        for (const envelope of initialSnapshotFixture) {
-          dispatch({ type: "envelopeReceived", envelope });
+        if ("__TAURI_INTERNALS__" in window) {
+          dispatch({ type: "connectionFailed", message });
+        } else {
+          dispatch({ type: "fixtureLoaded", reason: message });
+          for (const envelope of initialSnapshotFixture) {
+            dispatch({ type: "envelopeReceived", envelope });
+          }
         }
       });
     return () => {
       active = false;
+      void connection?.dispose();
     };
   }, []);
 

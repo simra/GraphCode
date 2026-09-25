@@ -71,16 +71,16 @@ The React client is currently a live, read-only protocol demonstration:
 - renders a simple, fixed-row SVG graph;
 - exposes basic semantic landmarks and connection status.
 
-It is not yet an application-equivalent client. There is no persistent connection
-actor, mutation command bus, node selection, inspector, New Loop action, forms,
-menus/command registry, keyboard routing, contextual actions, project ingress,
+It is not yet an application-equivalent client. A persistent connection actor and
+typed request bridge now exist, but there is no node selection, inspector, New Loop
+action, forms, menus/command registry, keyboard routing, contextual actions, project ingress,
 Quick Chats, global overview, graph pan/zoom/layout persistence, terminals,
 workspaces, settings, updates, native lifecycle, or packaging integration.
 
 The highest-value next slice is:
 
-> **persistent connection + stable node selection + right-side inspector + visible
-> New Loop flow + typed `createNode` command**
+> **stable node selection + right-side inspector + visible New Loop flow + typed
+> `createNode` command**
 
 That slice converts the React build from a passive preview into a minimally useful
 graph client while establishing the command/state architecture needed by every
@@ -90,8 +90,8 @@ later feature.
 
 | Capability | Zig/Win32 behavior | Daemon/protocol dependency | React status | React UX recommendation | Priority | Complexity / risk | Acceptance criteria |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| Daemon discovery and v2 handshake | Authenticated per-user named pipe, v2 hello, v1 fallback, explicit status | Existing endpoint identity and v1/v2 envelopes | **Partial**: correct v2 live connection; one-shot only; no v1 fallback | Keep transport entirely in Rust | P0 | M; reconnect correctness | Stable client ID, v2 negotiation, supported downgrade decision, explicit failure codes |
-| Persistent connection, replay, subscriptions | Reconnect backoff, stable client ID, resume cursor, restore joins, bounded queues | Existing hello `clientID`, `resumeFrom`, subscription and replay errors | **Missing** | Tokio connection actor emitting typed events | P0 | L; ordering/backpressure | Daemon restart replays exactly once; replay loss causes full resync; mutations never silently retry |
+| Daemon discovery and v2 handshake | Authenticated per-user named pipe, v2 hello, v1 fallback, explicit status | Existing endpoint identity and v1/v2 envelopes | **Partial**: correct persistent v2 connection and stable client ID; no v1 fallback | Keep transport entirely in Rust | P0 | M; downgrade decision | Stable client ID, v2 negotiation, supported downgrade decision, explicit failure codes |
+| Persistent connection, replay, subscriptions | Reconnect backoff, stable client ID, resume cursor, restore joins, bounded queues | Existing hello `clientID`, `resumeFrom`, subscription and replay errors | **Partial**: Rust actor, count-bounded command queue, request correlation, replay cursor acknowledgement, reconnect/resync and explicit unknown outcomes; daemon-restart integration and byte bounds remain | Complete integration/fault tests and byte accounting | P0 | M; ordering/backpressure | Daemon restart replays exactly once; replay loss causes full resync; mutations never silently retry |
 | Project/folder opening | Folder picker, local folder, clone HTTPS, SSH remote, Codespace | Existing `openProject`; native process/dialog work for clone/remote/Codespace | **Missing** | Header/sidebar Add Project button with native picker and ingress menu | P1 | L; process security and remote validation | Each ingress path opens the same daemon project and reports exact errors |
 | Recent projects | Native File submenu and sidebar recent/open distinction | Existing `listRecentProjects`, `recentProjectsListed` | **Partial**: flat combined list | Separate Recent and Open groups; preserve local/remote identity | P1 | S | Recent unopened projects remain selectable; open projects retain graph state |
 | Project lifecycle | Close, forget/remove, delete graph, Explorer/remote info; move explicitly unavailable | Existing `closeProject`, `forgetProject`, `deleteProjectGraph`; no move command | **Missing** | Project row overflow with destructive confirmations | P1 | M | Correct command per action; Move shown only after protocol exists |

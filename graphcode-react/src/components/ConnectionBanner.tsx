@@ -9,6 +9,8 @@ export function ConnectionBanner({
     idle: "Not connected",
     connecting: "Connecting to graphcoded…",
     connected: "Connected to graphcoded",
+    reconnecting: "Reconnecting to graphcoded…",
+    resyncing: "Resynchronizing daemon state…",
     fixture: "Previewing a repository fixture",
     error: "graphcoded connection failed",
   }[connection.phase];

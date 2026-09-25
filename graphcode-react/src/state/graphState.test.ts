@@ -19,6 +19,29 @@ const snapshot: DaemonWireEnvelope = {
 };
 
 describe("appReducer", () => {
+  it("surfaces reconnect and resync status without using fixture data", () => {
+    const reconnecting = appReducer(initialAppState, {
+      type: "connectionStatus",
+      phase: "reconnecting",
+      endpoint: "\\\\.\\pipe\\graphcode-test",
+      message: "daemon I/O failed",
+    });
+    expect(reconnecting.connection).toEqual({
+      phase: "reconnecting",
+      endpoint: "\\\\.\\pipe\\graphcode-test",
+      error: "daemon I/O failed",
+      usingFixture: false,
+    });
+
+    const resyncing = appReducer(reconnecting, {
+      type: "connectionStatus",
+      phase: "resyncing",
+      endpoint: "\\\\.\\pipe\\graphcode-test",
+      message: "Saved replay cursor was unavailable",
+    });
+    expect(resyncing.connection.phase).toBe("resyncing");
+  });
+
   it("applies snapshots and newer node deltas by stable node ID", () => {
     const withSnapshot = appReducer(initialAppState, {
       type: "envelopeReceived",

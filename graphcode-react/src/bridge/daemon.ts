@@ -1,23 +1,89 @@
 import { invoke } from "@tauri-apps/api/core";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { decodeEnvelope } from "../protocol/decode";
 import type { DaemonWireEnvelope } from "../protocol/domain";
 
-interface InitialDaemonState {
+export interface DaemonConnectionStatus {
+  phase: "connecting" | "connected" | "reconnecting" | "resyncing";
   endpoint: string;
-  frames: unknown[];
+  attempt: number;
+  message?: string;
+  resumeFrom?: number;
 }
 
-export interface DecodedInitialDaemonState {
+export interface DaemonConnectionInfo {
   endpoint: string;
-  frames: DaemonWireEnvelope[];
+  clientId: string;
+  resumeFrom?: number;
 }
 
-export async function connectInitialDaemonState(): Promise<DecodedInitialDaemonState> {
-  const result = await invoke<InitialDaemonState>(
-    "connect_initial_daemon_state",
+export interface DaemonConnectionHandlers {
+  onEnvelope(envelope: DaemonWireEnvelope): void;
+  onStatus(status: DaemonConnectionStatus): void;
+  onError(error: Error): void;
+}
+
+export interface DaemonConnection {
+  info: DaemonConnectionInfo;
+  dispose(): Promise<void>;
+}
+
+export async function startDaemonConnection(
+  handlers: DaemonConnectionHandlers,
+): Promise<DaemonConnection> {
+  const unlisteners: UnlistenFn[] = [];
+  unlisteners.push(
+    await listen<unknown>("daemon://frame", ({ payload }) => {
+      try {
+        const envelope = decodeEnvelope(payload);
+        handlers.onEnvelope(envelope);
+        if (envelope.kind === "event") {
+          void acknowledgeDaemonSequence(envelope.sequence).catch((error) =>
+            handlers.onError(asError(error)),
+          );
+        }
+      } catch (error) {
+        handlers.onError(asError(error));
+      }
+    }),
   );
-  return {
-    endpoint: result.endpoint,
-    frames: result.frames.map(decodeEnvelope),
-  };
+  unlisteners.push(
+    await listen<DaemonConnectionStatus>("daemon://status", ({ payload }) =>
+      handlers.onStatus(payload),
+    ),
+  );
+
+  try {
+    const info = await invoke<DaemonConnectionInfo>("start_daemon_connection");
+    return {
+      info,
+      async dispose() {
+        for (const unlisten of unlisteners) {
+          unlisten();
+        }
+      },
+    };
+  } catch (error) {
+    for (const unlisten of unlisteners) {
+      unlisten();
+    }
+    throw asError(error);
+  }
+}
+
+export async function sendDaemonCommand(
+  command: Record<string, unknown>,
+): Promise<DaemonWireEnvelope> {
+  const raw = await invoke<unknown>("send_daemon_command", { command });
+  return decodeEnvelope(raw);
+}
+
+export async function acknowledgeDaemonSequence(
+  sequence: number,
+): Promise<void> {
+  await invoke("acknowledge_daemon_sequence", { sequence });
+}
+
+function asError(value: unknown): Error {
+  return value instanceof Error ? value : new Error(String(value));
 }
