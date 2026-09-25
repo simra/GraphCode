@@ -1,0 +1,32 @@
+[package]
+name = "graphcode-react"
+version = "0.1.0"
+description = "GraphCode React/Tauri desktop client"
+authors = ["GraphCode contributors"]
+edition = "2021"
+
+[lib]
+name = "graphcode_react_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+hex = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+tauri = { version = "2", features = [] }
+thiserror = "2"
+tokio = { version = "1", features = ["io-util", "net", "time"] }
+uuid = { version = "1", features = ["v4"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+  "Win32_Foundation",
+  "Win32_Security",
+  "Win32_Security_Authorization",
+  "Win32_System_Memory",
+  "Win32_System_Threading",
+] }
