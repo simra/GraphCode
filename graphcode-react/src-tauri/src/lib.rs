@@ -7,9 +7,12 @@ use std::sync::Mutex;
 
 use connection::ConnectionHandle;
 use endpoint::discover;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tauri::{Manager, State};
+use tauri::{
+    menu::{MenuBuilder, MenuItemBuilder, SubmenuBuilder},
+    Emitter, Manager, State,
+};
 use thiserror::Error;
 
 #[derive(Default)]
@@ -29,6 +32,8 @@ enum BridgeError {
     ReplayState(String),
     #[error("daemon connection has not been started")]
     NotStarted,
+    #[error("failed to update native menu: {0}")]
+    Menu(String),
     #[error(transparent)]
     Connection(#[from] connection::ConnectionError),
 }
@@ -48,6 +53,16 @@ struct ConnectionStart {
     endpoint: String,
     client_id: String,
     resume_from: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct NativeMenuCommand {
+    id: String,
+    label: String,
+    category: String,
+    enabled: bool,
+    accelerator: Option<String>,
 }
 
 #[tauri::command]
@@ -115,14 +130,58 @@ async fn acknowledge_daemon_sequence(
     connection.acknowledge(sequence).await.map_err(Into::into)
 }
 
+#[tauri::command]
+fn set_native_menu(
+    app: tauri::AppHandle,
+    commands: Vec<NativeMenuCommand>,
+) -> Result<(), BridgeError> {
+    let mut menu = MenuBuilder::new(&app);
+    for category in ["GraphCode", "Loop", "Navigation"] {
+        let category_commands: Vec<_> = commands
+            .iter()
+            .filter(|command| command.category == category)
+            .collect();
+        if category_commands.is_empty() {
+            continue;
+        }
+
+        let mut submenu = SubmenuBuilder::new(&app, category);
+        for command in category_commands {
+            let mut item =
+                MenuItemBuilder::with_id(&command.id, &command.label).enabled(command.enabled);
+            if let Some(accelerator) = &command.accelerator {
+                item = item.accelerator(accelerator);
+            }
+            let item = item
+                .build(&app)
+                .map_err(|error| BridgeError::Menu(error.to_string()))?;
+            submenu = submenu.item(&item);
+        }
+        let submenu = submenu
+            .build()
+            .map_err(|error| BridgeError::Menu(error.to_string()))?;
+        menu = menu.item(&submenu);
+    }
+    let menu = menu
+        .build()
+        .map_err(|error| BridgeError::Menu(error.to_string()))?;
+    app.set_menu(menu)
+        .map_err(|error| BridgeError::Menu(error.to_string()))?;
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .manage(BridgeState::default())
+        .on_menu_event(|app, event| {
+            let _ = app.emit("menu://command", event.id().as_ref());
+        })
         .invoke_handler(tauri::generate_handler![
             start_daemon_connection,
             send_daemon_command,
-            acknowledge_daemon_sequence
+            acknowledge_daemon_sequence,
+            set_native_menu
         ])
         .run(tauri::generate_context!())
         .expect("failed to run GraphCode React");
