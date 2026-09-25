@@ -5,6 +5,11 @@ export type CommandId =
   | "app.commandPalette"
   | "loop.new"
   | "loop.stop"
+  | "loop.rename"
+  | "loop.restartSession"
+  | "loop.complete"
+  | "loop.delete"
+  | "loop.refreshUsage"
   | "loop.edit"
   | "loop.message"
   | "loop.openTerminal"
@@ -43,6 +48,11 @@ export interface CommandActions {
   clearSelection(): void;
   selectNode(nodeId: string): void;
   stopNode?(): Promise<void>;
+  renameNode?(): void;
+  restartSession?(): Promise<void>;
+  completeNode?(): void;
+  deleteNode?(): Promise<void>;
+  refreshUsage?(): Promise<void>;
 }
 
 function unavailable(reason: string) {
@@ -145,6 +155,24 @@ export function createCommandRegistry(
           }),
     },
     {
+      id: "loop.rename",
+      label: "Rename Loop",
+      description: "Change the selected loop's display title",
+      category: "Loop",
+      shortcut: { key: "F2", label: "F2" },
+      surfaces: ["node"],
+      ...(node && connected && actions.renameNode
+        ? { enabled: true, execute: actions.renameNode }
+        : {
+            ...unavailable(
+              node
+                ? "Reconnect to graphcoded before renaming this loop"
+                : "Select a loop first",
+            ),
+            execute: () => undefined,
+          }),
+    },
+    {
       id: "loop.edit",
       label: "Edit Loop",
       description: "Edit fields supported by NodeUpdate",
@@ -169,6 +197,68 @@ export function createCommandRegistry(
       execute: () => undefined,
     },
     {
+      id: "loop.restartSession",
+      label: nodeResolved ? "Resume Session" : "Restart Session",
+      description: nodeResolved
+        ? "Resume the selected loop on its preserved transcript"
+        : "Restart the selected loop's session on its preserved transcript",
+      category: "Loop",
+      surfaces: ["node"],
+      ...(node && connected && actions.restartSession
+        ? { enabled: true, execute: actions.restartSession }
+        : {
+            ...unavailable(
+              node
+                ? "Reconnect to graphcoded before changing this session"
+                : "Select a loop first",
+            ),
+            execute: () => undefined,
+          }),
+    },
+    {
+      id: "loop.complete",
+      label: "Mark Goal Complete",
+      description: "Report the selected goal loop as complete",
+      category: "Loop",
+      surfaces: ["node"],
+      ...(node?.loopType === "goalBased" && !nodeResolved
+        ? connected && actions.completeNode
+          ? { enabled: true, execute: actions.completeNode }
+          : {
+              ...unavailable(
+                "Reconnect to graphcoded before completing this goal",
+              ),
+              execute: () => undefined,
+            }
+        : {
+            ...unavailable(
+              node
+                ? node.loopType === "goalBased"
+                  ? "This goal is already resolved"
+                  : "Only goal loops can be marked complete"
+                : "Select a loop first",
+            ),
+            execute: () => undefined,
+          }),
+    },
+    {
+      id: "loop.refreshUsage",
+      label: "Refresh Usage",
+      description: "Ask all backends in this graph for fresh usage readings",
+      category: "Loop",
+      surfaces: ["node"],
+      ...(graph && connected && actions.refreshUsage
+        ? { enabled: true, execute: actions.refreshUsage }
+        : {
+            ...unavailable(
+              graph
+                ? "Reconnect to graphcoded before refreshing usage"
+                : "Select an open project first",
+            ),
+            execute: () => undefined,
+          }),
+    },
+    {
       id: "loop.openTerminal",
       label: "Open Terminal",
       description: "Attach to the selected loop's zmx session",
@@ -181,6 +271,24 @@ export function createCommandRegistry(
           : "Select a loop first",
       ),
       execute: () => undefined,
+    },
+    {
+      id: "loop.delete",
+      label: "Delete Loop",
+      description: "Permanently remove the selected loop and its edges",
+      category: "Loop",
+      surfaces: ["node"],
+      danger: true,
+      ...(node && connected && actions.deleteNode
+        ? { enabled: true, execute: actions.deleteNode }
+        : {
+            ...unavailable(
+              node
+                ? "Reconnect to graphcoded before deleting this loop"
+                : "Select a loop first",
+            ),
+            execute: () => undefined,
+          }),
     },
     {
       id: "selection.clear",

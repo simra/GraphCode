@@ -14,11 +14,18 @@ import {
 import { CommandPalette } from "./components/CommandPalette";
 import { ConnectionBanner } from "./components/ConnectionBanner";
 import { GraphCanvas } from "./components/GraphCanvas";
+import { LoopTextDialog } from "./components/LoopTextDialog";
 import { NewLoopDialog } from "./components/NewLoopDialog";
 import { NodeInspector } from "./components/NodeInspector";
 import { initialSnapshotFixture } from "./fixtures/initialSnapshot";
 import {
+  completeNodeCommand,
   createNodeCommand,
+  deleteNodeCommand,
+  refreshUsageCommand,
+  renameNodeCommand,
+  restartNodeCommand,
+  resumeSessionCommand,
   stopNodeCommand,
   type NodeDraftPayload,
 } from "./protocol/commands";
@@ -34,6 +41,15 @@ export default function App() {
   }>();
   const [pendingCommandId, setPendingCommandId] = useState<CommandId>();
   const [commandError, setCommandError] = useState<string>();
+  const [textDialog, setTextDialog] = useState<
+    | {
+        kind: "rename" | "complete";
+        projectPath: string;
+        nodeId: string;
+        nodeTitle: string;
+      }
+    | undefined
+  >();
 
   useEffect(() => {
     let active = true;
@@ -88,6 +104,16 @@ export default function App() {
     : undefined;
   const selectedProjectPath = state.selectedProjectPath;
   const inspectedNode = selectedNode(state);
+  const inspectedNodeState =
+    typeof inspectedNode?.state === "string"
+      ? inspectedNode.state
+      : inspectedNode?.state
+        ? Object.keys(inspectedNode.state)[0]
+        : undefined;
+  const inspectedNodeResolved = Boolean(
+    inspectedNodeState &&
+    ["succeeded", "failed", "stalled", "stopped"].includes(inspectedNodeState),
+  );
   const projects = useMemo(() => {
     const byPath = new Map(
       state.recentProjects.map((project) => [project.path, project]),
@@ -126,8 +152,69 @@ export default function App() {
                 );
               }
             : undefined,
+        renameNode:
+          selectedProjectPath && inspectedNode
+            ? () =>
+                setTextDialog({
+                  kind: "rename",
+                  projectPath: selectedProjectPath,
+                  nodeId: inspectedNode.id,
+                  nodeTitle: inspectedNode.title,
+                })
+            : undefined,
+        restartSession:
+          selectedProjectPath && inspectedNode
+            ? async () => {
+                const verb = inspectedNodeResolved ? "Resume" : "Restart";
+                if (
+                  !window.confirm(
+                    `${verb} "${inspectedNode.title}" on its preserved transcript?`,
+                  )
+                ) {
+                  return;
+                }
+                await sendDaemonCommand(
+                  inspectedNodeResolved
+                    ? resumeSessionCommand(
+                        selectedProjectPath,
+                        inspectedNode.id,
+                      )
+                    : restartNodeCommand(selectedProjectPath, inspectedNode.id),
+                );
+              }
+            : undefined,
+        completeNode:
+          selectedProjectPath && inspectedNode
+            ? () =>
+                setTextDialog({
+                  kind: "complete",
+                  projectPath: selectedProjectPath,
+                  nodeId: inspectedNode.id,
+                  nodeTitle: inspectedNode.title,
+                })
+            : undefined,
+        deleteNode:
+          selectedProjectPath && inspectedNode
+            ? async () => {
+                if (
+                  !window.confirm(
+                    `Permanently delete "${inspectedNode.title}" and every edge connected to it? This cannot be undone.`,
+                  )
+                ) {
+                  return;
+                }
+                await sendDaemonCommand(
+                  deleteNodeCommand(selectedProjectPath, inspectedNode.id),
+                );
+              }
+            : undefined,
+        refreshUsage: selectedProjectPath
+          ? async () => {
+              await sendDaemonCommand(refreshUsageCommand(selectedProjectPath));
+            }
+          : undefined,
       }),
-    [inspectedNode, selectedProjectPath, state],
+    [inspectedNode, inspectedNodeResolved, selectedProjectPath, state],
   );
 
   useEffect(() => {
@@ -312,6 +399,45 @@ export default function App() {
               setPendingCreatedNode(undefined);
               throw error;
             }
+          }}
+        />
+      ) : null}
+      {textDialog?.kind === "rename" ? (
+        <LoopTextDialog
+          title={`Rename ${textDialog.nodeTitle}`}
+          description="The loop keeps its identity, transcript, edges, and session."
+          label="Loop title"
+          initialValue={textDialog.nodeTitle}
+          required
+          submitLabel="Rename"
+          onClose={() => setTextDialog(undefined)}
+          onSubmit={async (title) => {
+            await sendDaemonCommand(
+              renameNodeCommand(
+                textDialog.projectPath,
+                textDialog.nodeId,
+                title,
+              ),
+            );
+          }}
+        />
+      ) : null}
+      {textDialog?.kind === "complete" ? (
+        <LoopTextDialog
+          title={`Complete ${textDialog.nodeTitle}`}
+          description="Report this goal as met. An optional result is recorded with the authoritative completion."
+          label="Result (optional)"
+          multiline
+          submitLabel="Mark complete"
+          onClose={() => setTextDialog(undefined)}
+          onSubmit={async (result) => {
+            await sendDaemonCommand(
+              completeNodeCommand(
+                textDialog.projectPath,
+                textDialog.nodeId,
+                result || null,
+              ),
+            );
           }}
         />
       ) : null}
