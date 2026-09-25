@@ -328,6 +328,12 @@ describe("appReducer", () => {
       nodeId: "child-node",
     });
     expect(selectedNode(selected)?.title).toBe("Child");
+    expect(selected.mailroomSelected).toBe(false);
+
+    const mailroom = appReducer(selected, { type: "selectMailroom" });
+    expect(mailroom.mailroomSelected).toBe(true);
+    expect(mailroom.compositePath).toEqual([]);
+    expect(mailroom.selectedNodeId).toBeUndefined();
 
     const refreshed = appReducer(selected, {
       type: "envelopeReceived",

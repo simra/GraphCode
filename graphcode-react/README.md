@@ -54,5 +54,8 @@ Playbook refine and rollback use the existing daemon commands; current playbook 
 rollback-history reads remain blocked on DT-001.
 The inspector can load the whole Mailroom board, search it, query a selected loop's
 unread slice with or without an atomic cursor advance, post within the protocol byte
-limits, and configure that loop's all-post/topic/off watch. Nested Mailroom ownership
-is not established, so those controls fail closed while drilled into a composite.
+limits, and configure that loop's all-post/topic/off watch. Each open project also has
+a responsive Mailroom destination with post navigation and an authoritative
+single-post deep read when a board response contains trimmed bodies. Nested Mailroom
+ownership is not established, so those controls fail closed while drilled into a
+composite.

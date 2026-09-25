@@ -29,6 +29,7 @@ export interface AppState {
   mailboxes: Record<string, Mailbox>;
   quickChats: QuickChat[];
   quickChatsSelected: boolean;
+  mailroomSelected: boolean;
   selectedQuickChatId?: string;
   selectedProjectPath?: string;
   compositePath: string[];
@@ -50,6 +51,7 @@ export type AppAction =
   | { type: "fixtureLoaded"; reason: string }
   | { type: "selectQuickChats" }
   | { type: "selectQuickChat"; id: string }
+  | { type: "selectMailroom" }
   | { type: "selectProject"; path: string }
   | { type: "enterComposite"; nodeId: string }
   | { type: "leaveComposite"; depth: number }
@@ -69,6 +71,7 @@ export const initialAppState: AppState = {
   mailboxes: {},
   quickChats: [],
   quickChatsSelected: false,
+  mailroomSelected: false,
   compositePath: [],
   lastSequence: 0,
   protocolWarnings: [],
@@ -277,6 +280,7 @@ export function appReducer(state: AppState, action: AppAction): AppState {
       return {
         ...state,
         quickChatsSelected: true,
+        mailroomSelected: false,
         selectedQuickChatId: undefined,
         compositePath: [],
         selectedNodeId: undefined,
@@ -286,6 +290,7 @@ export function appReducer(state: AppState, action: AppAction): AppState {
         ? {
             ...state,
             quickChatsSelected: true,
+            mailroomSelected: false,
             selectedQuickChatId: action.id,
             compositePath: [],
             selectedNodeId: undefined,
@@ -296,6 +301,7 @@ export function appReducer(state: AppState, action: AppAction): AppState {
         ? {
             ...state,
             quickChatsSelected: false,
+            mailroomSelected: false,
             selectedQuickChatId: undefined,
             selectedProjectPath: action.path,
             compositePath: [],
@@ -303,6 +309,19 @@ export function appReducer(state: AppState, action: AppAction): AppState {
               action.path === state.selectedProjectPath
                 ? state.selectedNodeId
                 : undefined,
+          }
+        : state;
+    case "selectMailroom":
+      return state.selectedProjectPath &&
+        state.graphs[state.selectedProjectPath]?.project.path !==
+          "graphcode://global"
+        ? {
+            ...state,
+            quickChatsSelected: false,
+            selectedQuickChatId: undefined,
+            mailroomSelected: true,
+            compositePath: [],
+            selectedNodeId: undefined,
           }
         : state;
     case "enterComposite": {
@@ -313,6 +332,7 @@ export function appReducer(state: AppState, action: AppAction): AppState {
       return node?.subGraph
         ? {
             ...state,
+            mailroomSelected: false,
             compositePath: [...state.compositePath, node.id],
             selectedNodeId: undefined,
           }
@@ -325,6 +345,7 @@ export function appReducer(state: AppState, action: AppAction): AppState {
       );
       return {
         ...state,
+        mailroomSelected: false,
         compositePath: state.compositePath.slice(0, depth),
         selectedNodeId: undefined,
       };
@@ -355,6 +376,7 @@ export function appReducer(state: AppState, action: AppAction): AppState {
         mailboxes,
         recentProjects,
         selectedProjectPath: fallback,
+        mailroomSelected: false,
         compositePath: [],
         selectedNodeId: undefined,
       };
@@ -368,6 +390,7 @@ export function appReducer(state: AppState, action: AppAction): AppState {
         ? {
             ...state,
             quickChatsSelected: false,
+            mailroomSelected: false,
             selectedQuickChatId: undefined,
             selectedProjectPath: action.projectPath,
             selectedNodeId: action.nodeId,
