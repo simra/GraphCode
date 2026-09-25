@@ -741,7 +741,8 @@ kbd {
   color: #8d9589;
 }
 
-.new-loop-overlay {
+.new-loop-overlay,
+.modal-overlay {
   position: fixed;
   z-index: 110;
   inset: 0;
@@ -750,6 +751,59 @@ kbd {
   padding: 22px;
   background: rgba(5, 6, 5, 0.78);
   backdrop-filter: blur(7px);
+}
+
+.text-command-dialog {
+  display: grid;
+  width: min(520px, 100%);
+  gap: 18px;
+  padding: 22px;
+  border: 1px solid #465043;
+  border-radius: 16px;
+  background: #171a16;
+  box-shadow: 0 34px 100px rgba(0, 0, 0, 0.65);
+}
+
+.text-command-dialog header,
+.text-command-dialog footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.text-command-dialog h2,
+.text-command-dialog p {
+  margin: 0;
+}
+
+.text-command-dialog > p {
+  color: #aeb5aa;
+  line-height: 1.5;
+}
+
+.text-command-dialog footer {
+  justify-content: flex-end;
+}
+
+.text-command-dialog button {
+  padding: 8px 13px;
+  border: 1px solid #3b4238;
+  border-radius: 8px;
+  color: #cbd1c7;
+  background: #222620;
+  cursor: pointer;
+}
+
+.text-command-dialog button:disabled {
+  cursor: wait;
+  opacity: 0.6;
+}
+
+.text-command-dialog .primary-button {
+  border-color: #6b8563;
+  color: #ecf6e8;
+  background: #3f563b;
 }
 
 .new-loop-dialog {

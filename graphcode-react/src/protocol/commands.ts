@@ -1,13 +1,15 @@
-export interface StopNodeCommand {
+export interface GraphCommandEnvelope<TCommand> {
   graphCommand: {
     projectPath: string;
-    command: {
-      stopNode: {
-        _0: string;
-      };
-    };
+    command: TCommand;
   };
 }
+
+export type StopNodeCommand = GraphCommandEnvelope<{
+  stopNode: {
+    _0: string;
+  };
+}>;
 
 export type DraftLoopType =
   "sketch" | "goalBased" | "timeBased" | "turnBased" | "proactive";
@@ -55,16 +57,36 @@ export interface NodeDraftPayload {
   templateFollow: null;
 }
 
-export interface CreateNodeCommand {
-  graphCommand: {
-    projectPath: string;
-    command: {
-      createNode: {
-        _0: NodeDraftPayload;
-      };
-    };
+export type CreateNodeCommand = GraphCommandEnvelope<{
+  createNode: {
+    _0: NodeDraftPayload;
   };
-}
+}>;
+
+export type RenameNodeCommand = GraphCommandEnvelope<{
+  renameNode: {
+    _0: string;
+    title: string;
+  };
+}>;
+
+export type NodeIdentityCommand = GraphCommandEnvelope<
+  | { restartNode: { _0: string } }
+  | { resumeSession: { _0: string } }
+  | { deleteNode: { _0: string } }
+>;
+
+export type CompleteNodeCommand = GraphCommandEnvelope<{
+  completeNode: {
+    _0: string;
+    result: string | null;
+    from: null;
+  };
+}>;
+
+export type RefreshUsageCommand = GraphCommandEnvelope<{
+  refreshUsage: Record<string, never>;
+}>;
 
 export function stopNodeCommand(
   projectPath: string,
@@ -88,6 +110,79 @@ export function createNodeCommand(
       command: {
         createNode: { _0: draft },
       },
+    },
+  };
+}
+
+export function renameNodeCommand(
+  projectPath: string,
+  nodeId: string,
+  title: string,
+): RenameNodeCommand {
+  return {
+    graphCommand: {
+      projectPath,
+      command: { renameNode: { _0: nodeId, title } },
+    },
+  };
+}
+
+export function restartNodeCommand(
+  projectPath: string,
+  nodeId: string,
+): NodeIdentityCommand {
+  return {
+    graphCommand: {
+      projectPath,
+      command: { restartNode: { _0: nodeId } },
+    },
+  };
+}
+
+export function resumeSessionCommand(
+  projectPath: string,
+  nodeId: string,
+): NodeIdentityCommand {
+  return {
+    graphCommand: {
+      projectPath,
+      command: { resumeSession: { _0: nodeId } },
+    },
+  };
+}
+
+export function deleteNodeCommand(
+  projectPath: string,
+  nodeId: string,
+): NodeIdentityCommand {
+  return {
+    graphCommand: {
+      projectPath,
+      command: { deleteNode: { _0: nodeId } },
+    },
+  };
+}
+
+export function completeNodeCommand(
+  projectPath: string,
+  nodeId: string,
+  result: string | null,
+): CompleteNodeCommand {
+  return {
+    graphCommand: {
+      projectPath,
+      command: {
+        completeNode: { _0: nodeId, result, from: null },
+      },
+    },
+  };
+}
+
+export function refreshUsageCommand(projectPath: string): RefreshUsageCommand {
+  return {
+    graphCommand: {
+      projectPath,
+      command: { refreshUsage: {} },
     },
   };
 }
