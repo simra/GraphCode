@@ -115,4 +115,21 @@ describe("command registry", () => {
       commands.find((command) => command.id === "project.openFolder")?.enabled,
     ).toBe(true);
   });
+
+  it("projects viewport controls from the same command registry", () => {
+    const zoomIn = vi.fn();
+    const fitGraph = vi.fn();
+    const commands = createCommandRegistry(stateWithSelectedNode(), {
+      openPalette: vi.fn(),
+      clearSelection: vi.fn(),
+      selectNode: vi.fn(),
+      zoomIn,
+      fitGraph,
+    });
+
+    commands.find((command) => command.id === "view.zoomIn")?.execute();
+    commands.find((command) => command.id === "view.fitGraph")?.execute();
+    expect(zoomIn).toHaveBeenCalledOnce();
+    expect(fitGraph).toHaveBeenCalledOnce();
+  });
 });

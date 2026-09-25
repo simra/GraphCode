@@ -14,12 +14,17 @@ export type CommandId =
   | "loop.edit"
   | "loop.message"
   | "loop.openTerminal"
+  | "view.zoomIn"
+  | "view.zoomOut"
+  | "view.resetZoom"
+  | "view.fitGraph"
   | "selection.clear"
   | "selection.nextLoop"
   | "selection.previousLoop";
 
-export type CommandCategory = "Application" | "Project" | "Loop" | "Navigation";
-export type CommandSurface = "header" | "node";
+export type CommandCategory =
+  "Application" | "Project" | "Loop" | "View" | "Navigation";
+export type CommandSurface = "header" | "node" | "canvas";
 
 export interface CommandShortcut {
   key: string;
@@ -55,6 +60,10 @@ export interface CommandActions {
   completeNode?(): void;
   deleteNode?(): Promise<void>;
   refreshUsage?(): Promise<void>;
+  zoomIn?(): void;
+  zoomOut?(): void;
+  resetZoom?(): void;
+  fitGraph?(): void;
 }
 
 function unavailable(reason: string) {
@@ -309,6 +318,62 @@ export function createCommandRegistry(
                 ? "Reconnect to graphcoded before deleting this loop"
                 : "Select a loop first",
             ),
+            execute: () => undefined,
+          }),
+    },
+    {
+      id: "view.zoomIn",
+      label: "Zoom In",
+      description: "Magnify the selected graph viewport",
+      category: "View",
+      shortcut: { key: "=", ctrl: true, label: "Ctrl+=" },
+      surfaces: ["canvas"],
+      ...(graph && actions.zoomIn
+        ? { enabled: true, execute: actions.zoomIn }
+        : {
+            ...unavailable("Select a graph first"),
+            execute: () => undefined,
+          }),
+    },
+    {
+      id: "view.zoomOut",
+      label: "Zoom Out",
+      description: "Reduce the selected graph viewport",
+      category: "View",
+      shortcut: { key: "-", ctrl: true, label: "Ctrl+-" },
+      surfaces: ["canvas"],
+      ...(graph && actions.zoomOut
+        ? { enabled: true, execute: actions.zoomOut }
+        : {
+            ...unavailable("Select a graph first"),
+            execute: () => undefined,
+          }),
+    },
+    {
+      id: "view.resetZoom",
+      label: "Reset Zoom",
+      description: "Return the graph viewport to 100 percent",
+      category: "View",
+      shortcut: { key: "0", ctrl: true, label: "Ctrl+0" },
+      surfaces: ["canvas"],
+      ...(graph && actions.resetZoom
+        ? { enabled: true, execute: actions.resetZoom }
+        : {
+            ...unavailable("Select a graph first"),
+            execute: () => undefined,
+          }),
+    },
+    {
+      id: "view.fitGraph",
+      label: "Fit Graph",
+      description: "Fit every loop in the current graph viewport",
+      category: "View",
+      shortcut: { key: "9", ctrl: true, label: "Ctrl+9" },
+      surfaces: ["canvas"],
+      ...(graph && actions.fitGraph
+        ? { enabled: true, execute: actions.fitGraph }
+        : {
+            ...unavailable("Select a graph first"),
             execute: () => undefined,
           }),
     },

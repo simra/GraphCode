@@ -136,7 +136,7 @@ fn set_native_menu(
     commands: Vec<NativeMenuCommand>,
 ) -> Result<(), BridgeError> {
     let mut menu = MenuBuilder::new(&app);
-    for category in ["GraphCode", "Project", "Loop", "Navigation"] {
+    for category in ["GraphCode", "Project", "Loop", "View", "Navigation"] {
         let category_commands: Vec<_> = commands
             .iter()
             .filter(|command| command.category == category)
