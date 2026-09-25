@@ -7,6 +7,7 @@ export type CommandId =
   | "project.close"
   | "project.forget"
   | "project.deleteGraph"
+  | "project.openMailroom"
   | "chat.new"
   | "chat.open"
   | "chat.rename"
@@ -34,6 +35,7 @@ export type CommandId =
   | "loop.mailroomSearch"
   | "loop.mailroomWatch"
   | "loop.mailroomPost"
+  | "mailroom.readPost"
   | "loop.openTerminal"
   | "view.zoomIn"
   | "view.zoomOut"
@@ -45,7 +47,7 @@ export type CommandId =
 
 export type CommandCategory =
   "Application" | "Project" | "Loop" | "View" | "Navigation";
-export type CommandSurface = "header" | "node" | "canvas";
+export type CommandSurface = "header" | "node" | "canvas" | "mailroom";
 
 export interface CommandShortcut {
   key: string;
@@ -74,6 +76,7 @@ export interface CommandActions {
   openProjectFolder?(): Promise<void>;
   openNewQuickChat?(): void;
   openNewLoop?(): void;
+  openMailroom?(): void;
   clearSelection(): void;
   selectNode(nodeId: string): void;
   stopNode?(): Promise<void>;
@@ -119,6 +122,10 @@ export interface QuickChatCommandActions {
   deleteQuickChat?(): Promise<void>;
 }
 
+export interface MailroomPostCommandActions {
+  readPost?(): Promise<void>;
+}
+
 function unavailable(reason: string) {
   return { enabled: false, disabledReason: reason };
 }
@@ -134,6 +141,9 @@ export function createCommandRegistry(
   actions: CommandActions,
 ): AppCommand[] {
   const graph = currentGraph(state);
+  const rootGraph = state.selectedProjectPath
+    ? state.graphs[state.selectedProjectPath]
+    : undefined;
   const projectGraph =
     graph?.project.path === "graphcode://global" ? undefined : graph;
   const node = selectedNode(state);
@@ -151,7 +161,12 @@ export function createCommandRegistry(
     (candidate) => candidate.id === node?.id,
   );
   const hasMultipleNodes = (graph?.nodes.length ?? 0) > 1;
-  const mailroomAvailable = Boolean(node) && state.compositePath.length === 0;
+  const projectMailroomAvailable =
+    Boolean(rootGraph) && rootGraph?.project.path !== "graphcode://global";
+  const mailroomAvailable =
+    Boolean(node) &&
+    projectMailroomAvailable &&
+    state.compositePath.length === 0;
 
   function selectRelativeNode(direction: -1 | 1) {
     if (!graph?.nodes.length) return;
@@ -190,6 +205,19 @@ export function createCommandRegistry(
                 ? "Folder selection requires the Tauri desktop client"
                 : "Reconnect to graphcoded before opening a project",
             ),
+            execute: () => undefined,
+          }),
+    },
+    {
+      id: "project.openMailroom",
+      label: "Open Mailroom",
+      description: "Open the selected project's top-level Mailroom",
+      category: "Project",
+      surfaces: ["header"],
+      ...(projectMailroomAvailable && actions.openMailroom
+        ? { enabled: true, execute: actions.openMailroom }
+        : {
+            ...unavailable("Select an open project first"),
             execute: () => undefined,
           }),
     },
@@ -444,16 +472,19 @@ export function createCommandRegistry(
       label: "Refresh Mailroom",
       description: "Load the bounded project Mailroom board",
       category: "Loop",
-      surfaces: ["node"],
-      ...(mailroomAvailable && connected && actions.refreshMailroom
+      surfaces: ["node", "mailroom"],
+      ...(projectMailroomAvailable &&
+      state.compositePath.length === 0 &&
+      connected &&
+      actions.refreshMailroom
         ? { enabled: true, execute: actions.refreshMailroom }
         : {
             ...unavailable(
-              node
-                ? state.compositePath.length
-                  ? "Nested Mailroom ownership is not established; return to the project graph"
-                  : "Reconnect to graphcoded before reading the Mailroom"
-                : "Select a loop first",
+              state.compositePath.length
+                ? "Nested Mailroom ownership is not established; return to the project graph"
+                : projectMailroomAvailable
+                  ? "Reconnect to graphcoded before reading the Mailroom"
+                  : "Select an open project first",
             ),
             execute: () => undefined,
           }),
@@ -503,16 +534,19 @@ export function createCommandRegistry(
       label: "Search Mailroom",
       description: "Filter the project board by author, topic, or body",
       category: "Loop",
-      surfaces: ["node"],
-      ...(mailroomAvailable && connected && actions.searchMailroom
+      surfaces: ["node", "mailroom"],
+      ...(projectMailroomAvailable &&
+      state.compositePath.length === 0 &&
+      connected &&
+      actions.searchMailroom
         ? { enabled: true, execute: actions.searchMailroom }
         : {
             ...unavailable(
-              node
-                ? state.compositePath.length
-                  ? "Nested Mailroom ownership is not established; return to the project graph"
-                  : "Reconnect to graphcoded before searching the Mailroom"
-                : "Select a loop first",
+              state.compositePath.length
+                ? "Nested Mailroom ownership is not established; return to the project graph"
+                : projectMailroomAvailable
+                  ? "Reconnect to graphcoded before searching the Mailroom"
+                  : "Select an open project first",
             ),
             execute: () => undefined,
           }),
@@ -542,16 +576,19 @@ export function createCommandRegistry(
       label: "Post to Mailroom",
       description: "Post an unaddressed note to this project's loops",
       category: "Loop",
-      surfaces: ["node"],
-      ...(mailroomAvailable && connected && actions.postMailroom
+      surfaces: ["node", "mailroom"],
+      ...(projectMailroomAvailable &&
+      state.compositePath.length === 0 &&
+      connected &&
+      actions.postMailroom
         ? { enabled: true, execute: actions.postMailroom }
         : {
             ...unavailable(
-              node
-                ? state.compositePath.length
-                  ? "Nested Mailroom ownership is not established; return to the project graph"
-                  : "Reconnect to graphcoded before posting to the Mailroom"
-                : "Select a loop first",
+              state.compositePath.length
+                ? "Nested Mailroom ownership is not established; return to the project graph"
+                : projectMailroomAvailable
+                  ? "Reconnect to graphcoded before posting to the Mailroom"
+                  : "Select an open project first",
             ),
             execute: () => undefined,
           }),
@@ -839,6 +876,30 @@ export function createEdgeCommands(
               edgeId
                 ? "Reconnect to graphcoded before deleting this edge"
                 : "This legacy edge has no stable ID and cannot be deleted",
+            ),
+            execute: () => undefined,
+          }),
+    },
+  ];
+}
+
+export function createMailroomPostCommands(
+  connected: boolean,
+  postId: number,
+  actions: MailroomPostCommandActions,
+): AppCommand[] {
+  return [
+    {
+      id: "mailroom.readPost",
+      label: "Load Complete Post",
+      description: `Load the authoritative complete body for Mailroom post #${postId}`,
+      category: "Project",
+      surfaces: ["mailroom"],
+      ...(connected && actions.readPost
+        ? { enabled: true, execute: actions.readPost }
+        : {
+            ...unavailable(
+              "Reconnect to graphcoded before loading the complete post",
             ),
             execute: () => undefined,
           }),

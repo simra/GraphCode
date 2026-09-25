@@ -16,6 +16,7 @@ import {
   commandMatchesShortcut,
   createCommandRegistry,
   createEdgeCommands,
+  createMailroomPostCommands,
   createProjectRowCommands,
   createQuickChatCommands,
   isEditableTarget,
@@ -33,6 +34,7 @@ import { GraphCanvas, type GraphCanvasHandle } from "./components/GraphCanvas";
 import { LoopTextDialog } from "./components/LoopTextDialog";
 import { MailroomPostDialog } from "./components/MailroomPostDialog";
 import { MailroomWatchDialog } from "./components/MailroomWatchDialog";
+import { MailroomView } from "./components/MailroomView";
 import { MessageLoopDialog } from "./components/MessageLoopDialog";
 import { NewLoopDialog } from "./components/NewLoopDialog";
 import { NewQuickChatDialog } from "./components/NewQuickChatDialog";
@@ -55,6 +57,7 @@ import {
   deleteProjectGraphCommand,
   forgetProjectCommand,
   mailboxCommand,
+  mailboxPostCommand,
   mailboxSearchCommand,
   mailboxUnreadCommand,
   mailroomPostCommand,
@@ -252,6 +255,7 @@ export default function App() {
             : undefined,
         openNewLoop: () => setNewLoopOpen(true),
         openNewQuickChat: () => setNewQuickChatOpen(true),
+        openMailroom: () => dispatch({ type: "selectMailroom" }),
         openNewEdge: () => {
           setNewEdgeEndpoints({ from: inspectedNode?.id });
           setNewEdgeOpen(true);
@@ -430,13 +434,13 @@ export default function App() {
               }
             : undefined,
         searchMailroom:
-          selectedProjectPath && inspectedNode && !state.compositePath.length
+          selectedProjectPath && rootGraph && !state.compositePath.length
             ? () =>
                 setTextDialog({
                   kind: "mailSearch",
                   projectPath: selectedProjectPath,
-                  nodeId: inspectedNode.id,
-                  nodeTitle: inspectedNode.title,
+                  nodeId: "",
+                  nodeTitle: rootGraph.project.name,
                 })
             : undefined,
         configureMailroomWatch:
@@ -451,11 +455,11 @@ export default function App() {
                 })
             : undefined,
         postMailroom:
-          selectedProjectPath && selectedGraph
+          selectedProjectPath && rootGraph
             ? () =>
                 setMailroomPosting({
                   projectPath: selectedProjectPath,
-                  projectName: selectedGraph.project.name,
+                  projectName: rootGraph.project.name,
                 })
             : undefined,
         restartSession:
@@ -535,6 +539,9 @@ export default function App() {
   );
   const commandsRef = useRef(commands);
   commandsRef.current = commands;
+  const mailroomCommands = commands.filter((command) =>
+    command.surfaces.includes("mailroom"),
+  );
 
   useEffect(() => {
     if (!pendingCreatedNode) return;
@@ -831,7 +838,8 @@ export default function App() {
               <li className="project-row" key={project.path}>
                 <button
                   className={
-                    project.path === state.selectedProjectPath
+                    project.path === state.selectedProjectPath &&
+                    !state.mailroomSelected
                       ? "project-selected"
                       : ""
                   }
@@ -851,6 +859,33 @@ export default function App() {
                   pendingCommandId={pendingCommandId}
                   onExecute={(command) => void executeCommand(command)}
                 />
+                {project.path === state.selectedProjectPath ? (
+                  <button
+                    className={`project-mailroom-link ${
+                      state.mailroomSelected ? "project-selected" : ""
+                    }`}
+                    type="button"
+                    disabled={
+                      !commands.find(
+                        (command) => command.id === "project.openMailroom",
+                      )?.enabled
+                    }
+                    onClick={() => {
+                      const command = commands.find(
+                        (candidate) => candidate.id === "project.openMailroom",
+                      );
+                      if (command) void executeCommand(command);
+                    }}
+                  >
+                    <span aria-hidden="true">✉</span>
+                    <span>Mailroom</span>
+                    <small>
+                      {state.mailboxes[project.path]?.digest.count ??
+                        state.graphs[project.path]?.mailroomDigest?.count ??
+                        0}
+                    </small>
+                  </button>
+                ) : null}
               </li>
             ))}
           </ul>
@@ -909,7 +944,9 @@ export default function App() {
               {inspectedQuickChat?.title ??
                 (state.quickChatsSelected
                   ? "Quick Chats"
-                  : (selectedGraph?.project.name ?? "GraphCode"))}
+                  : state.mailroomSelected
+                    ? `${rootGraph?.project.name ?? "Project"} Mailroom`
+                    : (selectedGraph?.project.name ?? "GraphCode"))}
             </h1>
           </div>
           <div className="header-actions">
@@ -938,7 +975,9 @@ export default function App() {
             {state.protocolWarnings.at(-1)}
           </div>
         ) : null}
-        {!state.quickChatsSelected && compositeBreadcrumbs.length > 1 ? (
+        {!state.quickChatsSelected &&
+        !state.mailroomSelected &&
+        compositeBreadcrumbs.length > 1 ? (
           <nav className="composite-breadcrumb" aria-label="Composite path">
             {compositeBreadcrumbs.map((breadcrumb, index) => (
               <span key={`${breadcrumb.depth}-${breadcrumb.label}`}>
@@ -976,6 +1015,38 @@ export default function App() {
                 (candidate) => candidate.id === "chat.new",
               );
               if (command) void executeCommand(command);
+            }}
+            onExecute={(command) => void executeCommand(command)}
+          />
+        ) : state.mailroomSelected && rootGraph ? (
+          <MailroomView
+            graph={rootGraph}
+            mailbox={
+              selectedProjectPath
+                ? state.mailboxes[selectedProjectPath]
+                : undefined
+            }
+            commands={mailroomCommands}
+            pendingCommandId={pendingCommandId}
+            commandsForPost={(post) =>
+              createMailroomPostCommands(
+                state.connection.phase === "connected",
+                post.id,
+                {
+                  readPost: selectedProjectPath
+                    ? async () => {
+                        await sendDaemonCommand(
+                          mailboxPostCommand(selectedProjectPath, post.id),
+                        );
+                      }
+                    : undefined,
+                },
+              )
+            }
+            onBack={() => {
+              if (selectedProjectPath) {
+                dispatch({ type: "selectProject", path: selectedProjectPath });
+              }
             }}
             onExecute={(command) => void executeCommand(command)}
           />

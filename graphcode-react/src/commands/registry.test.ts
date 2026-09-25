@@ -4,6 +4,7 @@ import { initialAppState } from "../state/graphState";
 import {
   createCommandRegistry,
   createEdgeCommands,
+  createMailroomPostCommands,
   createProjectRowCommands,
   createQuickChatCommands,
 } from "./registry";
@@ -223,9 +224,14 @@ describe("command registry", () => {
       searchMailroom: vi.fn(),
       configureMailroomWatch: vi.fn(),
       postMailroom: vi.fn(),
+      openMailroom: vi.fn(),
     };
     const state = stateWithSelectedNode();
     let commands = createCommandRegistry(state, actions);
+    expect(
+      commands.find((command) => command.id === "project.openMailroom")
+        ?.enabled,
+    ).toBe(true);
     for (const id of [
       "loop.mailroomRefresh",
       "loop.mailroomUnread",
@@ -236,6 +242,17 @@ describe("command registry", () => {
     ] as const) {
       expect(commands.find((command) => command.id === id)?.enabled).toBe(true);
     }
+
+    state.selectedNodeId = undefined;
+    commands = createCommandRegistry(state, actions);
+    for (const id of [
+      "loop.mailroomRefresh",
+      "loop.mailroomSearch",
+      "loop.mailroomPost",
+    ] as const) {
+      expect(commands.find((command) => command.id === id)?.enabled).toBe(true);
+    }
+    state.selectedNodeId = "node-a";
 
     state.graphs["C:\\work\\graph"].nodes = [
       {
@@ -298,5 +315,14 @@ describe("command registry", () => {
       deleteEdge: vi.fn(async () => undefined),
     });
     expect(missingId[0].disabledReason).toContain("no stable ID");
+  });
+
+  it("creates a correlated deep-read command for a Mailroom post", () => {
+    const readPost = vi.fn(async () => undefined);
+    const command = createMailroomPostCommands(true, 42, { readPost })[0];
+
+    expect(command.id).toBe("mailroom.readPost");
+    expect(command.description).toContain("#42");
+    expect(command.enabled).toBe(true);
   });
 });

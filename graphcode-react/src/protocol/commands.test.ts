@@ -14,6 +14,7 @@ import {
   forgetProjectCommand,
   listQuickChatsCommand,
   mailboxCommand,
+  mailboxPostCommand,
   mailboxSearchCommand,
   mailboxUnreadCommand,
   mailroomPostCommand,
@@ -318,6 +319,17 @@ describe("daemon commands", () => {
         query: {
           selection: { board: {} },
           search: "green",
+          fullBodies: true,
+          advanceCursor: null,
+        },
+      },
+    });
+    expect(mailboxPostCommand(project, 42)).toEqual({
+      mailbox: {
+        projectPath: project,
+        query: {
+          selection: { post: { id: 42 } },
+          search: null,
           fullBodies: true,
           advanceCursor: null,
         },

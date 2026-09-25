@@ -552,6 +552,18 @@ export function mailboxSearchCommand(
   });
 }
 
+export function mailboxPostCommand(
+  projectPath: string,
+  postId: number,
+): MailboxCommand {
+  return mailboxCommand(projectPath, {
+    selection: { post: { id: postId } },
+    search: null,
+    fullBodies: true,
+    advanceCursor: null,
+  });
+}
+
 export function mailboxUnreadCommand(
   projectPath: string,
   reader: string,
