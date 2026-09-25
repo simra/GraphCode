@@ -32,6 +32,18 @@ interface EdgeDrag {
   targetId?: string;
 }
 
+interface PointerSample {
+  x: number;
+  y: number;
+}
+
+interface PinchGesture {
+  pointerIds: [number, number];
+  distance: number;
+  viewport: Viewport;
+  anchor: Position;
+}
+
 export interface GraphLayout {
   positions: Map<string, Position>;
   width: number;
@@ -188,6 +200,33 @@ function fittedViewport(layout: GraphLayout): Viewport {
   };
 }
 
+export function zoomedViewport(
+  viewport: Viewport,
+  factor: number,
+  minimumWidth: number,
+  maximumWidth: number,
+  anchor: Position = {
+    x: viewport.x + viewport.width / 2,
+    y: viewport.y + viewport.height / 2,
+  },
+  anchorRatio: Position = {
+    x: (anchor.x - viewport.x) / viewport.width,
+    y: (anchor.y - viewport.y) / viewport.height,
+  },
+): Viewport {
+  const width = Math.min(
+    maximumWidth,
+    Math.max(minimumWidth, viewport.width / factor),
+  );
+  const height = viewport.height * (width / viewport.width);
+  return {
+    x: anchor.x - anchorRatio.x * width,
+    y: anchor.y - anchorRatio.y * height,
+    width,
+    height,
+  };
+}
+
 export const GraphCanvas = forwardRef<
   GraphCanvasHandle,
   {
@@ -230,6 +269,9 @@ export const GraphCanvas = forwardRef<
   const [edgeDrag, setEdgeDrag] = useState<EdgeDrag>();
   const dragRef = useRef<{ x: number; y: number } | undefined>(undefined);
   const edgeDragRef = useRef<EdgeDrag | undefined>(undefined);
+  const touchPointersRef = useRef(new Map<number, PointerSample>());
+  const pinchRef = useRef<PinchGesture | undefined>(undefined);
+  const suppressClickRef = useRef(false);
   const svgRef = useRef<SVGSVGElement>(null);
   const onViewportChangeRef = useRef(onViewportChange);
   onViewportChangeRef.current = onViewportChange;
@@ -247,6 +289,8 @@ export const GraphCanvas = forwardRef<
     setSelectedEdgeKey(undefined);
     setEdgeDrag(undefined);
     edgeDragRef.current = undefined;
+    touchPointersRef.current.clear();
+    pinchRef.current = undefined;
   }, [
     graph?.id,
     initialViewport?.height,
@@ -269,20 +313,17 @@ export const GraphCanvas = forwardRef<
     ? layout.positions.get(edgeDrag.sourceId)
     : undefined;
 
-  function zoom(factor: number) {
-    setViewport((current) => {
-      const width = Math.min(
-        layout.width * 4,
-        Math.max(cardWidth * 1.4, current.width / factor),
-      );
-      const height = current.height * (width / current.width);
-      return {
-        x: current.x + (current.width - width) / 2,
-        y: current.y + (current.height - height) / 2,
-        width,
-        height,
-      };
-    });
+  function zoom(factor: number, anchor?: Position, anchorRatio?: Position) {
+    setViewport((current) =>
+      zoomedViewport(
+        current,
+        factor,
+        cardWidth * 1.4,
+        Math.max(cardWidth * 1.4, layout.width * 4),
+        anchor,
+        anchorRatio,
+      ),
+    );
   }
 
   useImperativeHandle(
@@ -340,6 +381,106 @@ export const GraphCanvas = forwardRef<
     };
   }
 
+  function pointInViewport(
+    point: PointerSample,
+    bounds: DOMRect,
+    targetViewport: Viewport,
+  ): Position {
+    return {
+      x:
+        targetViewport.x +
+        ((point.x - bounds.left) / bounds.width) * targetViewport.width,
+      y:
+        targetViewport.y +
+        ((point.y - bounds.top) / bounds.height) * targetViewport.height,
+    };
+  }
+
+  function startTouch(event: ReactPointerEvent<SVGSVGElement>) {
+    if (event.pointerType !== "touch") return;
+    touchPointersRef.current.set(event.pointerId, {
+      x: event.clientX,
+      y: event.clientY,
+    });
+    event.currentTarget.setPointerCapture(event.pointerId);
+    if (touchPointersRef.current.size !== 2 || !svgRef.current) return;
+    const entries = [...touchPointersRef.current.entries()];
+    const [[firstId, first], [secondId, second]] = entries;
+    const distance = Math.hypot(second.x - first.x, second.y - first.y);
+    const bounds = svgRef.current.getBoundingClientRect();
+    if (!distance || !bounds.width || !bounds.height) return;
+    const midpoint = {
+      x: (first.x + second.x) / 2,
+      y: (first.y + second.y) / 2,
+    };
+    pinchRef.current = {
+      pointerIds: [firstId, secondId],
+      distance,
+      viewport,
+      anchor: pointInViewport(midpoint, bounds, viewport),
+    };
+    dragRef.current = undefined;
+    edgeDragRef.current = undefined;
+    setEdgeDrag(undefined);
+  }
+
+  function movePinch(event: ReactPointerEvent<SVGSVGElement>) {
+    if (
+      event.pointerType !== "touch" ||
+      !touchPointersRef.current.has(event.pointerId)
+    ) {
+      return false;
+    }
+    touchPointersRef.current.set(event.pointerId, {
+      x: event.clientX,
+      y: event.clientY,
+    });
+    const pinch = pinchRef.current;
+    const bounds = svgRef.current?.getBoundingClientRect();
+    if (!pinch || !bounds?.width || !bounds.height) return false;
+    const first = touchPointersRef.current.get(pinch.pointerIds[0]);
+    const second = touchPointersRef.current.get(pinch.pointerIds[1]);
+    if (!first || !second) return false;
+    const distance = Math.hypot(second.x - first.x, second.y - first.y);
+    if (!distance) return true;
+    const midpoint = {
+      x: (first.x + second.x) / 2,
+      y: (first.y + second.y) / 2,
+    };
+    setViewport(
+      zoomedViewport(
+        pinch.viewport,
+        distance / pinch.distance,
+        cardWidth * 1.4,
+        Math.max(cardWidth * 1.4, layout.width * 4),
+        pinch.anchor,
+        {
+          x: (midpoint.x - bounds.left) / bounds.width,
+          y: (midpoint.y - bounds.top) / bounds.height,
+        },
+      ),
+    );
+    return true;
+  }
+
+  function endTouch(event: ReactPointerEvent<SVGSVGElement>) {
+    if (event.pointerType !== "touch") return;
+    const wasPinching = Boolean(pinchRef.current);
+    touchPointersRef.current.delete(event.pointerId);
+    if (
+      pinchRef.current?.pointerIds.includes(event.pointerId) ||
+      touchPointersRef.current.size < 2
+    ) {
+      pinchRef.current = undefined;
+    }
+    if (wasPinching) {
+      suppressClickRef.current = true;
+      window.setTimeout(() => {
+        suppressClickRef.current = false;
+      }, 0);
+    }
+  }
+
   function moveEdge(event: ReactPointerEvent<SVGSVGElement>) {
     const current = edgeDragRef.current;
     if (!current || current.pointerId !== event.pointerId) return false;
@@ -370,7 +511,17 @@ export const GraphCanvas = forwardRef<
 
   function wheelZoom(event: WheelEvent<SVGSVGElement>) {
     event.preventDefault();
-    zoom(event.deltaY < 0 ? 1.12 : 1 / 1.12);
+    const bounds = svgRef.current?.getBoundingClientRect();
+    if (!bounds?.width || !bounds.height) return;
+    const anchor = {
+      x:
+        viewport.x +
+        ((event.clientX - bounds.left) / bounds.width) * viewport.width,
+      y:
+        viewport.y +
+        ((event.clientY - bounds.top) / bounds.height) * viewport.height,
+    };
+    zoom(event.deltaY < 0 ? 1.12 : 1 / 1.12, anchor);
   }
 
   return (
@@ -415,7 +566,8 @@ export const GraphCanvas = forwardRef<
       </div>
       <p id="graph-keyboard-instructions" className="canvas-help">
         Tab to a loop or edge. Arrow keys move between nearby loops; Home and
-        End jump to the first and last loop. Enter or Space selects.
+        End jump to the first and last loop. Enter or Space selects. Wheel and
+        pinch zoom stay anchored beneath the pointer or touch midpoint.
       </p>
       <div className="canvas-scroll">
         <svg
@@ -426,6 +578,13 @@ export const GraphCanvas = forwardRef<
           aria-labelledby="graph-svg-title graph-svg-description"
           aria-describedby="graph-keyboard-instructions"
           onWheel={wheelZoom}
+          onClickCapture={(event) => {
+            if (suppressClickRef.current) {
+              event.preventDefault();
+              event.stopPropagation();
+            }
+          }}
+          onPointerDownCapture={startTouch}
           onPointerDown={(event) => {
             if (
               event.button !== 0 ||
@@ -437,16 +596,18 @@ export const GraphCanvas = forwardRef<
           }}
           onPointerMove={pan}
           onPointerMoveCapture={(event) => {
-            if (moveEdge(event)) event.stopPropagation();
+            if (movePinch(event) || moveEdge(event)) event.stopPropagation();
           }}
           onPointerUp={(event) => {
+            endTouch(event);
             finishEdge(event.pointerId);
             dragRef.current = undefined;
             if (event.currentTarget.hasPointerCapture(event.pointerId)) {
               event.currentTarget.releasePointerCapture(event.pointerId);
             }
           }}
-          onPointerCancel={() => {
+          onPointerCancel={(event) => {
+            endTouch(event);
             dragRef.current = undefined;
             edgeDragRef.current = undefined;
             setEdgeDrag(undefined);
@@ -456,9 +617,10 @@ export const GraphCanvas = forwardRef<
           <desc id="graph-svg-description">
             {graph.nodes.length} loops connected by {graph.edges.length} edges.
             Use the toolbar or keyboard shortcuts to zoom, and drag the
-            background to pan. Drag from a loop connection handle to another
-            loop to configure an edge, or use New Edge for a keyboard accessible
-            alternative.
+            background to pan. Wheel and pinch zoom remain anchored beneath the
+            pointer or touch midpoint. Drag from a loop connection handle to
+            another loop to configure an edge, or use New Edge for a keyboard
+            accessible alternative.
           </desc>
           <defs>
             <pattern
