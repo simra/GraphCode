@@ -1,6 +1,11 @@
+import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import type { LoopNode } from "../protocol/domain";
-import { buildGraphLayout } from "./GraphCanvas";
+import {
+  buildGraphLayout,
+  edgeTargetAtPoint,
+  GraphCanvas,
+} from "./GraphCanvas";
 
 const nodes: LoopNode[] = [
   { id: "a", title: "A", state: "idle" },
@@ -32,5 +37,42 @@ describe("graph layout", () => {
 
     expect(layout.positions.size).toBe(2);
     expect(layout.width).toBeGreaterThan(0);
+  });
+
+  it("resolves pointer edge targets while excluding the source", () => {
+    const layout = buildGraphLayout(nodes, []);
+    const target = layout.positions.get("b")!;
+
+    expect(
+      edgeTargetAtPoint(nodes, layout.positions, "a", {
+        x: target.x + 20,
+        y: target.y + 20,
+      }),
+    ).toBe("b");
+    expect(
+      edgeTargetAtPoint(nodes, layout.positions, "b", {
+        x: target.x + 20,
+        y: target.y + 20,
+      }),
+    ).toBeUndefined();
+  });
+
+  it("exposes pointer connection handles and describes the keyboard alternative", () => {
+    const markup = renderToStaticMarkup(
+      <GraphCanvas
+        graph={{
+          id: "graph",
+          project: { name: "Project", path: "C:\\project" },
+          nodes,
+          edges: [],
+        }}
+        onCreateEdge={() => undefined}
+      />,
+    );
+
+    expect(markup).toContain("edge-drag-handle");
+    expect(markup).toContain(
+      "use New Edge for a keyboard accessible alternative",
+    );
   });
 });

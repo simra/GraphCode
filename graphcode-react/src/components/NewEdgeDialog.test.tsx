@@ -10,6 +10,8 @@ describe("NewEdgeDialog", () => {
           { id: "a", title: "A", state: "idle" },
           { id: "b", title: "B", state: "idle" },
         ]}
+        initialFrom="b"
+        initialTo="a"
         onClose={() => undefined}
         onCreate={async () => undefined}
       />,
@@ -19,5 +21,7 @@ describe("NewEdgeDialog", () => {
     expect(markup).toContain("On failure");
     expect(markup).toContain("Payload and cycle options");
     expect(markup).toContain("Maximum iterations");
+    expect(markup).toContain('<option value="b" selected="">B</option>');
+    expect(markup).toContain('<option value="a" selected="">A</option>');
   });
 });

@@ -48,6 +48,8 @@ open, rename, delete, activity, and navigation are implemented; the opened works
 explicitly remains non-interactive until the local zmx terminal bridge is available.
 Composite snapshots can be drilled into through breadcrumbs, and graph mutations in
 that view are wrapped through the authoritative `subGraphCommand` parent chain.
+Pointer users can drag between loop connection handles to prefill the typed edge
+editor; the New Edge command remains the keyboard-accessible endpoint selector.
 Playbook refine and rollback use the existing daemon commands; current playbook and
 rollback-history reads remain blocked on DT-001.
 The inspector can load the whole Mailroom board, search it, query a selected loop's

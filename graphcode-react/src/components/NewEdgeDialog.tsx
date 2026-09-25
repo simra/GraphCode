@@ -9,18 +9,20 @@ import type {
 export function NewEdgeDialog({
   nodes,
   initialFrom,
+  initialTo,
   onClose,
   onCreate,
 }: {
   nodes: LoopNode[];
   initialFrom?: string;
+  initialTo?: string;
   onClose(): void;
   onCreate(from: string, to: string, spec: EdgeSpecPayload): Promise<void>;
 }) {
   const initialSource = initialFrom ?? nodes[0]?.id ?? "";
   const [from, setFrom] = useState(initialSource);
   const [to, setTo] = useState(
-    nodes.find((node) => node.id !== initialSource)?.id ?? "",
+    initialTo ?? nodes.find((node) => node.id !== initialSource)?.id ?? "",
   );
   const [kind, setKind] = useState<EdgeKindPayload>("handoff");
   const [condition, setCondition] = useState<EdgeConditionPayload>("always");

@@ -24,6 +24,14 @@ interface Position {
   y: number;
 }
 
+interface EdgeDrag {
+  sourceId: string;
+  pointerId: number;
+  x: number;
+  y: number;
+  targetId?: string;
+}
+
 export interface GraphLayout {
   positions: Map<string, Position>;
   width: number;
@@ -42,6 +50,25 @@ export interface GraphCanvasHandle {
   zoomOut(): void;
   resetZoom(): void;
   fitGraph(): void;
+}
+
+export function edgeTargetAtPoint(
+  nodes: LoopNode[],
+  positions: Map<string, Position>,
+  sourceId: string,
+  point: Position,
+): string | undefined {
+  return nodes.find((node) => {
+    if (node.id === sourceId) return false;
+    const position = positions.get(node.id);
+    return (
+      position !== undefined &&
+      point.x >= position.x &&
+      point.x <= position.x + cardWidth &&
+      point.y >= position.y &&
+      point.y <= position.y + cardHeight
+    );
+  })?.id;
 }
 
 function stateLabel(node: LoopNode): string {
@@ -134,6 +161,7 @@ export const GraphCanvas = forwardRef<
     pendingCommandId?: string;
     onSelectNode?(nodeId: string): void;
     onExecuteCommand?(command: AppCommand): void;
+    onCreateEdge?(from: string, to: string): void;
     edgeCommands?(edge: LoopEdge): AppCommand[];
   }
 >(function GraphCanvas(
@@ -144,6 +172,7 @@ export const GraphCanvas = forwardRef<
     pendingCommandId,
     onSelectNode,
     onExecuteCommand = () => undefined,
+    onCreateEdge,
     edgeCommands = () => [],
   },
   ref,
@@ -156,18 +185,25 @@ export const GraphCanvas = forwardRef<
     fittedViewport(layout),
   );
   const [selectedEdgeKey, setSelectedEdgeKey] = useState<string>();
+  const [edgeDrag, setEdgeDrag] = useState<EdgeDrag>();
   const dragRef = useRef<{ x: number; y: number } | undefined>(undefined);
+  const edgeDragRef = useRef<EdgeDrag | undefined>(undefined);
   const svgRef = useRef<SVGSVGElement>(null);
 
   useEffect(() => {
     setViewport(fittedViewport(layout));
     setSelectedEdgeKey(undefined);
+    setEdgeDrag(undefined);
+    edgeDragRef.current = undefined;
   }, [graph?.id, layout]);
 
   const selectedEdge = graph?.edges.find(
     (edge, index) =>
       (edge.id ?? `${edge.from}-${edge.to}-${index}`) === selectedEdgeKey,
   );
+  const edgeDragSourcePosition = edgeDrag
+    ? layout.positions.get(edgeDrag.sourceId)
+    : undefined;
 
   function zoom(factor: number) {
     setViewport((current) => {
@@ -225,6 +261,47 @@ export const GraphCanvas = forwardRef<
       x: current.x - deltaX,
       y: current.y - deltaY,
     }));
+  }
+
+  function graphPoint(event: ReactPointerEvent<SVGElement>): Position {
+    const bounds = svgRef.current?.getBoundingClientRect();
+    if (!bounds?.width || !bounds.height) return { x: 0, y: 0 };
+    return {
+      x:
+        viewport.x +
+        ((event.clientX - bounds.left) / bounds.width) * viewport.width,
+      y:
+        viewport.y +
+        ((event.clientY - bounds.top) / bounds.height) * viewport.height,
+    };
+  }
+
+  function moveEdge(event: ReactPointerEvent<SVGSVGElement>) {
+    const current = edgeDragRef.current;
+    if (!current || current.pointerId !== event.pointerId) return false;
+    const point = graphPoint(event);
+    const next = {
+      ...current,
+      ...point,
+      targetId: edgeTargetAtPoint(
+        graph?.nodes ?? [],
+        layout.positions,
+        current.sourceId,
+        point,
+      ),
+    };
+    edgeDragRef.current = next;
+    setEdgeDrag(next);
+    return true;
+  }
+
+  function finishEdge(pointerId: number) {
+    const current = edgeDragRef.current;
+    edgeDragRef.current = undefined;
+    setEdgeDrag(undefined);
+    if (current?.pointerId === pointerId && current.targetId && onCreateEdge) {
+      onCreateEdge(current.sourceId, current.targetId);
+    }
   }
 
   function wheelZoom(event: WheelEvent<SVGSVGElement>) {
@@ -291,7 +368,11 @@ export const GraphCanvas = forwardRef<
             dragRef.current = { x: event.clientX, y: event.clientY };
           }}
           onPointerMove={pan}
+          onPointerMoveCapture={(event) => {
+            if (moveEdge(event)) event.stopPropagation();
+          }}
           onPointerUp={(event) => {
+            finishEdge(event.pointerId);
             dragRef.current = undefined;
             if (event.currentTarget.hasPointerCapture(event.pointerId)) {
               event.currentTarget.releasePointerCapture(event.pointerId);
@@ -299,13 +380,17 @@ export const GraphCanvas = forwardRef<
           }}
           onPointerCancel={() => {
             dragRef.current = undefined;
+            edgeDragRef.current = undefined;
+            setEdgeDrag(undefined);
           }}
         >
           <title id="graph-svg-title">{graph.project.name}</title>
           <desc id="graph-svg-description">
             {graph.nodes.length} loops connected by {graph.edges.length} edges.
             Use the toolbar or keyboard shortcuts to zoom, and drag the
-            background to pan.
+            background to pan. Drag from a loop connection handle to another
+            loop to configure an edge, or use New Edge for a keyboard accessible
+            alternative.
           </desc>
           <defs>
             <marker
@@ -360,6 +445,14 @@ export const GraphCanvas = forwardRef<
               />
             );
           })}
+          {edgeDrag && edgeDragSourcePosition ? (
+            <path
+              className="graph-edge-preview"
+              d={`M ${edgeDragSourcePosition.x + cardWidth} ${edgeDragSourcePosition.y + cardHeight / 2} C ${edgeDragSourcePosition.x + cardWidth + 42} ${edgeDragSourcePosition.y + cardHeight / 2}, ${edgeDrag.x - 42} ${edgeDrag.y}, ${edgeDrag.x} ${edgeDrag.y}`}
+              markerEnd="url(#arrow)"
+              aria-hidden="true"
+            />
+          ) : null}
           {graph.nodes.map((node, index) => {
             const position = layout.positions.get(node.id)!;
             const state = stateLabel(node);
@@ -369,7 +462,7 @@ export const GraphCanvas = forwardRef<
               <g
                 id={`graph-node-${node.id}`}
                 key={node.id}
-                className={`graph-node${selected ? " graph-node-selected" : ""}`}
+                className={`graph-node${selected ? " graph-node-selected" : ""}${edgeDrag?.sourceId === node.id ? " graph-node-edge-source" : ""}${edgeDrag?.targetId === node.id ? " graph-node-edge-target" : ""}`}
                 transform={`translate(${position.x} ${position.y})`}
                 role="button"
                 aria-label={`${node.title}, ${state}`}
@@ -417,6 +510,29 @@ export const GraphCanvas = forwardRef<
                 <text className={`node-state state-${state}`} x="22" y="86">
                   {state.toUpperCase()}
                 </text>
+                {onCreateEdge ? (
+                  <circle
+                    className="edge-drag-handle"
+                    cx={cardWidth}
+                    cy={cardHeight / 2}
+                    r="9"
+                    aria-hidden="true"
+                    onPointerDown={(event) => {
+                      if (event.button !== 0) return;
+                      event.preventDefault();
+                      event.stopPropagation();
+                      const start = {
+                        sourceId: node.id,
+                        pointerId: event.pointerId,
+                        x: position.x + cardWidth,
+                        y: position.y + cardHeight / 2,
+                      };
+                      edgeDragRef.current = start;
+                      setEdgeDrag(start);
+                      svgRef.current?.setPointerCapture(event.pointerId);
+                    }}
+                  />
+                ) : null}
               </g>
             );
           })}
