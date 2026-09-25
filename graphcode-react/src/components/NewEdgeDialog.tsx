@@ -1,10 +1,11 @@
-import { useEffect, useRef, useState } from "react";
+import { useRef, useState } from "react";
 import type { LoopNode } from "../protocol/domain";
 import type {
   EdgeConditionPayload,
   EdgeKindPayload,
   EdgeSpecPayload,
 } from "../protocol/commands";
+import { useDialogFocus } from "./dialogFocus";
 
 export function NewEdgeDialog({
   nodes,
@@ -36,12 +37,12 @@ export function NewEdgeDialog({
   const [spawnPath, setSpawnPath] = useState("");
   const [error, setError] = useState<string>();
   const [submitting, setSubmitting] = useState(false);
-  const dialogRef = useRef<HTMLElement>(null);
   const firstRef = useRef<HTMLSelectElement>(null);
-
-  useEffect(() => {
-    firstRef.current?.focus();
-  }, []);
+  const { dialogRef, handleDialogKeyDown } = useDialogFocus({
+    canClose: !submitting,
+    initialFocusRef: firstRef,
+    onClose,
+  });
 
   function positiveInteger(value: string, label: string) {
     if (!value.trim()) return null;
@@ -108,28 +109,10 @@ export function NewEdgeDialog({
         aria-modal="true"
         aria-labelledby="new-edge-title"
         onKeyDown={(event) => {
-          if (event.key === "Escape" && !submitting) {
-            event.preventDefault();
-            onClose();
-          } else if (event.ctrlKey && event.key === "Enter" && !submitting) {
+          if (handleDialogKeyDown(event)) return;
+          if (event.ctrlKey && event.key === "Enter" && !submitting) {
             event.preventDefault();
             void submit();
-          } else if (event.key === "Tab") {
-            const focusable = [
-              ...(dialogRef.current?.querySelectorAll<HTMLElement>(
-                'button:not(:disabled), input:not(:disabled), select:not(:disabled), [tabindex="0"]',
-              ) ?? []),
-            ];
-            if (!focusable.length) return;
-            const first = focusable[0];
-            const last = focusable.at(-1)!;
-            if (event.shiftKey && document.activeElement === first) {
-              event.preventDefault();
-              last.focus();
-            } else if (!event.shiftKey && document.activeElement === last) {
-              event.preventDefault();
-              first.focus();
-            }
           }
         }}
       >

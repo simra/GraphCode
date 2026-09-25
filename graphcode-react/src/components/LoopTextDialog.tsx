@@ -1,4 +1,5 @@
-import { useEffect, useRef, useState } from "react";
+import { useRef, useState } from "react";
+import { useDialogFocus } from "./dialogFocus";
 
 export function LoopTextDialog({
   title,
@@ -24,13 +25,13 @@ export function LoopTextDialog({
   const [value, setValue] = useState(initialValue);
   const [error, setError] = useState<string>();
   const [submitting, setSubmitting] = useState(false);
-  const dialogRef = useRef<HTMLElement>(null);
   const inputRef = useRef<HTMLInputElement & HTMLTextAreaElement>(null);
-
-  useEffect(() => {
-    inputRef.current?.focus();
-    inputRef.current?.select();
-  }, []);
+  const { dialogRef, handleDialogKeyDown } = useDialogFocus({
+    canClose: !submitting,
+    initialFocusRef: inputRef,
+    onClose,
+    selectInitial: true,
+  });
 
   async function submit() {
     const trimmed = value.trim();
@@ -72,32 +73,14 @@ export function LoopTextDialog({
         aria-modal="true"
         aria-labelledby="loop-text-dialog-title"
         onKeyDown={(event) => {
-          if (event.key === "Escape" && !submitting) {
-            event.preventDefault();
-            onClose();
-          } else if (
+          if (handleDialogKeyDown(event)) return;
+          if (
             event.key === "Enter" &&
             (!multiline || event.ctrlKey) &&
             !submitting
           ) {
             event.preventDefault();
             void submit();
-          } else if (event.key === "Tab") {
-            const focusable = [
-              ...(dialogRef.current?.querySelectorAll<HTMLElement>(
-                'button:not(:disabled), input:not(:disabled), textarea:not(:disabled), [tabindex="0"]',
-              ) ?? []),
-            ];
-            if (!focusable.length) return;
-            const first = focusable[0];
-            const last = focusable.at(-1)!;
-            if (event.shiftKey && document.activeElement === first) {
-              event.preventDefault();
-              last.focus();
-            } else if (!event.shiftKey && document.activeElement === last) {
-              event.preventDefault();
-              first.focus();
-            }
           }
         }}
       >

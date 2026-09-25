@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { AppCommand } from "../commands/registry";
+import { useDialogFocus } from "./dialogFocus";
 
 export function CommandPalette({
   commands,
@@ -16,6 +17,11 @@ export function CommandPalette({
 }) {
   const [query, setQuery] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
+  const { dialogRef, handleDialogKeyDown } = useDialogFocus({
+    active: open,
+    initialFocusRef: inputRef,
+    onClose,
+  });
   const results = useMemo(() => {
     const normalized = query.trim().toLocaleLowerCase();
     return commands
@@ -32,9 +38,7 @@ export function CommandPalette({
   useEffect(() => {
     if (!open) {
       setQuery("");
-      return;
     }
-    requestAnimationFrame(() => inputRef.current?.focus());
   }, [open]);
 
   if (!open) return null;
@@ -42,17 +46,13 @@ export function CommandPalette({
   return (
     <div className="command-overlay" role="presentation" onMouseDown={onClose}>
       <section
+        ref={dialogRef}
         className="command-palette"
         role="dialog"
         aria-modal="true"
         aria-labelledby="command-palette-title"
         onMouseDown={(event) => event.stopPropagation()}
-        onKeyDown={(event) => {
-          if (event.key === "Escape") {
-            event.preventDefault();
-            onClose();
-          }
-        }}
+        onKeyDown={handleDialogKeyDown}
       >
         <h2 id="command-palette-title">GraphCode commands</h2>
         <input
