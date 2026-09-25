@@ -1,9 +1,12 @@
 import { describe, expect, it } from "vitest";
 import {
   armCompositeCommand,
+  closeProjectCommand,
   completeNodeCommand,
   createNodeCommand,
+  deleteProjectGraphCommand,
   deleteNodeCommand,
+  forgetProjectCommand,
   openProjectCommand,
   memoNodeCommand,
   messageNodeCommand,
@@ -106,6 +109,15 @@ describe("daemon commands", () => {
   it("encodes project opening with the authoritative labeled path", () => {
     expect(openProjectCommand("C:\\work\\graph")).toEqual({
       openProject: { path: "C:\\work\\graph" },
+    });
+  });
+
+  it("encodes project lifecycle commands with labeled paths", () => {
+    const path = "C:\\work\\graph";
+    expect(closeProjectCommand(path)).toEqual({ closeProject: { path } });
+    expect(forgetProjectCommand(path)).toEqual({ forgetProject: { path } });
+    expect(deleteProjectGraphCommand(path)).toEqual({
+      deleteProjectGraph: { path },
     });
   });
 

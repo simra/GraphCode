@@ -42,6 +42,11 @@ export type AppAction =
   | { type: "connectionFailed"; message: string }
   | { type: "fixtureLoaded"; reason: string }
   | { type: "selectProject"; path: string }
+  | {
+      type: "projectRemoved";
+      path: string;
+      removeFromRecents: boolean;
+    }
   | { type: "selectNode"; projectPath: string; nodeId: string }
   | { type: "clearNodeSelection" }
   | { type: "envelopeReceived"; envelope: DaemonWireEnvelope };
@@ -178,6 +183,32 @@ export function appReducer(state: AppState, action: AppAction): AppState {
                 : undefined,
           }
         : state;
+    case "projectRemoved": {
+      const graphs = { ...state.graphs };
+      delete graphs[action.path];
+      const recentProjects = action.removeFromRecents
+        ? state.recentProjects.filter(
+            (project) =>
+              project.path.toLowerCase() !== action.path.toLowerCase(),
+          )
+        : state.recentProjects;
+      if (state.selectedProjectPath !== action.path) {
+        return { ...state, graphs, recentProjects };
+      }
+      const fallback =
+        graphs["graphcode://global"]?.project.path ??
+        Object.values(graphs)
+          .map((graph) => graph.project)
+          .filter((project) => project.path !== "graphcode://global")
+          .sort((left, right) => left.name.localeCompare(right.name))[0]?.path;
+      return {
+        ...state,
+        graphs,
+        recentProjects,
+        selectedProjectPath: fallback,
+        selectedNodeId: undefined,
+      };
+    }
     case "selectNode": {
       const graph = state.graphs[action.projectPath];
       return graph?.nodes.some((node) => node.id === action.nodeId)

@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 import type { DaemonWireEnvelope } from "../protocol/domain";
-import { appReducer, initialAppState, selectedNode } from "./graphState";
+import {
+  appReducer,
+  initialAppState,
+  selectedNode,
+  type AppState,
+} from "./graphState";
 
 const snapshot: DaemonWireEnvelope = {
   version: 2,
@@ -148,5 +153,49 @@ describe("appReducer", () => {
       },
     });
     expect(removed.selectedNodeId).toBeUndefined();
+  });
+
+  it("removes confirmed project state and selects a predictable fallback", () => {
+    const state: AppState = {
+      ...initialAppState,
+      selectedProjectPath: "C:\\work\\B",
+      selectedNodeId: "node-b",
+      recentProjects: [
+        { path: "C:\\work\\B", name: "B" },
+        { path: "C:\\work\\C", name: "C" },
+      ],
+      graphs: {
+        "graphcode://global": {
+          id: "global",
+          project: { path: "graphcode://global", name: "Overview" },
+          nodes: [],
+          edges: [],
+        },
+        "C:\\work\\B": {
+          id: "b",
+          project: { path: "C:\\work\\B", name: "B" },
+          nodes: [{ id: "node-b", title: "B", state: "idle" }],
+          edges: [],
+        },
+      },
+    };
+    const closed = appReducer(state, {
+      type: "projectRemoved",
+      path: "C:\\work\\B",
+      removeFromRecents: false,
+    });
+    expect(closed.graphs["C:\\work\\B"]).toBeUndefined();
+    expect(closed.recentProjects).toHaveLength(2);
+    expect(closed.selectedProjectPath).toBe("graphcode://global");
+    expect(closed.selectedNodeId).toBeUndefined();
+
+    const forgotten = appReducer(state, {
+      type: "projectRemoved",
+      path: "C:\\work\\B",
+      removeFromRecents: true,
+    });
+    expect(forgotten.recentProjects.map((project) => project.name)).toEqual([
+      "C",
+    ]);
   });
 });
