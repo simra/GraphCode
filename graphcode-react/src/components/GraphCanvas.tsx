@@ -270,33 +270,35 @@ export const GraphCanvas = forwardRef<
   {
     graph?: LoopGraph;
     selectedNodeId?: string;
+    selectedEdgeKey?: string;
     commands?: AppCommand[];
     pendingCommandId?: string;
     initialViewport?: Viewport;
     initialNodePositions?: Record<string, Position>;
     viewportKey?: string;
     onSelectNode?(nodeId: string): void;
+    onSelectEdge?(edgeKey?: string): void;
     onExecuteCommand?(command: AppCommand): void;
     onCreateEdge?(from: string, to: string): void;
     onViewportChange?(viewport: Viewport): void;
     onNodePositionsChange?(positions: Record<string, Position>): void;
-    edgeCommands?(edge: LoopEdge): AppCommand[];
   }
 >(function GraphCanvas(
   {
     graph,
     selectedNodeId,
+    selectedEdgeKey,
     commands = [],
     pendingCommandId,
     initialViewport,
     initialNodePositions = emptyNodePositions,
     viewportKey,
     onSelectNode,
+    onSelectEdge,
     onExecuteCommand = () => undefined,
     onCreateEdge,
     onViewportChange,
     onNodePositionsChange,
-    edgeCommands = () => [],
   },
   ref,
 ) {
@@ -316,7 +318,6 @@ export const GraphCanvas = forwardRef<
   const [viewport, setViewport] = useState<Viewport>(() =>
     fittedViewport(layout),
   );
-  const [selectedEdgeKey, setSelectedEdgeKey] = useState<string>();
   const [edgeDrag, setEdgeDrag] = useState<EdgeDrag>();
   const dragRef = useRef<{ x: number; y: number } | undefined>(undefined);
   const edgeDragRef = useRef<EdgeDrag | undefined>(undefined);
@@ -340,7 +341,6 @@ export const GraphCanvas = forwardRef<
         ? current
         : next,
     );
-    setSelectedEdgeKey(undefined);
     setEdgeDrag(undefined);
     edgeDragRef.current = undefined;
     touchPointersRef.current.clear();
@@ -375,10 +375,6 @@ export const GraphCanvas = forwardRef<
     onViewportChangeRef.current?.(viewport);
   }, [viewport]);
 
-  const selectedEdge = graph?.edges.find(
-    (edge, index) =>
-      (edge.id ?? `${edge.from}-${edge.to}-${index}`) === selectedEdgeKey,
-  );
   const edgeDragSourcePosition = edgeDrag
     ? layout.positions.get(edgeDrag.sourceId)
     : undefined;
@@ -661,20 +657,6 @@ export const GraphCanvas = forwardRef<
         </div>
         <div className="canvas-toolbar" aria-label="Graph viewport">
           <span>{graph.nodes.length} loops</span>
-          {selectedEdge
-            ? edgeCommands(selectedEdge).map((command) => (
-                <button
-                  key={command.id}
-                  className={command.danger ? "danger-command" : undefined}
-                  type="button"
-                  disabled={!command.enabled || pendingCommandId === command.id}
-                  title={command.disabledReason ?? command.description}
-                  onClick={() => onExecuteCommand(command)}
-                >
-                  {command.label}
-                </button>
-              ))
-            : null}
           {commands.map((command) => (
             <button
               key={command.id}
@@ -820,18 +802,18 @@ export const GraphCanvas = forwardRef<
                 aria-keyshortcuts="Enter Space Escape"
                 onClick={(event) => {
                   event.stopPropagation();
-                  setSelectedEdgeKey(
+                  onSelectEdge?.(
                     selectedEdgeKey === edgeKey ? undefined : edgeKey,
                   );
                 }}
                 onKeyDown={(event) => {
                   if (event.key === "Enter" || event.key === " ") {
                     event.preventDefault();
-                    setSelectedEdgeKey(
+                    onSelectEdge?.(
                       selectedEdgeKey === edgeKey ? undefined : edgeKey,
                     );
                   } else if (event.key === "Escape") {
-                    setSelectedEdgeKey(undefined);
+                    onSelectEdge?.(undefined);
                   }
                 }}
               />
@@ -849,7 +831,10 @@ export const GraphCanvas = forwardRef<
             const position = layout.positions.get(node.id)!;
             const state = stateLabel(node);
             const selected = selectedNodeId === node.id;
-            const selectNode = () => onSelectNode?.(node.id);
+            const selectNode = () => {
+              onSelectEdge?.(undefined);
+              onSelectNode?.(node.id);
+            };
             return (
               <g
                 id={`graph-node-${node.id}`}

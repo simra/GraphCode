@@ -36,6 +36,7 @@ import {
 import { CommandPalette } from "./components/CommandPalette";
 import { ConnectionBanner } from "./components/ConnectionBanner";
 import { EditLoopDialog } from "./components/EditLoopDialog";
+import { EdgeInspector } from "./components/EdgeInspector";
 import { GraphCanvas, type GraphCanvasHandle } from "./components/GraphCanvas";
 import { LoopTextDialog } from "./components/LoopTextDialog";
 import { MailroomPostDialog } from "./components/MailroomPostDialog";
@@ -86,6 +87,7 @@ import {
   type GraphCommandEnvelope,
   updateNodeCommand,
 } from "./protocol/commands";
+import type { LoopEdge } from "./protocol/domain";
 import {
   appReducer,
   currentGraph,
@@ -101,6 +103,7 @@ export default function App() {
   const [newLoopOpen, setNewLoopOpen] = useState(false);
   const [newQuickChatOpen, setNewQuickChatOpen] = useState(false);
   const [newEdgeOpen, setNewEdgeOpen] = useState(false);
+  const [selectedEdgeKey, setSelectedEdgeKey] = useState<string>();
   const [newEdgeEndpoints, setNewEdgeEndpoints] = useState<{
     from?: string;
     to?: string;
@@ -236,6 +239,10 @@ export default function App() {
     ? uiLayout?.projects[selectedProjectPath]?.nodePositions[selectedViewKey]
     : undefined;
   const inspectedNode = selectedNode(state);
+  const inspectedEdge = selectedGraph?.edges.find(
+    (edge, index) =>
+      (edge.id ?? `${edge.from}-${edge.to}-${index}`) === selectedEdgeKey,
+  );
   const inspectedQuickChat = selectedQuickChat(state);
   const inspectedNodeState =
     typeof inspectedNode?.state === "string"
@@ -587,6 +594,27 @@ export default function App() {
   );
 
   useEffect(() => {
+    if (
+      state.selectedNodeId ||
+      state.quickChatsSelected ||
+      state.mailroomSelected ||
+      (selectedEdgeKey && !inspectedEdge)
+    ) {
+      setSelectedEdgeKey(undefined);
+    }
+  }, [
+    inspectedEdge,
+    selectedEdgeKey,
+    state.mailroomSelected,
+    state.quickChatsSelected,
+    state.selectedNodeId,
+  ]);
+
+  useEffect(() => {
+    setSelectedEdgeKey(undefined);
+  }, [selectedProjectPath, selectedViewKey]);
+
+  useEffect(() => {
     if (!pendingCreatedNode) return;
     const graph = state.graphs[pendingCreatedNode.projectPath];
     if (!graph?.nodes.some((node) => node.id === pendingCreatedNode.nodeId)) {
@@ -695,6 +723,34 @@ export default function App() {
         deleteProjectGraph: () => confirmedRemoval("delete"),
       },
     );
+  }
+
+  function commandsForEdge(edge: LoopEdge) {
+    return createEdgeCommands(state.connection.phase === "connected", edge.id, {
+      deleteEdge: edge.id
+        ? async () => {
+            if (!selectedProjectPath || !edge.id) return;
+            const from =
+              selectedGraph?.nodes.find((node) => node.id === edge.from)
+                ?.title ?? edge.from;
+            const to =
+              selectedGraph?.nodes.find((node) => node.id === edge.to)?.title ??
+              edge.to;
+            if (
+              !window.confirm(
+                `Delete the edge from "${from}" to "${to}"? This cannot be undone.`,
+              )
+            ) {
+              return;
+            }
+            await sendDaemonCommand(
+              routeGraphCommand(
+                deleteEdgeCommand(selectedProjectPath, edge.id),
+              ),
+            );
+          }
+        : undefined,
+    });
   }
 
   useEffect(() => {
@@ -1122,6 +1178,7 @@ export default function App() {
               ref={graphCanvasRef}
               graph={selectedGraph}
               selectedNodeId={state.selectedNodeId}
+              selectedEdgeKey={selectedEdgeKey}
               commands={canvasCommands}
               pendingCommandId={pendingCommandId}
               initialViewport={savedViewport}
@@ -1132,6 +1189,10 @@ export default function App() {
                   : undefined
               }
               onExecuteCommand={(command) => void executeCommand(command)}
+              onSelectEdge={(edgeKey) => {
+                setSelectedEdgeKey(edgeKey);
+                if (edgeKey) dispatch({ type: "clearNodeSelection" });
+              }}
               onCreateEdge={
                 state.connection.phase === "connected"
                   ? (from, to) => {
@@ -1236,39 +1297,6 @@ export default function App() {
                   }, 250),
                 );
               }}
-              edgeCommands={(edge) =>
-                createEdgeCommands(
-                  state.connection.phase === "connected",
-                  edge.id,
-                  {
-                    deleteEdge: edge.id
-                      ? async () => {
-                          if (!selectedProjectPath || !edge.id) return;
-                          const from =
-                            selectedGraph?.nodes.find(
-                              (node) => node.id === edge.from,
-                            )?.title ?? edge.from;
-                          const to =
-                            selectedGraph?.nodes.find(
-                              (node) => node.id === edge.to,
-                            )?.title ?? edge.to;
-                          if (
-                            !window.confirm(
-                              `Delete the edge from "${from}" to "${to}"? This cannot be undone.`,
-                            )
-                          ) {
-                            return;
-                          }
-                          await sendDaemonCommand(
-                            routeGraphCommand(
-                              deleteEdgeCommand(selectedProjectPath, edge.id),
-                            ),
-                          );
-                        }
-                      : undefined,
-                  },
-                )
-              }
               onSelectNode={(nodeId) => {
                 if (!state.selectedProjectPath) return;
                 dispatch({
@@ -1278,19 +1306,30 @@ export default function App() {
                 });
               }}
             />
-            <NodeInspector
-              graph={selectedGraph}
-              node={inspectedNode}
-              mailbox={
-                selectedProjectPath
-                  ? state.mailboxes[selectedProjectPath]
-                  : undefined
-              }
-              commands={nodeCommands}
-              pendingCommandId={pendingCommandId}
-              onClose={() => dispatch({ type: "clearNodeSelection" })}
-              onExecuteCommand={(command) => void executeCommand(command)}
-            />
+            {selectedGraph && inspectedEdge ? (
+              <EdgeInspector
+                graph={selectedGraph}
+                edge={inspectedEdge}
+                commands={commandsForEdge(inspectedEdge)}
+                pendingCommandId={pendingCommandId}
+                onClose={() => setSelectedEdgeKey(undefined)}
+                onExecuteCommand={(command) => void executeCommand(command)}
+              />
+            ) : (
+              <NodeInspector
+                graph={selectedGraph}
+                node={inspectedNode}
+                mailbox={
+                  selectedProjectPath
+                    ? state.mailboxes[selectedProjectPath]
+                    : undefined
+                }
+                commands={nodeCommands}
+                pendingCommandId={pendingCommandId}
+                onClose={() => dispatch({ type: "clearNodeSelection" })}
+                onExecuteCommand={(command) => void executeCommand(command)}
+              />
+            )}
           </div>
         )}
       </section>

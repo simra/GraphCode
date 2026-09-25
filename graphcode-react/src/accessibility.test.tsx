@@ -4,6 +4,7 @@ import axe from "axe-core";
 import { afterEach, describe, expect, it } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import { GraphCanvas } from "./components/GraphCanvas";
+import { EdgeInspector } from "./components/EdgeInspector";
 import { MailroomView } from "./components/MailroomView";
 import { NewEdgeDialog } from "./components/NewEdgeDialog";
 import { ProjectGraphTree } from "./components/ProjectGraphTree";
@@ -134,6 +135,31 @@ describe("automated accessibility checks", () => {
           nodes={graph.nodes}
           onClose={() => undefined}
           onCreate={async () => undefined}
+        />,
+      ),
+    );
+  });
+
+  it("checks selected-edge details and delete semantics", async () => {
+    await expectNoAxeViolations(
+      renderToStaticMarkup(
+        <EdgeInspector
+          graph={graph}
+          edge={graph.edges[0]}
+          commands={[
+            {
+              id: "edge.delete",
+              label: "Delete Edge",
+              description: "Delete",
+              category: "Loop",
+              surfaces: [],
+              enabled: true,
+              danger: true,
+              execute: () => undefined,
+            },
+          ]}
+          onClose={() => undefined}
+          onExecuteCommand={() => undefined}
         />,
       ),
     );
