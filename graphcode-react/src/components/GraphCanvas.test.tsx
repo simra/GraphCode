@@ -2,6 +2,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import type { LoopNode } from "../protocol/domain";
 import {
+  adjacentNodeId,
   buildGraphLayout,
   edgeTargetAtPoint,
   GraphCanvas,
@@ -39,6 +40,19 @@ describe("graph layout", () => {
     expect(layout.width).toBeGreaterThan(0);
   });
 
+  it("moves to the nearest node in the requested spatial direction", () => {
+    const positions = new Map([
+      ["center", { x: 100, y: 100 }],
+      ["right-near", { x: 200, y: 110 }],
+      ["right-far", { x: 200, y: 300 }],
+      ["down", { x: 90, y: 240 }],
+    ]);
+
+    expect(adjacentNodeId("center", "right", positions)).toBe("right-near");
+    expect(adjacentNodeId("center", "down", positions)).toBe("down");
+    expect(adjacentNodeId("center", "left", positions)).toBeUndefined();
+  });
+
   it("resolves pointer edge targets while excluding the source", () => {
     const layout = buildGraphLayout(nodes, []);
     const target = layout.positions.get("b")!;
@@ -74,5 +88,7 @@ describe("graph layout", () => {
     expect(markup).toContain(
       "use New Edge for a keyboard accessible alternative",
     );
+    expect(markup).toContain("Arrow keys move between nearby loops");
+    expect(markup).toContain("aria-keyshortcuts=");
   });
 });

@@ -50,6 +50,9 @@ Composite snapshots can be drilled into through breadcrumbs, and graph mutations
 that view are wrapped through the authoritative `subGraphCommand` parent chain.
 Pointer users can drag between loop connection handles to prefill the typed edge
 editor; the New Edge command remains the keyboard-accessible endpoint selector.
+The graph uses spatial arrow-key navigation, Home/End focus movement, explicit
+keyboard instructions, patterned loop-type stripes, visible selection marks, and
+dashed fired-edge styling so state is not communicated by color alone.
 Playbook refine and rollback use the existing daemon commands; current playbook and
 rollback-history reads remain blocked on DT-001.
 The inspector can load the whole Mailroom board, search it, query a selected loop's
