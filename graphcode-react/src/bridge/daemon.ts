@@ -72,7 +72,7 @@ export async function startDaemonConnection(
 }
 
 export async function sendDaemonCommand(
-  command: Record<string, unknown>,
+  command: object,
 ): Promise<DaemonWireEnvelope> {
   const raw = await invoke<unknown>("send_daemon_command", { command });
   return decodeEnvelope(raw);
