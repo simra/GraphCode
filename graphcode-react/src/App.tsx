@@ -25,7 +25,7 @@ import {
 } from "./commands/nativeMenu";
 import { CommandPalette } from "./components/CommandPalette";
 import { ConnectionBanner } from "./components/ConnectionBanner";
-import { GraphCanvas } from "./components/GraphCanvas";
+import { GraphCanvas, type GraphCanvasHandle } from "./components/GraphCanvas";
 import { LoopTextDialog } from "./components/LoopTextDialog";
 import { NewLoopDialog } from "./components/NewLoopDialog";
 import { NodeInspector } from "./components/NodeInspector";
@@ -65,6 +65,7 @@ export default function App() {
       }
     | undefined
   >();
+  const graphCanvasRef = useRef<GraphCanvasHandle>(null);
 
   useEffect(() => {
     let active = true;
@@ -246,6 +247,10 @@ export default function App() {
               await sendDaemonCommand(refreshUsageCommand(selectedProjectPath));
             }
           : undefined,
+        zoomIn: () => graphCanvasRef.current?.zoomIn(),
+        zoomOut: () => graphCanvasRef.current?.zoomOut(),
+        resetZoom: () => graphCanvasRef.current?.resetZoom(),
+        fitGraph: () => graphCanvasRef.current?.fitGraph(),
       }),
     [
       inspectedNode,
@@ -364,6 +369,9 @@ export default function App() {
   );
   const nodeCommands = commands.filter((command) =>
     command.surfaces.includes("node"),
+  );
+  const canvasCommands = commands.filter((command) =>
+    command.surfaces.includes("canvas"),
   );
 
   return (
@@ -505,8 +513,12 @@ export default function App() {
         ) : null}
         <div className="content-layout">
           <GraphCanvas
+            ref={graphCanvasRef}
             graph={selectedGraph}
             selectedNodeId={state.selectedNodeId}
+            commands={canvasCommands}
+            pendingCommandId={pendingCommandId}
+            onExecuteCommand={(command) => void executeCommand(command)}
             onSelectNode={(nodeId) => {
               if (!state.selectedProjectPath) return;
               dispatch({
