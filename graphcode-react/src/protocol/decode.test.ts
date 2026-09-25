@@ -170,6 +170,52 @@ describe("decodeEnvelope", () => {
     expect(envelope.event.mailbox.posts[0].body).toBe("Build is green");
   });
 
+  it("decodes Quick Chat snapshots and monotonic activity events", () => {
+    const listed = decodeEnvelope({
+      version: 2,
+      kind: "event",
+      sequence: 15,
+      event: {
+        quickChatsListed: [
+          {
+            id: "11111111-1111-4111-8111-111111111111",
+            title: "Scratch",
+            backend: "claudeCode",
+            createdAt: 0,
+            activity: {
+              sequence: 2,
+              text: "editing",
+              presence: { presence: "busy", confidence: "reported" },
+            },
+          },
+        ],
+      },
+    });
+    const activity = decodeEnvelope({
+      version: 2,
+      kind: "event",
+      sequence: 16,
+      event: {
+        quickChatActivity: {
+          id: "11111111-1111-4111-8111-111111111111",
+          activity: { sequence: 3, text: "ready", presence: null },
+        },
+      },
+    });
+
+    if (listed.kind !== "event" || listed.event.type !== "quickChatsListed") {
+      throw new Error("Expected quickChatsListed event");
+    }
+    expect(listed.event.chats[0].activity?.text).toBe("editing");
+    if (
+      activity.kind !== "event" ||
+      activity.event.type !== "quickChatActivity"
+    ) {
+      throw new Error("Expected quickChatActivity event");
+    }
+    expect(activity.event.activity.sequence).toBe(3);
+  });
+
   it("rejects malformed response envelopes instead of silently defaulting", () => {
     expect(() =>
       decodeEnvelope({

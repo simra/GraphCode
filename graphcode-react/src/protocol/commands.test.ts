@@ -5,18 +5,23 @@ import {
   completeNodeCommand,
   createEdgeCommand,
   createNodeCommand,
+  createQuickChatCommand,
+  deleteQuickChatCommand,
   deleteProjectGraphCommand,
   deleteNodeCommand,
   deleteEdgeCommand,
   forgetProjectCommand,
+  listQuickChatsCommand,
   mailboxCommand,
   mailroomPostCommand,
+  openQuickChatCommand,
   openProjectCommand,
   memoNodeCommand,
   messageNodeCommand,
   refreshUsageCommand,
   pilotCompositeCommand,
   renameNodeCommand,
+  renameQuickChatCommand,
   restartNodeCommand,
   resumeSessionCommand,
   stopNodeCommand,
@@ -24,6 +29,31 @@ import {
 } from "./commands";
 
 describe("daemon commands", () => {
+  it("encodes the authoritative Quick Chat command labels", () => {
+    expect(listQuickChatsCommand()).toEqual({ listQuickChats: {} });
+    expect(createQuickChatCommand("Scratch", "claudeCode")).toEqual({
+      createQuickChat: { title: "Scratch", backend: "claudeCode" },
+    });
+    expect(
+      openQuickChatCommand("11111111-1111-4111-8111-111111111111"),
+    ).toEqual({
+      openQuickChat: { id: "11111111-1111-4111-8111-111111111111" },
+    });
+    expect(
+      renameQuickChatCommand("11111111-1111-4111-8111-111111111111", "Renamed"),
+    ).toEqual({
+      renameQuickChat: {
+        id: "11111111-1111-4111-8111-111111111111",
+        title: "Renamed",
+      },
+    });
+    expect(
+      deleteQuickChatCommand("11111111-1111-4111-8111-111111111111"),
+    ).toEqual({
+      deleteQuickChat: { id: "11111111-1111-4111-8111-111111111111" },
+    });
+  });
+
   it("encodes stopNode with Swift Codable's single-value wrapper", () => {
     expect(
       stopNodeCommand(

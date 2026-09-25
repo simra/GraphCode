@@ -13,6 +13,20 @@ export interface PresenceReading {
   exitCode?: number;
 }
 
+export interface QuickChatActivity {
+  sequence: number;
+  text?: string;
+  presence?: PresenceReading;
+}
+
+export interface QuickChat {
+  id: string;
+  title: string;
+  backend: string;
+  createdAt: string | number;
+  activity?: QuickChatActivity;
+}
+
 export interface GoalSpec {
   summary: string;
   predicate?: string;
@@ -165,6 +179,10 @@ export type DaemonEvent =
   | { type: "recentProjectsListed"; projects: ProjectRef[] }
   | { type: "graphChanged"; graph: LoopGraph }
   | { type: "nodesChanged"; change: NodesChanged }
+  | { type: "quickChatsListed"; chats: QuickChat[] }
+  | { type: "quickChatChanged"; chat: QuickChat }
+  | { type: "quickChatDeleted"; id: string }
+  | { type: "quickChatActivity"; id: string; activity: QuickChatActivity }
   | { type: "mailbox"; projectPath: string; mailbox: Mailbox }
   | { type: "errorOccurred"; message: string }
   | { type: "unsupported"; name: string; payload: unknown };

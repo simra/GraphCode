@@ -4,6 +4,7 @@ import {
   appReducer,
   initialAppState,
   selectedNode,
+  selectedQuickChat,
   type AppState,
 } from "./graphState";
 
@@ -197,5 +198,81 @@ describe("appReducer", () => {
     expect(forgotten.recentProjects.map((project) => project.name)).toEqual([
       "C",
     ]);
+  });
+
+  it("reconciles Quick Chats by stable identity and ignores stale activity", () => {
+    const listed = appReducer(initialAppState, {
+      type: "envelopeReceived",
+      envelope: {
+        version: 2,
+        kind: "event",
+        sequence: 1,
+        event: {
+          type: "quickChatsListed",
+          chats: [
+            {
+              id: "chat",
+              title: "Scratch",
+              backend: "claudeCode",
+              createdAt: 0,
+              activity: { sequence: 2, text: "editing" },
+            },
+          ],
+        },
+      },
+    });
+    const selected = appReducer(listed, {
+      type: "selectQuickChat",
+      id: "chat",
+    });
+    expect(selectedQuickChat(selected)?.title).toBe("Scratch");
+
+    const stale = appReducer(selected, {
+      type: "envelopeReceived",
+      envelope: {
+        version: 2,
+        kind: "event",
+        sequence: 2,
+        event: {
+          type: "quickChatActivity",
+          id: "chat",
+          activity: { sequence: 1, text: "stale" },
+        },
+      },
+    });
+    expect(selectedQuickChat(stale)?.activity?.text).toBe("editing");
+
+    const renamed = appReducer(stale, {
+      type: "envelopeReceived",
+      envelope: {
+        version: 2,
+        kind: "event",
+        sequence: 3,
+        event: {
+          type: "quickChatChanged",
+          chat: {
+            id: "chat",
+            title: "Renamed",
+            backend: "claudeCode",
+            createdAt: 0,
+            activity: { sequence: 3, text: "ready" },
+          },
+        },
+      },
+    });
+    expect(selectedQuickChat(renamed)?.title).toBe("Renamed");
+
+    const deleted = appReducer(renamed, {
+      type: "envelopeReceived",
+      envelope: {
+        version: 2,
+        kind: "event",
+        sequence: 4,
+        event: { type: "quickChatDeleted", id: "chat" },
+      },
+    });
+    expect(deleted.quickChats).toEqual([]);
+    expect(deleted.selectedQuickChatId).toBeUndefined();
+    expect(deleted.quickChatsSelected).toBe(true);
   });
 });

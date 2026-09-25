@@ -5,6 +5,7 @@ import {
   createCommandRegistry,
   createEdgeCommands,
   createProjectRowCommands,
+  createQuickChatCommands,
 } from "./registry";
 
 function stateWithSelectedNode(): AppState {
@@ -124,6 +125,31 @@ describe("command registry", () => {
     expect(
       commands.find((command) => command.id === "project.openFolder")?.enabled,
     ).toBe(true);
+  });
+
+  it("keeps Quick Chat lifecycle actions in the typed registry", () => {
+    const openNewQuickChat = vi.fn();
+    const globalCommands = createCommandRegistry(stateWithSelectedNode(), {
+      openPalette: vi.fn(),
+      openNewQuickChat,
+      clearSelection: vi.fn(),
+      selectNode: vi.fn(),
+    });
+    globalCommands.find((command) => command.id === "chat.new")?.execute();
+    expect(openNewQuickChat).toHaveBeenCalledOnce();
+
+    const chatCommands = createQuickChatCommands(true, {
+      openQuickChat: vi.fn(async () => undefined),
+      renameQuickChat: vi.fn(),
+      deleteQuickChat: vi.fn(async () => undefined),
+    });
+    expect(chatCommands.map((command) => command.id)).toEqual([
+      "chat.open",
+      "chat.rename",
+      "chat.delete",
+    ]);
+    expect(chatCommands.every((command) => command.enabled)).toBe(true);
+    expect(chatCommands.at(-1)?.danger).toBe(true);
   });
 
   it("projects viewport controls from the same command registry", () => {
