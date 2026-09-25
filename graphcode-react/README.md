@@ -27,6 +27,14 @@ cargo check --manifest-path src-tauri\Cargo.toml
 npm run tauri dev
 ```
 
+To include the opt-in live named-pipe protocol test against an already-running
+local daemon:
+
+```powershell
+$env:GRAPHCODE_RUN_LIVE_DAEMON_TEST = "1"
+cargo test --manifest-path src-tauri\Cargo.toml
+```
+
 The native bridge respects `GRAPHCODE_DAEMON_PIPE` (the Windows shell override),
 `GRAPHCODE_SOCKET` (the GraphcodeKit socket override), and
 `GRAPHCODE_SUPPORT_DIR`. On Windows it otherwise derives the same

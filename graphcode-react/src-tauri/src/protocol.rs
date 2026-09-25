@@ -45,19 +45,27 @@ pub async fn write_frame(
 }
 
 pub async fn read_frame(stream: &mut BoxedDaemonStream) -> Result<Value, ProtocolError> {
+    read_frame_with_timeout(stream, FRAME_TIMEOUT).await
+}
+
+async fn read_frame_with_timeout(
+    stream: &mut BoxedDaemonStream,
+    frame_timeout: Duration,
+) -> Result<Value, ProtocolError> {
     let mut header = [0u8; 4];
-    timeout(FRAME_TIMEOUT, stream.read_exact(&mut header))
-        .await
-        .map_err(|_| ProtocolError::Timeout)??;
-    let length = u32::from_be_bytes(header) as usize;
-    if length > V2_MAX_PAYLOAD {
-        return Err(ProtocolError::PayloadTooLarge);
-    }
-    let mut payload = vec![0u8; length];
-    timeout(FRAME_TIMEOUT, stream.read_exact(&mut payload))
-        .await
-        .map_err(|_| ProtocolError::Timeout)??;
-    Ok(serde_json::from_slice(&payload)?)
+    stream.read_exact(&mut header[..1]).await?;
+    timeout(frame_timeout, async {
+        stream.read_exact(&mut header[1..]).await?;
+        let length = u32::from_be_bytes(header) as usize;
+        if length > V2_MAX_PAYLOAD {
+            return Err(ProtocolError::PayloadTooLarge);
+        }
+        let mut payload = vec![0u8; length];
+        stream.read_exact(&mut payload).await?;
+        Ok(serde_json::from_slice(&payload)?)
+    })
+    .await
+    .map_err(|_| ProtocolError::Timeout)?
 }
 
 pub async fn negotiate(stream: &mut BoxedDaemonStream) -> Result<(), ProtocolError> {
@@ -101,5 +109,33 @@ mod tests {
         assert_eq!(value["kind"], "request");
         assert_eq!(value["requestID"], id.to_string());
         assert_eq!(value["command"]["listRecentProjects"], json!({}));
+    }
+
+    #[tokio::test]
+    async fn idle_wait_before_a_frame_is_not_a_frame_timeout() {
+        let (mut writer, reader) = tokio::io::duplex(256);
+        let mut stream: BoxedDaemonStream = Box::pin(reader);
+        let payload = serde_json::to_vec(&json!({
+            "version": 2,
+            "kind": "response",
+            "requestID": Uuid::new_v4(),
+            "success": true
+        }))
+        .unwrap();
+        let mut frame = Vec::with_capacity(payload.len() + 4);
+        frame.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+        frame.extend_from_slice(&payload);
+
+        let writer_task = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(40)).await;
+            writer.write_all(&frame).await.unwrap();
+        });
+
+        let decoded = read_frame_with_timeout(&mut stream, Duration::from_millis(20))
+            .await
+            .unwrap();
+        writer_task.await.unwrap();
+        assert_eq!(decoded["kind"], "response");
+        assert_eq!(decoded["success"], true);
     }
 }

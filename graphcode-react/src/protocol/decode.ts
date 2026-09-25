@@ -105,6 +105,13 @@ export class ProtocolDecodeError extends Error {
   }
 }
 
+function singleAssociatedValue(payload: unknown): unknown {
+  if (typeof payload === "object" && payload !== null && "_0" in payload) {
+    return (payload as Record<string, unknown>)._0;
+  }
+  return payload;
+}
+
 function decodeEvent(raw: Record<string, unknown>): DaemonEvent {
   const entries = Object.entries(raw);
   if (entries.length !== 1) {
@@ -119,14 +126,22 @@ function decodeEvent(raw: Record<string, unknown>): DaemonEvent {
     case "recentProjectsListed":
       return {
         type: name,
-        projects: z.array(projectRefSchema).parse(payload),
+        projects: z
+          .array(projectRefSchema)
+          .parse(singleAssociatedValue(payload)),
       };
     case "graphChanged":
-      return { type: name, graph: loopGraphSchema.parse(payload) };
+      return {
+        type: name,
+        graph: loopGraphSchema.parse(singleAssociatedValue(payload)),
+      };
     case "nodesChanged":
       return { type: name, change: nodesChangedSchema.parse(payload) };
     case "errorOccurred":
-      return { type: name, message: z.string().parse(payload) };
+      return {
+        type: name,
+        message: z.string().parse(singleAssociatedValue(payload)),
+      };
     default:
       return { type: "unsupported", name, payload };
   }
