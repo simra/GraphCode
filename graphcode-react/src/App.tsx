@@ -1,4 +1,11 @@
-import { useCallback, useEffect, useMemo, useReducer, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useReducer,
+  useRef,
+  useState,
+} from "react";
 import {
   sendDaemonCommand,
   startDaemonConnection,
@@ -11,6 +18,10 @@ import {
   type AppCommand,
   type CommandId,
 } from "./commands/registry";
+import {
+  listenForNativeMenuCommands,
+  syncNativeMenu,
+} from "./commands/nativeMenu";
 import { CommandPalette } from "./components/CommandPalette";
 import { ConnectionBanner } from "./components/ConnectionBanner";
 import { GraphCanvas } from "./components/GraphCanvas";
@@ -216,6 +227,8 @@ export default function App() {
       }),
     [inspectedNode, inspectedNodeResolved, selectedProjectPath, state],
   );
+  const commandsRef = useRef(commands);
+  commandsRef.current = commands;
 
   useEffect(() => {
     if (!pendingCreatedNode) return;
@@ -246,6 +259,46 @@ export default function App() {
       setPendingCommandId(undefined);
     }
   }, []);
+
+  useEffect(() => {
+    void syncNativeMenu(commands).catch((error: unknown) => {
+      setCommandError(
+        `Native menu update failed: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    });
+  }, [commands]);
+
+  useEffect(() => {
+    if (!("__TAURI_INTERNALS__" in window)) return;
+    let active = true;
+    let unlisten: (() => void) | undefined;
+    listenForNativeMenuCommands((id) => {
+      const command = commandsRef.current.find(
+        (candidate) => candidate.id === id,
+      );
+      if (command) void executeCommand(command);
+    })
+      .then((stopListening) => {
+        if (active) {
+          unlisten = stopListening;
+        } else {
+          stopListening();
+        }
+      })
+      .catch((error: unknown) => {
+        setCommandError(
+          `Native menu listener failed: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      });
+    return () => {
+      active = false;
+      unlisten?.();
+    };
+  }, [executeCommand]);
 
   useEffect(() => {
     const handleShortcut = (event: KeyboardEvent) => {

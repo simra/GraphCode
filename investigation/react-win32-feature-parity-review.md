@@ -137,7 +137,7 @@ The React client is currently a live, read-only protocol demonstration:
 
 It is not yet an application-equivalent client. A persistent connection actor,
 stable canvas selection, and a responsive read-only node inspector now exist, but
-there are no edit/message forms, native Tauri menu, project ingress,
+there are no edit/message forms, project ingress,
 Quick Chats, global overview, graph pan/zoom/layout persistence, terminals,
 workspaces, settings, updates, native lifecycle, or packaging integration.
 
@@ -162,7 +162,7 @@ viewport/layout.
 | Global overview | Pinned Graph destination and cross-project lanes | Existing `openGlobalGraph`, ordinary `graphChanged` | **Missing** | Persistent Overview destination above project groups | P1 | M | Global graph joins on reconnect and shows cross-project lanes |
 | Quick Chats | List, create, open, rename, delete, activity, dedicated empty state | Existing Quick Chat commands/events | **Missing** | Sidebar group plus chat workspace | P1 | M | Stable chat identity and activity ordering; delete confirmation |
 | Sidebar hierarchy | Local/remote groups, project disclosure, edge-derived nested loop tree, attention/activity | Graph snapshots; some layout state is client-local | **Missing** | Semantic tree with roving focus and stable IDs | P1 | L; cycles and focus restoration | Snapshot reorder does not lose selection/expansion/focus |
-| Command surfaces | Native File/Loop/Terminal/Workspace/View/Help menus, context menus and jump palette | Client state plus existing commands | **Partial**: one typed registry drives header actions, `Ctrl+P` search, selected-node overflow, lifecycle commands, shortcuts, availability and disabled reasons; native Tauri menu and project/edge/chat contexts remain | Continue projecting the same registry rather than adding parallel handlers | P0 | M | Header, palette, shortcuts, contextual menus and native menu invoke one command ID/path |
+| Command surfaces | Native File/Loop/Terminal/Workspace/View/Help menus, context menus and jump palette | Client state plus existing commands | **Partial**: one typed registry now drives header actions, `Ctrl+P` search, selected-node overflow, lifecycle commands, shortcuts and the native Tauri GraphCode/Loop/Navigation menus with synchronized availability; project/edge/chat contexts remain | Continue projecting the same registry rather than adding parallel handlers | P0 | M | Header, palette, shortcuts, contextual menus and native menu invoke one command ID/path |
 | Graph snapshot rendering | Cards, connectors, lanes, grid, state styling | Existing `graphChanged`, `nodesChanged` | **Partial**: cards and edges in one fixed row | Keep SVG initially; introduce layout model and viewport | P0 | M | Real graph topology, state, presence and fired edges render correctly |
 | Graph selection | Stable node/edge selection synchronized with sidebar/workspace | Client state only | **Partial**: node selection is keyed by project/node ID, survives snapshots, clears on removal, and supports click/arrow/Enter/Space; sidebar and edge selection remain | Extend the same selection model to sidebar, edges and workspace | P0 | M | Click, keyboard and sidebar select the same identity across refreshes |
 | Graph pan/zoom/fit | Pointer pan, wheel/pinch anchored zoom, zoom controls, persisted canvas layout | Client-local persistence | **Missing** | Pointer/keyboard viewport controls; visible fit/zoom actions | P1 | M | 60 fps target; focus and hit testing remain aligned at all zooms |
@@ -789,7 +789,7 @@ K. zmx streaming spike
    - Stable node selection from SVG and sidebar.
    - Responsive inspector with Overview/Activity/Metrics/Composite data.
    - Roving focus and textual graph outline.
-3. **P0 command architecture**
+3. **P0 command architecture — implemented for current command set**
    - Typed command registry.
    - Visible New Loop/header actions.
    - Native Tauri menu projection and unified palette shell.
@@ -837,8 +837,9 @@ Current acceptance:
 - Daemon restart during a draft preserves the draft locally, reconnects, and requires
   explicit resubmission rather than guessing whether creation succeeded.
 
-Native Tauri menu projection remains intentionally separate; the React client does
-not recreate the full Win32 menu bar.
+Native Tauri menus are projected from the same registry into focused
+GraphCode/Loop/Navigation groups. The React client intentionally does not recreate
+the full Win32 menu bar.
 
 ## Protocol changes and blockers
 
