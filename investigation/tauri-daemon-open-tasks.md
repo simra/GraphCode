@@ -554,6 +554,44 @@ values that the UI presents as active.
 - The decision names exact daemon cases if graphcoded owns settings, or the exact
   atomic native API if it does not.
 
+### DT-009 — Nested composite Mailroom ownership and routing
+
+**Problem**
+
+Top-level project Mailroom reads and loop watch mutations have established wire
+shapes. A drilled-in composite exposes child nodes through `subGraph`, but the
+protocol does not state whether those children read/watch the parent project's
+Mailroom or a child graph Mailroom.
+
+**Evidence and current limitation**
+
+- `DaemonCommand.mailbox(projectPath:query:)` addresses only a project path and has no
+  composite parent chain.
+- `GraphCommand.mailroomWatch(on:topic:from:)` requires the watcher to exist in the
+  receiving `GraphStore`; routing it through `subGraphCommand` would target the child
+  store, while an unwrapped command cannot find a nested watcher in the root store.
+- `LoopGraph` and nested `subGraph` snapshots can each carry a Mailroom digest, but no
+  source contract says whether those rooms are shared or independent.
+- The React client therefore fails closed for Mailroom controls while drilled into a
+  composite instead of reading the root room or inventing nested routing.
+
+**Investigation questions**
+
+1. Is Mailroom ownership project-wide, graph-instance-wide, or inherited by nested
+   graphs?
+2. If project-wide, how should an unread query address a nested reader atomically?
+3. If graph-instance-wide, should `DaemonCommand.mailbox` accept a composite parent
+   chain matching `subGraphCommand`?
+4. Which graph snapshot/digest is authoritative after a nested watch or cursor advance?
+
+**Acceptance criteria**
+
+- One documented routing rule covers board, search, unread, cursor advance, post and
+  watch operations for nested nodes.
+- Frozen command/event fixtures cover at least a two-level composite reader and watch.
+- A nested cursor advance cannot mark parent or sibling mail read accidentally.
+- Old clients retain their current top-level project behavior.
+
 ## Existing daemon support is sufficient
 
 These are not daemon backlog items. They remain frontend/native tasks and must not

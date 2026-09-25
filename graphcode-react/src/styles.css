@@ -1404,6 +1404,21 @@ kbd {
   background: #3f563b;
 }
 
+.mailroom-watch-options {
+  display: grid;
+  gap: 12px;
+  margin: 0;
+  padding: 16px;
+  border: 1px solid #353c33;
+  border-radius: 10px;
+}
+
+.mailroom-watch-options legend {
+  padding: 0 6px;
+  color: #bbc2b7;
+  font-size: 0.82rem;
+}
+
 .edit-loop-dialog {
   display: flex;
   width: min(760px, 100%);

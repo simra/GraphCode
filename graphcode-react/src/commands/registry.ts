@@ -29,6 +29,10 @@ export type CommandId =
   | "loop.pilotComposite"
   | "loop.armComposite"
   | "loop.mailroomRefresh"
+  | "loop.mailroomUnread"
+  | "loop.mailroomMarkRead"
+  | "loop.mailroomSearch"
+  | "loop.mailroomWatch"
   | "loop.mailroomPost"
   | "loop.openTerminal"
   | "view.zoomIn"
@@ -83,6 +87,10 @@ export interface CommandActions {
   pilotComposite?(): Promise<void>;
   armComposite?(): Promise<void>;
   refreshMailroom?(): Promise<void>;
+  loadUnreadMailroom?(): Promise<void>;
+  markUnreadMailroomRead?(): Promise<void>;
+  searchMailroom?(): void;
+  configureMailroomWatch?(): void;
   postMailroom?(): void;
   restartSession?(): Promise<void>;
   completeNode?(): void;
@@ -143,6 +151,7 @@ export function createCommandRegistry(
     (candidate) => candidate.id === node?.id,
   );
   const hasMultipleNodes = (graph?.nodes.length ?? 0) > 1;
+  const mailroomAvailable = Boolean(node) && state.compositePath.length === 0;
 
   function selectRelativeNode(direction: -1 | 1) {
     if (!graph?.nodes.length) return;
@@ -436,12 +445,93 @@ export function createCommandRegistry(
       description: "Load the bounded project Mailroom board",
       category: "Loop",
       surfaces: ["node"],
-      ...(node && connected && actions.refreshMailroom
+      ...(mailroomAvailable && connected && actions.refreshMailroom
         ? { enabled: true, execute: actions.refreshMailroom }
         : {
             ...unavailable(
               node
-                ? "Reconnect to graphcoded before reading the Mailroom"
+                ? state.compositePath.length
+                  ? "Nested Mailroom ownership is not established; return to the project graph"
+                  : "Reconnect to graphcoded before reading the Mailroom"
+                : "Select a loop first",
+            ),
+            execute: () => undefined,
+          }),
+    },
+    {
+      id: "loop.mailroomUnread",
+      label: "Load Unread Mail",
+      description:
+        "Read this loop's unread Mailroom slice without moving its cursor",
+      category: "Loop",
+      surfaces: ["node"],
+      ...(mailroomAvailable && connected && actions.loadUnreadMailroom
+        ? { enabled: true, execute: actions.loadUnreadMailroom }
+        : {
+            ...unavailable(
+              node
+                ? state.compositePath.length
+                  ? "Nested Mailroom ownership is not established; return to the project graph"
+                  : "Reconnect to graphcoded before reading unread mail"
+                : "Select a loop first",
+            ),
+            execute: () => undefined,
+          }),
+    },
+    {
+      id: "loop.mailroomMarkRead",
+      label: "Read and Mark Mail",
+      description:
+        "Atomically load unread posts and advance this loop's cursor through the delivered slice",
+      category: "Loop",
+      surfaces: ["node"],
+      ...(mailroomAvailable && connected && actions.markUnreadMailroomRead
+        ? { enabled: true, execute: actions.markUnreadMailroomRead }
+        : {
+            ...unavailable(
+              node
+                ? state.compositePath.length
+                  ? "Nested Mailroom ownership is not established; return to the project graph"
+                  : "Reconnect to graphcoded before advancing the mail cursor"
+                : "Select a loop first",
+            ),
+            execute: () => undefined,
+          }),
+    },
+    {
+      id: "loop.mailroomSearch",
+      label: "Search Mailroom",
+      description: "Filter the project board by author, topic, or body",
+      category: "Loop",
+      surfaces: ["node"],
+      ...(mailroomAvailable && connected && actions.searchMailroom
+        ? { enabled: true, execute: actions.searchMailroom }
+        : {
+            ...unavailable(
+              node
+                ? state.compositePath.length
+                  ? "Nested Mailroom ownership is not established; return to the project graph"
+                  : "Reconnect to graphcoded before searching the Mailroom"
+                : "Select a loop first",
+            ),
+            execute: () => undefined,
+          }),
+    },
+    {
+      id: "loop.mailroomWatch",
+      label: node?.mailroomWatch ? "Change Mailroom Watch" : "Watch Mailroom",
+      description:
+        "Subscribe this loop to all posts, one topic, or stop watching",
+      category: "Loop",
+      surfaces: ["node"],
+      ...(mailroomAvailable && connected && actions.configureMailroomWatch
+        ? { enabled: true, execute: actions.configureMailroomWatch }
+        : {
+            ...unavailable(
+              node
+                ? state.compositePath.length
+                  ? "Nested Mailroom ownership is not established; return to the project graph"
+                  : "Reconnect to graphcoded before changing this watch"
                 : "Select a loop first",
             ),
             execute: () => undefined,
@@ -453,12 +543,14 @@ export function createCommandRegistry(
       description: "Post an unaddressed note to this project's loops",
       category: "Loop",
       surfaces: ["node"],
-      ...(node && connected && actions.postMailroom
+      ...(mailroomAvailable && connected && actions.postMailroom
         ? { enabled: true, execute: actions.postMailroom }
         : {
             ...unavailable(
               node
-                ? "Reconnect to graphcoded before posting to the Mailroom"
+                ? state.compositePath.length
+                  ? "Nested Mailroom ownership is not established; return to the project graph"
+                  : "Reconnect to graphcoded before posting to the Mailroom"
                 : "Select a loop first",
             ),
             execute: () => undefined,

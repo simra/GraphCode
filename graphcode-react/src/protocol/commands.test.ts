@@ -14,7 +14,10 @@ import {
   forgetProjectCommand,
   listQuickChatsCommand,
   mailboxCommand,
+  mailboxSearchCommand,
+  mailboxUnreadCommand,
   mailroomPostCommand,
+  mailroomWatchCommand,
   openQuickChatCommand,
   openProjectCommand,
   memoNodeCommand,
@@ -305,6 +308,40 @@ describe("daemon commands", () => {
             text: "Build is green",
             topic: "build",
             from: null,
+          },
+        },
+      },
+    });
+    expect(mailboxSearchCommand(project, "green")).toEqual({
+      mailbox: {
+        projectPath: project,
+        query: {
+          selection: { board: {} },
+          search: "green",
+          fullBodies: true,
+          advanceCursor: null,
+        },
+      },
+    });
+    expect(mailboxUnreadCommand(project, "reader", true)).toEqual({
+      mailbox: {
+        projectPath: project,
+        query: {
+          selection: { unread: { reader: "reader" } },
+          search: null,
+          fullBodies: null,
+          advanceCursor: true,
+        },
+      },
+    });
+    expect(mailroomWatchCommand(project, "reader", true, "build")).toEqual({
+      graphCommand: {
+        projectPath: project,
+        command: {
+          mailroomWatch: {
+            on: true,
+            topic: "build",
+            from: "reader",
           },
         },
       },

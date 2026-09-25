@@ -112,6 +112,7 @@ describe("decodeEnvelope", () => {
                 costUSD: 0.02,
               },
               metricHistory: [{ value: 4, recordedAt: "2026-09-25T00:00:00Z" }],
+              mailroomWatch: { topic: "build" },
               worktreeBinding: {
                 id: "worktree",
                 repositoryPath: "C:\\work\\graph",
@@ -131,6 +132,7 @@ describe("decodeEnvelope", () => {
     expect(node.goal?.tokenBudget).toBe(5000);
     expect(node.usage?.inputTokens).toBe(100);
     expect(node.worktreeBinding?.branch).toBe("feature");
+    expect(node.mailroomWatch?.topic).toBe("build");
   });
 
   it("decodes bounded Mailroom responses", () => {

@@ -212,6 +212,53 @@ describe("command registry", () => {
     ).toBe(true);
   });
 
+  it("exposes authoritative Mailroom controls only on the project graph", () => {
+    const actions = {
+      openPalette: vi.fn(),
+      clearSelection: vi.fn(),
+      selectNode: vi.fn(),
+      refreshMailroom: vi.fn(async () => undefined),
+      loadUnreadMailroom: vi.fn(async () => undefined),
+      markUnreadMailroomRead: vi.fn(async () => undefined),
+      searchMailroom: vi.fn(),
+      configureMailroomWatch: vi.fn(),
+      postMailroom: vi.fn(),
+    };
+    const state = stateWithSelectedNode();
+    let commands = createCommandRegistry(state, actions);
+    for (const id of [
+      "loop.mailroomRefresh",
+      "loop.mailroomUnread",
+      "loop.mailroomMarkRead",
+      "loop.mailroomSearch",
+      "loop.mailroomWatch",
+      "loop.mailroomPost",
+    ] as const) {
+      expect(commands.find((command) => command.id === id)?.enabled).toBe(true);
+    }
+
+    state.graphs["C:\\work\\graph"].nodes = [
+      {
+        id: "parent",
+        title: "Parent",
+        loopType: "proactive",
+        state: "idle",
+        subGraph: {
+          id: "child",
+          project: { path: "C:\\work\\graph", name: "Graph" },
+          nodes: [{ id: "node-a", title: "A", state: "running" }],
+          edges: [],
+        },
+      },
+    ];
+    state.compositePath = ["parent"];
+    commands = createCommandRegistry(state, actions);
+    expect(
+      commands.find((command) => command.id === "loop.mailroomUnread")
+        ?.disabledReason,
+    ).toContain("ownership is not established");
+  });
+
   it("distinguishes open and recent project lifecycle actions", () => {
     const actions = {
       closeProject: vi.fn(async () => undefined),

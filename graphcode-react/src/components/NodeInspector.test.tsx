@@ -24,6 +24,7 @@ const node: LoopNode = {
   usage: { inputTokens: 50, outputTokens: 25, costUSD: 0.01 },
   metricHistory: [{ value: 2, recordedAt: "2026-09-25T00:00:00Z" }],
   attachments: [],
+  mailroomWatch: { topic: "build" },
 };
 
 const graph: LoopGraph = {
@@ -50,6 +51,29 @@ describe("NodeInspector", () => {
     expect(markup).toContain("All tests pass");
     expect(markup).toContain("10,000");
     expect(markup).toContain("Requires daemon investigation DT-001");
+    expect(markup).toContain("Topic: build");
     expect(markup).toContain('aria-label="Close loop inspector"');
+  });
+
+  it("renders authoritative Mailroom cursor metadata", () => {
+    const markup = renderToStaticMarkup(
+      <NodeInspector
+        graph={graph}
+        node={node}
+        mailbox={{
+          posts: [],
+          bodiesTrimmed: false,
+          digest: { count: 3, latestID: 9, fingerprint: 42 },
+          lastRead: 4,
+          highestDeliveredID: 8,
+          remaining: 1,
+          prunedUnread: 2,
+        }}
+        onClose={() => undefined}
+      />,
+    );
+    expect(markup).toContain("Highest delivered");
+    expect(markup).toContain("Unread remaining");
+    expect(markup).toContain("Pruned unread");
   });
 });
