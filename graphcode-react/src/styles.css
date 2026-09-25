@@ -879,6 +879,73 @@ kbd {
   background: #3f563b;
 }
 
+.edit-loop-dialog {
+  display: flex;
+  width: min(760px, 100%);
+  max-height: calc(100vh - 44px);
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid #465043;
+  border-radius: 18px;
+  background: #171a16;
+  box-shadow: 0 34px 100px rgba(0, 0, 0, 0.65);
+}
+
+.edit-loop-dialog > header,
+.edit-loop-dialog > footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 18px 22px;
+}
+
+.edit-loop-dialog > header {
+  border-bottom: 1px solid #30352e;
+}
+
+.edit-loop-dialog h2 {
+  margin: 3px 0 0;
+}
+
+.edit-loop-scroll {
+  display: grid;
+  gap: 18px;
+  overflow-y: auto;
+  padding: 20px 22px;
+}
+
+.edit-loop-dialog > footer {
+  border-top: 1px solid #30352e;
+  color: #858e82;
+  font-size: 0.8rem;
+}
+
+.edit-loop-dialog > footer div {
+  display: flex;
+  gap: 8px;
+}
+
+.edit-loop-dialog button {
+  padding: 8px 13px;
+  border: 1px solid #3b4238;
+  border-radius: 8px;
+  color: #cbd1c7;
+  background: #222620;
+  cursor: pointer;
+}
+
+.edit-loop-dialog .primary-button {
+  border-color: #6b8563;
+  color: #ecf6e8;
+  background: #3f563b;
+}
+
+.edit-loop-submit-error {
+  margin: 0;
+  padding: 0 22px 14px;
+}
+
 .new-loop-dialog {
   display: flex;
   width: min(880px, 100%);

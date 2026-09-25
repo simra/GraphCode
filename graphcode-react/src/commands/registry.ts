@@ -56,6 +56,7 @@ export interface CommandActions {
   selectNode(nodeId: string): void;
   stopNode?(): Promise<void>;
   renameNode?(): void;
+  editNode?(): void;
   restartSession?(): Promise<void>;
   completeNode?(): void;
   deleteNode?(): Promise<void>;
@@ -210,10 +211,16 @@ export function createCommandRegistry(
       category: "Loop",
       shortcut: { key: "e", ctrl: true, label: "Ctrl+E" },
       surfaces: ["node"],
-      ...unavailable(
-        node ? "Loop editing is not implemented yet" : "Select a loop first",
-      ),
-      execute: () => undefined,
+      ...(node && connected && actions.editNode
+        ? { enabled: true, execute: actions.editNode }
+        : {
+            ...unavailable(
+              node
+                ? "Reconnect to graphcoded before editing this loop"
+                : "Select a loop first",
+            ),
+            execute: () => undefined,
+          }),
     },
     {
       id: "loop.message",

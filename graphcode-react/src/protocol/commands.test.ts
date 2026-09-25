@@ -9,6 +9,7 @@ import {
   restartNodeCommand,
   resumeSessionCommand,
   stopNodeCommand,
+  updateNodeCommand,
 } from "./commands";
 
 describe("daemon commands", () => {
@@ -101,6 +102,36 @@ describe("daemon commands", () => {
   it("encodes project opening with the authoritative labeled path", () => {
     expect(openProjectCommand("C:\\work\\graph")).toEqual({
       openProject: { path: "C:\\work\\graph" },
+    });
+  });
+
+  it("encodes partial NodeUpdate fields without inventing immutable changes", () => {
+    expect(
+      updateNodeCommand(
+        "C:\\work\\graph",
+        "11111111-1111-4111-8111-111111111111",
+        {
+          goalPredicate: "",
+          tokenBudget: 0,
+          modelTier: "fast",
+          updatedBy: null,
+        },
+      ),
+    ).toEqual({
+      graphCommand: {
+        projectPath: "C:\\work\\graph",
+        command: {
+          updateNode: {
+            _0: "11111111-1111-4111-8111-111111111111",
+            update: {
+              goalPredicate: "",
+              tokenBudget: 0,
+              modelTier: "fast",
+              updatedBy: null,
+            },
+          },
+        },
+      },
     });
   });
 });

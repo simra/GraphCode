@@ -94,6 +94,29 @@ export interface OpenProjectCommand {
   };
 }
 
+export interface NodeUpdatePayload {
+  goalSummary?: string;
+  goalPredicate?: string;
+  pollIntervalSeconds?: number;
+  stallAfterSeconds?: number;
+  metricCommand?: string;
+  metricDirection?: "minimize" | "maximize";
+  tokenBudget?: number;
+  skipsUnchangedWorkspace?: boolean;
+  triggerPrompt?: string;
+  heartbeatIntervalSeconds?: number;
+  checkDescription?: string;
+  modelTier?: DraftModelTier;
+  updatedBy: null;
+}
+
+export type UpdateNodeCommand = GraphCommandEnvelope<{
+  updateNode: {
+    _0: string;
+    update: NodeUpdatePayload;
+  };
+}>;
+
 export function stopNodeCommand(
   projectPath: string,
   nodeId: string,
@@ -196,5 +219,20 @@ export function refreshUsageCommand(projectPath: string): RefreshUsageCommand {
 export function openProjectCommand(path: string): OpenProjectCommand {
   return {
     openProject: { path },
+  };
+}
+
+export function updateNodeCommand(
+  projectPath: string,
+  nodeId: string,
+  update: NodeUpdatePayload,
+): UpdateNodeCommand {
+  return {
+    graphCommand: {
+      projectPath,
+      command: {
+        updateNode: { _0: nodeId, update },
+      },
+    },
   };
 }
