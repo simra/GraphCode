@@ -1,5 +1,7 @@
 import type { ReactNode } from "react";
+import type { AppCommand } from "../commands/registry";
 import type { EncodedEnum, LoopGraph, LoopNode } from "../protocol/domain";
+import { CommandMenu } from "./CommandMenu";
 
 function enumLabel(value: EncodedEnum | undefined): string | undefined {
   if (typeof value === "string") return value;
@@ -77,11 +79,17 @@ function InspectorSection({
 export function NodeInspector({
   graph,
   node,
+  commands = [],
+  pendingCommandId,
   onClose,
+  onExecuteCommand = () => undefined,
 }: {
   graph?: LoopGraph;
   node?: LoopNode;
+  commands?: AppCommand[];
+  pendingCommandId?: string;
   onClose(): void;
+  onExecuteCommand?(command: AppCommand): void;
 }) {
   if (!graph || !node) {
     return (
@@ -102,6 +110,17 @@ export function NodeInspector({
   const state = enumLabel(node.state) ?? "unknown";
   const presence = node.presence?.presence;
   const currentBeat = node.summary?.beats.at(-1);
+  const primaryCommandIds = new Set([
+    "loop.openTerminal",
+    "loop.message",
+    "loop.edit",
+  ]);
+  const primaryCommands = commands.filter((command) =>
+    primaryCommandIds.has(command.id),
+  );
+  const overflowCommands = commands.filter(
+    (command) => !primaryCommandIds.has(command.id),
+  );
   const totalTokens =
     node.usage?.inputTokens !== undefined ||
     node.usage?.outputTokens !== undefined
@@ -155,27 +174,22 @@ export function NodeInspector({
       ) : null}
 
       <div className="inspector-actions" aria-label="Loop actions">
-        <button
-          type="button"
-          disabled
-          title="Terminal bridge is not implemented"
-        >
-          Open terminal
-        </button>
-        <button
-          type="button"
-          disabled
-          title="Enabled by the command registry task"
-        >
-          Message
-        </button>
-        <button
-          type="button"
-          disabled
-          title="Enabled by the command registry task"
-        >
-          Edit
-        </button>
+        {primaryCommands.map((command) => (
+          <button
+            key={command.id}
+            type="button"
+            disabled={!command.enabled || pendingCommandId === command.id}
+            title={command.disabledReason}
+            onClick={() => onExecuteCommand(command)}
+          >
+            {command.label.replace(" Loop", "")}
+          </button>
+        ))}
+        <CommandMenu
+          commands={overflowCommands}
+          pendingCommandId={pendingCommandId}
+          onExecute={onExecuteCommand}
+        />
       </div>
 
       <div className="inspector-scroll">

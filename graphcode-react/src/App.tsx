@@ -1,13 +1,29 @@
-import { useEffect, useMemo, useReducer } from "react";
-import { startDaemonConnection, type DaemonConnection } from "./bridge/daemon";
+import { useCallback, useEffect, useMemo, useReducer, useState } from "react";
+import {
+  sendDaemonCommand,
+  startDaemonConnection,
+  type DaemonConnection,
+} from "./bridge/daemon";
+import {
+  commandMatchesShortcut,
+  createCommandRegistry,
+  isEditableTarget,
+  type AppCommand,
+  type CommandId,
+} from "./commands/registry";
+import { CommandPalette } from "./components/CommandPalette";
 import { ConnectionBanner } from "./components/ConnectionBanner";
 import { GraphCanvas } from "./components/GraphCanvas";
 import { NodeInspector } from "./components/NodeInspector";
 import { initialSnapshotFixture } from "./fixtures/initialSnapshot";
+import { stopNodeCommand } from "./protocol/commands";
 import { appReducer, initialAppState, selectedNode } from "./state/graphState";
 
 export default function App() {
   const [state, dispatch] = useReducer(appReducer, initialAppState);
+  const [paletteOpen, setPaletteOpen] = useState(false);
+  const [pendingCommandId, setPendingCommandId] = useState<CommandId>();
+  const [commandError, setCommandError] = useState<string>();
 
   useEffect(() => {
     let active = true;
@@ -60,6 +76,7 @@ export default function App() {
   const selectedGraph = state.selectedProjectPath
     ? state.graphs[state.selectedProjectPath]
     : undefined;
+  const selectedProjectPath = state.selectedProjectPath;
   const inspectedNode = selectedNode(state);
   const projects = useMemo(() => {
     const byPath = new Map(
@@ -70,6 +87,81 @@ export default function App() {
     }
     return [...byPath.values()];
   }, [state.graphs, state.recentProjects]);
+  const commands = useMemo(
+    () =>
+      createCommandRegistry(state, {
+        openPalette: () => setPaletteOpen(true),
+        clearSelection: () => dispatch({ type: "clearNodeSelection" }),
+        selectNode: (nodeId) => {
+          if (!state.selectedProjectPath) return;
+          dispatch({
+            type: "selectNode",
+            projectPath: state.selectedProjectPath,
+            nodeId,
+          });
+        },
+        stopNode:
+          selectedProjectPath && inspectedNode
+            ? async () => {
+                if (
+                  !window.confirm(
+                    `Stop "${inspectedNode.title}"? Its transcript and graph node will be preserved.`,
+                  )
+                ) {
+                  return;
+                }
+                await sendDaemonCommand(
+                  stopNodeCommand(selectedProjectPath, inspectedNode.id),
+                );
+              }
+            : undefined,
+      }),
+    [inspectedNode, selectedProjectPath, state],
+  );
+
+  const executeCommand = useCallback(async (command: AppCommand) => {
+    if (!command.enabled) return;
+    setPendingCommandId(command.id);
+    setCommandError(undefined);
+    try {
+      await command.execute();
+      if (command.id !== "app.commandPalette") {
+        setPaletteOpen(false);
+      }
+    } catch (error) {
+      setCommandError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setPendingCommandId(undefined);
+    }
+  }, []);
+
+  useEffect(() => {
+    const handleShortcut = (event: KeyboardEvent) => {
+      if (paletteOpen && event.key === "Escape") {
+        event.preventDefault();
+        setPaletteOpen(false);
+        return;
+      }
+      const command = commands.find((candidate) =>
+        commandMatchesShortcut(candidate, event),
+      );
+      if (!command) return;
+      if (isEditableTarget(event.target) && command.shortcut?.global !== true) {
+        return;
+      }
+      event.preventDefault();
+      void executeCommand(command);
+    };
+    window.addEventListener("keydown", handleShortcut);
+    return () => window.removeEventListener("keydown", handleShortcut);
+  }, [commands, executeCommand, paletteOpen]);
+
+  const headerCommands = commands.filter((command) =>
+    command.surfaces.includes("header"),
+  );
+  const nodeCommands = commands.filter((command) =>
+    command.surfaces.includes("node"),
+  );
 
   return (
     <main className="app-shell">
@@ -122,15 +214,27 @@ export default function App() {
             <p className="eyebrow">Daemon-owned orchestration</p>
             <h1>{selectedGraph?.project.name ?? "GraphCode"}</h1>
           </div>
-          <button
-            type="button"
-            disabled
-            title="Terminal streaming is planned for phase 3"
-          >
-            Open terminal
-          </button>
+          <div className="header-actions">
+            {headerCommands.map((command) => (
+              <button
+                key={command.id}
+                type="button"
+                disabled={!command.enabled || pendingCommandId === command.id}
+                title={command.disabledReason}
+                onClick={() => void executeCommand(command)}
+              >
+                {command.label}
+                {command.shortcut ? <kbd>{command.shortcut.label}</kbd> : null}
+              </button>
+            ))}
+          </div>
         </header>
         <ConnectionBanner connection={state.connection} />
+        {commandError ? (
+          <div className="command-error" role="alert">
+            {commandError}
+          </div>
+        ) : null}
         {state.protocolWarnings.length ? (
           <div className="protocol-warning" role="alert">
             {state.protocolWarnings.at(-1)}
@@ -152,10 +256,20 @@ export default function App() {
           <NodeInspector
             graph={selectedGraph}
             node={inspectedNode}
+            commands={nodeCommands}
+            pendingCommandId={pendingCommandId}
             onClose={() => dispatch({ type: "clearNodeSelection" })}
+            onExecuteCommand={(command) => void executeCommand(command)}
           />
         </div>
       </section>
+      <CommandPalette
+        commands={commands}
+        open={paletteOpen}
+        pendingCommandId={pendingCommandId}
+        onClose={() => setPaletteOpen(false)}
+        onExecute={(command) => void executeCommand(command)}
+      />
     </main>
   );
 }

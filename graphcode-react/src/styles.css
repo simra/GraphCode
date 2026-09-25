@@ -183,12 +183,35 @@ button:focus-visible,
   text-transform: uppercase;
 }
 
+.header-actions {
+  display: flex;
+  gap: 8px;
+}
+
 .app-header button {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
   padding: 9px 14px;
   border: 1px solid #353a33;
   border-radius: 8px;
   color: #737972;
   background: #1a1c19;
+}
+
+.app-header button:not(:disabled) {
+  color: #d9ddd6;
+  cursor: pointer;
+}
+
+kbd {
+  padding: 2px 5px;
+  border: 1px solid #444a41;
+  border-radius: 4px;
+  color: #939b90;
+  background: #171916;
+  font-family: inherit;
+  font-size: 0.68rem;
 }
 
 .connection-banner {
@@ -240,6 +263,16 @@ button:focus-visible,
 .protocol-warning {
   margin: -10px 0 18px;
   color: #e0b683;
+  font-size: 0.84rem;
+}
+
+.command-error {
+  margin: -10px 0 18px;
+  padding: 10px 12px;
+  border: 1px solid #734b43;
+  border-radius: 8px;
+  color: #e6b0a5;
+  background: rgba(99, 50, 42, 0.22);
   font-size: 0.84rem;
 }
 
@@ -483,7 +516,7 @@ button:focus-visible,
 
 .inspector-actions {
   display: grid;
-  grid-template-columns: 1fr 1fr 1fr;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 8px;
   padding: 0 20px 16px;
   border-bottom: 1px solid #2d322b;
@@ -496,6 +529,66 @@ button:focus-visible,
   border-radius: 8px;
   color: #70766d;
   background: #1b1e1a;
+}
+
+.command-menu {
+  position: relative;
+}
+
+.command-menu summary {
+  display: grid;
+  height: 100%;
+  min-height: 34px;
+  place-items: center;
+  border: 1px solid #373d35;
+  border-radius: 8px;
+  color: #c3c9c0;
+  background: #242821;
+  font-size: 0.78rem;
+  cursor: pointer;
+  list-style: none;
+}
+
+.command-menu summary::-webkit-details-marker {
+  display: none;
+}
+
+.command-menu > div {
+  position: absolute;
+  z-index: 20;
+  top: calc(100% + 6px);
+  right: 0;
+  display: grid;
+  width: 240px;
+  padding: 6px;
+  border: 1px solid #3b4138;
+  border-radius: 10px;
+  background: #1c201a;
+  box-shadow: 0 18px 45px rgba(0, 0, 0, 0.42);
+}
+
+.command-menu > div button {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 9px 10px;
+  border: 0;
+  color: #d3d8cf;
+  background: transparent;
+  text-align: left;
+}
+
+.command-menu > div button:not(:disabled):hover {
+  background: #293027;
+}
+
+.command-menu > div button:disabled {
+  color: #71776e;
+}
+
+.command-menu > div .command-danger:not(:disabled) {
+  color: #e4a297;
 }
 
 .inspector-scroll {
@@ -550,6 +643,102 @@ button:focus-visible,
   color: #b8cbb2;
   font-family: "Cascadia Mono", Consolas, monospace;
   font-size: 0.75rem;
+}
+
+.command-overlay {
+  position: fixed;
+  z-index: 100;
+  inset: 0;
+  display: grid;
+  place-items: start center;
+  padding: min(14vh, 120px) 20px 20px;
+  background: rgba(5, 6, 5, 0.72);
+  backdrop-filter: blur(5px);
+}
+
+.command-palette {
+  width: min(640px, 100%);
+  overflow: hidden;
+  border: 1px solid #454d42;
+  border-radius: 14px;
+  background: #181b17;
+  box-shadow: 0 28px 90px rgba(0, 0, 0, 0.58);
+}
+
+.command-palette h2 {
+  margin: 0;
+  padding: 16px 18px 8px;
+  font-size: 0.85rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.command-palette > input {
+  width: calc(100% - 28px);
+  margin: 6px 14px 12px;
+  padding: 12px 13px;
+  border: 1px solid #4b5547;
+  border-radius: 9px;
+  outline: none;
+  color: #eef1eb;
+  background: #10130f;
+  font: inherit;
+}
+
+.command-palette > input:focus {
+  border-color: #8db186;
+  box-shadow: 0 0 0 3px rgba(141, 177, 134, 0.15);
+}
+
+.command-results {
+  display: grid;
+  max-height: min(58vh, 520px);
+  gap: 2px;
+  margin: 0;
+  padding: 0 8px 10px;
+  overflow: auto;
+  list-style: none;
+}
+
+.command-results button {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  padding: 10px;
+  border: 0;
+  border-radius: 8px;
+  color: #dce1d8;
+  background: transparent;
+  text-align: left;
+}
+
+.command-results button:not(:disabled):hover,
+.command-results button:not(:disabled):focus-visible {
+  background: #293027;
+}
+
+.command-results button:disabled {
+  color: #747b71;
+}
+
+.command-results button > span {
+  display: grid;
+  gap: 3px;
+}
+
+.command-results small {
+  color: #929a8f;
+}
+
+.command-results .command-disabled-reason {
+  color: #b48f75;
+}
+
+.command-empty {
+  padding: 8px 18px 20px;
+  color: #8d9589;
 }
 
 @media (max-width: 1200px) {
