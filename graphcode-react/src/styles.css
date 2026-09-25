@@ -243,6 +243,13 @@ button:focus-visible,
   font-size: 0.84rem;
 }
 
+.content-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(340px, 400px);
+  align-items: start;
+  gap: 18px;
+}
+
 .canvas-panel,
 .empty-canvas {
   overflow: hidden;
@@ -295,6 +302,16 @@ button:focus-visible,
 }
 
 .graph-node:focus rect:first-child {
+  stroke: #9ecb91;
+  stroke-width: 2.5;
+}
+
+.graph-node {
+  cursor: pointer;
+}
+
+.graph-node-selected rect:first-child {
+  fill: #232a21;
   stroke: #9ecb91;
   stroke-width: 2.5;
 }
@@ -357,6 +374,199 @@ button:focus-visible,
   color: #9da398;
 }
 
+.node-inspector {
+  position: sticky;
+  top: 24px;
+  display: flex;
+  min-width: 0;
+  max-height: calc(100vh - 58px);
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid #30362e;
+  border-radius: 16px;
+  background: rgba(20, 23, 19, 0.96);
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.24);
+}
+
+.inspector-empty {
+  min-height: 300px;
+  justify-content: center;
+  padding: 30px;
+}
+
+.inspector-empty h2 {
+  margin: 8px 0;
+}
+
+.inspector-empty p:last-child {
+  margin-bottom: 0;
+  color: #9da398;
+  line-height: 1.55;
+}
+
+.inspector-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 18px;
+  padding: 20px 20px 12px;
+}
+
+.inspector-header h2 {
+  margin: 4px 0;
+  font-size: 1.35rem;
+}
+
+.inspector-header p:last-child {
+  margin: 0;
+  color: #92998f;
+  font-size: 0.8rem;
+}
+
+.icon-button {
+  width: 32px;
+  height: 32px;
+  border: 1px solid #3a4037;
+  border-radius: 8px;
+  color: #cbd0c8;
+  background: #222620;
+  cursor: pointer;
+}
+
+.inspector-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 0 20px 14px;
+}
+
+.status-badge {
+  padding: 4px 8px;
+  border: 1px solid #41483e;
+  border-radius: 999px;
+  color: #b9c0b5;
+  background: #252a23;
+  font-size: 0.72rem;
+  text-transform: capitalize;
+}
+
+.status-running,
+.status-succeeded {
+  border-color: #496746;
+  color: #a8d8a1;
+}
+
+.status-blocked,
+.status-stalled,
+.status-failed {
+  border-color: #745448;
+  color: #e1ad8f;
+}
+
+.inspector-callout {
+  margin: 0 20px 14px;
+  padding: 10px 12px;
+  border: 1px solid #684d43;
+  border-radius: 9px;
+  color: #e0b39b;
+  background: rgba(94, 57, 46, 0.22);
+  font-size: 0.8rem;
+}
+
+.inspector-callout p {
+  margin: 0;
+}
+
+.inspector-callout p + p {
+  margin-top: 6px;
+}
+
+.inspector-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 8px;
+  padding: 0 20px 16px;
+  border-bottom: 1px solid #2d322b;
+}
+
+.inspector-actions button {
+  min-width: 0;
+  padding: 8px;
+  border: 1px solid #373d35;
+  border-radius: 8px;
+  color: #70766d;
+  background: #1b1e1a;
+}
+
+.inspector-scroll {
+  overflow: auto;
+  padding: 2px 20px 24px;
+}
+
+.inspector-section {
+  padding: 16px 0;
+  border-bottom: 1px solid #2b3029;
+}
+
+.inspector-section:last-child {
+  border-bottom: 0;
+}
+
+.inspector-section h3 {
+  margin: 0 0 11px;
+  color: #aeb7aa;
+  font-size: 0.72rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.inspector-section dl {
+  display: grid;
+  gap: 9px;
+  margin: 0;
+}
+
+.inspector-detail {
+  display: grid;
+  grid-template-columns: minmax(88px, 0.42fr) minmax(0, 1fr);
+  gap: 12px;
+  font-size: 0.8rem;
+  line-height: 1.45;
+}
+
+.inspector-detail dt {
+  color: #828a7f;
+}
+
+.inspector-detail dd {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+  color: #d4d9d1;
+  white-space: pre-wrap;
+}
+
+.inspector-detail code {
+  color: #b8cbb2;
+  font-family: "Cascadia Mono", Consolas, monospace;
+  font-size: 0.75rem;
+}
+
+@media (max-width: 1200px) {
+  .content-layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .node-inspector {
+    position: static;
+    max-height: none;
+  }
+
+  .inspector-scroll {
+    max-height: 560px;
+  }
+}
+
 @media (max-width: 900px) {
   body {
     min-width: 0;
@@ -378,5 +588,14 @@ button:focus-visible,
 
   .sidebar-footer {
     display: none;
+  }
+
+  .main-column {
+    padding: 22px 18px 28px;
+  }
+
+  .inspector-detail {
+    grid-template-columns: 1fr;
+    gap: 2px;
   }
 }

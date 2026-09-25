@@ -10,7 +10,15 @@ function stateLabel(node: LoopNode): string {
   return Object.keys(node.state)[0] ?? "unknown";
 }
 
-export function GraphCanvas({ graph }: { graph?: LoopGraph }) {
+export function GraphCanvas({
+  graph,
+  selectedNodeId,
+  onSelectNode,
+}: {
+  graph?: LoopGraph;
+  selectedNodeId?: string;
+  onSelectNode?(nodeId: string): void;
+}) {
   if (!graph) {
     return (
       <section className="empty-canvas" aria-labelledby="empty-title">
@@ -87,17 +95,46 @@ export function GraphCanvas({ graph }: { graph?: LoopGraph }) {
               />
             );
           })}
-          {graph.nodes.map((node) => {
+          {graph.nodes.map((node, index) => {
             const position = positions.get(node.id)!;
             const state = stateLabel(node);
+            const selected = selectedNodeId === node.id;
+            const selectNode = () => onSelectNode?.(node.id);
             return (
               <g
+                id={`graph-node-${node.id}`}
                 key={node.id}
-                className="graph-node"
+                className={`graph-node${selected ? " graph-node-selected" : ""}`}
                 transform={`translate(${position.x} ${position.y})`}
-                role="group"
+                role="button"
                 aria-label={`${node.title}, ${state}`}
-                tabIndex={0}
+                aria-pressed={selected}
+                tabIndex={selected || (!selectedNodeId && index === 0) ? 0 : -1}
+                onClick={selectNode}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" || event.key === " ") {
+                    event.preventDefault();
+                    selectNode();
+                    return;
+                  }
+                  const direction =
+                    event.key === "ArrowRight" || event.key === "ArrowDown"
+                      ? 1
+                      : event.key === "ArrowLeft" || event.key === "ArrowUp"
+                        ? -1
+                        : 0;
+                  if (!direction) return;
+                  event.preventDefault();
+                  const next =
+                    graph.nodes[
+                      (index + direction + graph.nodes.length) %
+                        graph.nodes.length
+                    ];
+                  onSelectNode?.(next.id);
+                  requestAnimationFrame(() =>
+                    document.getElementById(`graph-node-${next.id}`)?.focus(),
+                  );
+                }}
               >
                 <rect width={cardWidth} height={cardHeight} rx="14" />
                 <rect

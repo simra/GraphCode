@@ -2,8 +2,9 @@ import { useEffect, useMemo, useReducer } from "react";
 import { startDaemonConnection, type DaemonConnection } from "./bridge/daemon";
 import { ConnectionBanner } from "./components/ConnectionBanner";
 import { GraphCanvas } from "./components/GraphCanvas";
+import { NodeInspector } from "./components/NodeInspector";
 import { initialSnapshotFixture } from "./fixtures/initialSnapshot";
-import { appReducer, initialAppState } from "./state/graphState";
+import { appReducer, initialAppState, selectedNode } from "./state/graphState";
 
 export default function App() {
   const [state, dispatch] = useReducer(appReducer, initialAppState);
@@ -59,6 +60,7 @@ export default function App() {
   const selectedGraph = state.selectedProjectPath
     ? state.graphs[state.selectedProjectPath]
     : undefined;
+  const inspectedNode = selectedNode(state);
   const projects = useMemo(() => {
     const byPath = new Map(
       state.recentProjects.map((project) => [project.path, project]),
@@ -134,7 +136,25 @@ export default function App() {
             {state.protocolWarnings.at(-1)}
           </div>
         ) : null}
-        <GraphCanvas graph={selectedGraph} />
+        <div className="content-layout">
+          <GraphCanvas
+            graph={selectedGraph}
+            selectedNodeId={state.selectedNodeId}
+            onSelectNode={(nodeId) => {
+              if (!state.selectedProjectPath) return;
+              dispatch({
+                type: "selectNode",
+                projectPath: state.selectedProjectPath,
+                nodeId,
+              });
+            }}
+          />
+          <NodeInspector
+            graph={selectedGraph}
+            node={inspectedNode}
+            onClose={() => dispatch({ type: "clearNodeSelection" })}
+          />
+        </div>
       </section>
     </main>
   );

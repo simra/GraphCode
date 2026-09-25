@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { DaemonWireEnvelope } from "../protocol/domain";
-import { appReducer, initialAppState } from "./graphState";
+import { appReducer, initialAppState, selectedNode } from "./graphState";
 
 const snapshot: DaemonWireEnvelope = {
   version: 2,
@@ -17,6 +17,13 @@ const snapshot: DaemonWireEnvelope = {
     },
   },
 };
+
+function originalGraph() {
+  if (snapshot.kind !== "event" || snapshot.event.type !== "graphChanged") {
+    throw new Error("Expected graphChanged fixture");
+  }
+  return snapshot.event.graph;
+}
 
 describe("appReducer", () => {
   it("surfaces reconnect and resync status without using fixture data", () => {
@@ -98,5 +105,48 @@ describe("appReducer", () => {
       },
     });
     expect(stale.graphs["C:\\work\\graph"].nodes[0].title).toBe("Node");
+  });
+
+  it("keeps node selection by stable ID and clears it when the node disappears", () => {
+    const withSnapshot = appReducer(initialAppState, {
+      type: "envelopeReceived",
+      envelope: snapshot,
+    });
+    const withSelection = appReducer(withSnapshot, {
+      type: "selectNode",
+      projectPath: "C:\\work\\graph",
+      nodeId: "node",
+    });
+    expect(selectedNode(withSelection)?.title).toBe("Node");
+
+    const refreshed = appReducer(withSelection, {
+      type: "envelopeReceived",
+      envelope: {
+        ...snapshot,
+        sequence: 6,
+        event: {
+          type: "graphChanged",
+          graph: {
+            ...originalGraph(),
+            revision: 11,
+            nodes: [{ id: "node", title: "Renamed", state: { running: {} } }],
+          },
+        },
+      },
+    });
+    expect(selectedNode(refreshed)?.title).toBe("Renamed");
+
+    const removed = appReducer(refreshed, {
+      type: "envelopeReceived",
+      envelope: {
+        ...snapshot,
+        sequence: 7,
+        event: {
+          type: "graphChanged",
+          graph: { ...originalGraph(), revision: 12, nodes: [] },
+        },
+      },
+    });
+    expect(removed.selectedNodeId).toBeUndefined();
   });
 });

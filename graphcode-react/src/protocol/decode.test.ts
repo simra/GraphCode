@@ -78,6 +78,61 @@ describe("decodeEnvelope", () => {
     expect(projectsEnvelope.event.projects[0].path).toBe("C:\\work\\live");
   });
 
+  it("validates inspector fields already carried by LoopNode snapshots", () => {
+    const envelope = decodeEnvelope({
+      version: 2,
+      kind: "event",
+      sequence: 14,
+      event: {
+        graphChanged: {
+          id: "graph",
+          project: { path: "C:\\work\\graph", name: "Graph" },
+          edges: [],
+          nodes: [
+            {
+              id: "node",
+              title: "Goal",
+              loopType: "goalBased",
+              state: { running: {} },
+              backend: "copilotCLI",
+              modelTier: "capable",
+              goal: {
+                summary: "Ship it",
+                predicate: "test -f done",
+                pollIntervalSeconds: 30,
+                stallAfterSeconds: 3600,
+                metricCommand: "score",
+                metricDirection: "maximize",
+                tokenBudget: 5000,
+                skipsUnchangedWorkspace: true,
+              },
+              usage: {
+                inputTokens: 100,
+                outputTokens: 25,
+                costUSD: 0.02,
+              },
+              metricHistory: [{ value: 4, recordedAt: "2026-09-25T00:00:00Z" }],
+              worktreeBinding: {
+                id: "worktree",
+                repositoryPath: "C:\\work\\graph",
+                worktreePath: "C:\\work\\graph-feature",
+                branch: "feature",
+              },
+            },
+          ],
+        },
+      },
+    });
+
+    if (envelope.kind !== "event" || envelope.event.type !== "graphChanged") {
+      throw new Error("Expected graphChanged event");
+    }
+    const node = envelope.event.graph.nodes[0];
+    expect(node.goal?.tokenBudget).toBe(5000);
+    expect(node.usage?.inputTokens).toBe(100);
+    expect(node.worktreeBinding?.branch).toBe("feature");
+  });
+
   it("rejects malformed response envelopes instead of silently defaulting", () => {
     expect(() =>
       decodeEnvelope({

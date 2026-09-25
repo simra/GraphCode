@@ -2,6 +2,7 @@ import type {
   DaemonEvent,
   DaemonWireEnvelope,
   LoopGraph,
+  LoopNode,
   ProjectRef,
 } from "../protocol/domain";
 
@@ -24,6 +25,7 @@ export interface AppState {
   recentProjects: ProjectRef[];
   graphs: Record<string, LoopGraph>;
   selectedProjectPath?: string;
+  selectedNodeId?: string;
   lastSequence: number;
   protocolWarnings: string[];
 }
@@ -40,6 +42,8 @@ export type AppAction =
   | { type: "connectionFailed"; message: string }
   | { type: "fixtureLoaded"; reason: string }
   | { type: "selectProject"; path: string }
+  | { type: "selectNode"; projectPath: string; nodeId: string }
+  | { type: "clearNodeSelection" }
   | { type: "envelopeReceived"; envelope: DaemonWireEnvelope };
 
 export const initialAppState: AppState = {
@@ -56,10 +60,20 @@ function applyDaemonEvent(state: AppState, event: DaemonEvent): AppState {
       return { ...state, recentProjects: event.projects };
     case "graphChanged": {
       const path = event.graph.project.path;
+      const selectedProjectPath = state.selectedProjectPath ?? path;
+      const selectedNodeId =
+        selectedProjectPath === path &&
+        state.selectedNodeId &&
+        event.graph.nodes.some((node) => node.id === state.selectedNodeId)
+          ? state.selectedNodeId
+          : selectedProjectPath === path
+            ? undefined
+            : state.selectedNodeId;
       return {
         ...state,
         graphs: { ...state.graphs, [path]: event.graph },
-        selectedProjectPath: state.selectedProjectPath ?? path,
+        selectedProjectPath,
+        selectedNodeId,
       };
     }
     case "nodesChanged": {
@@ -155,8 +169,27 @@ export function appReducer(state: AppState, action: AppAction): AppState {
       };
     case "selectProject":
       return state.graphs[action.path]
-        ? { ...state, selectedProjectPath: action.path }
+        ? {
+            ...state,
+            selectedProjectPath: action.path,
+            selectedNodeId:
+              action.path === state.selectedProjectPath
+                ? state.selectedNodeId
+                : undefined,
+          }
         : state;
+    case "selectNode": {
+      const graph = state.graphs[action.projectPath];
+      return graph?.nodes.some((node) => node.id === action.nodeId)
+        ? {
+            ...state,
+            selectedProjectPath: action.projectPath,
+            selectedNodeId: action.nodeId,
+          }
+        : state;
+    }
+    case "clearNodeSelection":
+      return { ...state, selectedNodeId: undefined };
     case "envelopeReceived": {
       const envelope = action.envelope;
       if (envelope.kind === "error") {
@@ -187,4 +220,11 @@ export function appReducer(state: AppState, action: AppAction): AppState {
         : withSequence;
     }
   }
+}
+
+export function selectedNode(state: AppState): LoopNode | undefined {
+  if (!state.selectedProjectPath || !state.selectedNodeId) return undefined;
+  return state.graphs[state.selectedProjectPath]?.nodes.find(
+    (node) => node.id === state.selectedNodeId,
+  );
 }
