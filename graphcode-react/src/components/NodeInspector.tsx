@@ -121,6 +121,7 @@ export function NodeInspector({
     "loop.openTerminal",
     "loop.message",
     "loop.edit",
+    "loop.openComposite",
   ]);
   const primaryCommands = commands.filter((command) =>
     primaryCommandIds.has(command.id),

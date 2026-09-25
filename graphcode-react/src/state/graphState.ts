@@ -31,6 +31,7 @@ export interface AppState {
   quickChatsSelected: boolean;
   selectedQuickChatId?: string;
   selectedProjectPath?: string;
+  compositePath: string[];
   selectedNodeId?: string;
   lastSequence: number;
   protocolWarnings: string[];
@@ -50,6 +51,8 @@ export type AppAction =
   | { type: "selectQuickChats" }
   | { type: "selectQuickChat"; id: string }
   | { type: "selectProject"; path: string }
+  | { type: "enterComposite"; nodeId: string }
+  | { type: "leaveComposite"; depth: number }
   | {
       type: "projectRemoved";
       path: string;
@@ -66,9 +69,40 @@ export const initialAppState: AppState = {
   mailboxes: {},
   quickChats: [],
   quickChatsSelected: false,
+  compositePath: [],
   lastSequence: 0,
   protocolWarnings: [],
 };
+
+function graphAtPath(
+  root: LoopGraph | undefined,
+  compositePath: readonly string[],
+): LoopGraph | undefined {
+  let graph = root;
+  for (const nodeId of compositePath) {
+    graph = graph?.nodes.find((node) => node.id === nodeId)?.subGraph;
+    if (!graph) return undefined;
+  }
+  return graph;
+}
+
+function validCompositePath(
+  root: LoopGraph,
+  compositePath: readonly string[],
+): string[] {
+  const valid: string[] = [];
+  let graph: LoopGraph | undefined = root;
+  for (const nodeId of compositePath) {
+    if (!graph) break;
+    const child: LoopGraph | undefined = graph.nodes.find(
+      (node) => node.id === nodeId,
+    )?.subGraph;
+    if (!child) break;
+    valid.push(nodeId);
+    graph = child;
+  }
+  return valid;
+}
 
 function applyDaemonEvent(state: AppState, event: DaemonEvent): AppState {
   switch (event.type) {
@@ -77,10 +111,18 @@ function applyDaemonEvent(state: AppState, event: DaemonEvent): AppState {
     case "graphChanged": {
       const path = event.graph.project.path;
       const selectedProjectPath = state.selectedProjectPath ?? path;
+      const compositePath =
+        selectedProjectPath === path
+          ? validCompositePath(event.graph, state.compositePath)
+          : state.compositePath;
+      const selectedGraph =
+        selectedProjectPath === path
+          ? graphAtPath(event.graph, compositePath)
+          : undefined;
       const selectedNodeId =
         selectedProjectPath === path &&
         state.selectedNodeId &&
-        event.graph.nodes.some((node) => node.id === state.selectedNodeId)
+        selectedGraph?.nodes.some((node) => node.id === state.selectedNodeId)
           ? state.selectedNodeId
           : selectedProjectPath === path
             ? undefined
@@ -89,6 +131,7 @@ function applyDaemonEvent(state: AppState, event: DaemonEvent): AppState {
         ...state,
         graphs: { ...state.graphs, [path]: event.graph },
         selectedProjectPath,
+        compositePath,
         selectedNodeId,
       };
     }
@@ -235,6 +278,7 @@ export function appReducer(state: AppState, action: AppAction): AppState {
         ...state,
         quickChatsSelected: true,
         selectedQuickChatId: undefined,
+        compositePath: [],
         selectedNodeId: undefined,
       };
     case "selectQuickChat":
@@ -243,6 +287,7 @@ export function appReducer(state: AppState, action: AppAction): AppState {
             ...state,
             quickChatsSelected: true,
             selectedQuickChatId: action.id,
+            compositePath: [],
             selectedNodeId: undefined,
           }
         : state;
@@ -253,12 +298,37 @@ export function appReducer(state: AppState, action: AppAction): AppState {
             quickChatsSelected: false,
             selectedQuickChatId: undefined,
             selectedProjectPath: action.path,
+            compositePath: [],
             selectedNodeId:
               action.path === state.selectedProjectPath
                 ? state.selectedNodeId
                 : undefined,
           }
         : state;
+    case "enterComposite": {
+      const graph = currentGraph(state);
+      const node = graph?.nodes.find(
+        (candidate) => candidate.id === action.nodeId,
+      );
+      return node?.subGraph
+        ? {
+            ...state,
+            compositePath: [...state.compositePath, node.id],
+            selectedNodeId: undefined,
+          }
+        : state;
+    }
+    case "leaveComposite": {
+      const depth = Math.max(
+        0,
+        Math.min(action.depth, state.compositePath.length),
+      );
+      return {
+        ...state,
+        compositePath: state.compositePath.slice(0, depth),
+        selectedNodeId: undefined,
+      };
+    }
     case "projectRemoved": {
       const graphs = { ...state.graphs };
       delete graphs[action.path];
@@ -285,11 +355,15 @@ export function appReducer(state: AppState, action: AppAction): AppState {
         mailboxes,
         recentProjects,
         selectedProjectPath: fallback,
+        compositePath: [],
         selectedNodeId: undefined,
       };
     }
     case "selectNode": {
-      const graph = state.graphs[action.projectPath];
+      const graph =
+        action.projectPath === state.selectedProjectPath
+          ? currentGraph(state)
+          : state.graphs[action.projectPath];
       return graph?.nodes.some((node) => node.id === action.nodeId)
         ? {
             ...state,
@@ -335,9 +409,17 @@ export function appReducer(state: AppState, action: AppAction): AppState {
 }
 
 export function selectedNode(state: AppState): LoopNode | undefined {
-  if (!state.selectedProjectPath || !state.selectedNodeId) return undefined;
-  return state.graphs[state.selectedProjectPath]?.nodes.find(
+  if (!state.selectedNodeId) return undefined;
+  return currentGraph(state)?.nodes.find(
     (node) => node.id === state.selectedNodeId,
+  );
+}
+
+export function currentGraph(state: AppState): LoopGraph | undefined {
+  if (!state.selectedProjectPath) return undefined;
+  return graphAtPath(
+    state.graphs[state.selectedProjectPath],
+    state.compositePath,
   );
 }
 

@@ -76,6 +76,25 @@ export const initialSnapshotFixture: DaemonWireEnvelope[] = [
             backend: "copilotCLI",
             state: { blocked: {} },
             activity: "Planned for the zmx bridge phase",
+            pilotState: "notPiloted",
+            subGraph: {
+              id: "88888888-8888-4888-8888-888888888888",
+              project: {
+                path: "graphcode://fixtures/react-vertical-slice",
+                name: "React vertical slice",
+              },
+              nodes: [
+                {
+                  id: "99999999-9999-4999-8999-999999999999",
+                  title: "Inspect nested routing",
+                  loopType: "turnBased",
+                  backend: "copilotCLI",
+                  state: { idle: {} },
+                  activity: "Ready inside the composite",
+                },
+              ],
+              edges: [],
+            },
           },
         ],
         edges: [

@@ -170,6 +170,21 @@ export type MemoNodeCommand = GraphCommandEnvelope<{
   };
 }>;
 
+export type RefineNodeCommand = GraphCommandEnvelope<{
+  refineNode: {
+    _0: string;
+    text: string;
+    from: null;
+  };
+}>;
+
+export type RollbackRefinementCommand = GraphCommandEnvelope<{
+  rollbackRefinement: {
+    _0: string;
+    from: null;
+  };
+}>;
+
 export type PilotCompositeCommand = GraphCommandEnvelope<{
   pilotComposite: { _0: string };
 }>;
@@ -419,6 +434,52 @@ export function memoNodeCommand(
       command: {
         memoNode: { _0: nodeId, text, from: null },
       },
+    },
+  };
+}
+
+export function refineNodeCommand(
+  projectPath: string,
+  nodeId: string,
+  text: string,
+): RefineNodeCommand {
+  return {
+    graphCommand: {
+      projectPath,
+      command: {
+        refineNode: { _0: nodeId, text, from: null },
+      },
+    },
+  };
+}
+
+export function rollbackRefinementCommand(
+  projectPath: string,
+  nodeId: string,
+): RollbackRefinementCommand {
+  return {
+    graphCommand: {
+      projectPath,
+      command: {
+        rollbackRefinement: { _0: nodeId, from: null },
+      },
+    },
+  };
+}
+
+export function addressGraphCommand<TCommand>(
+  envelope: GraphCommandEnvelope<TCommand>,
+  compositePath: readonly string[],
+): GraphCommandEnvelope<Record<string, unknown>> {
+  let command: Record<string, unknown> = envelope.graphCommand
+    .command as Record<string, unknown>;
+  for (const nodeID of [...compositePath].reverse()) {
+    command = { subGraphCommand: { nodeID, command } };
+  }
+  return {
+    graphCommand: {
+      projectPath: envelope.graphCommand.projectPath,
+      command,
     },
   };
 }

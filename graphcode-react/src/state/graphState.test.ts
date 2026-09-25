@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { DaemonWireEnvelope } from "../protocol/domain";
 import {
   appReducer,
+  currentGraph,
   initialAppState,
   selectedNode,
   selectedQuickChat,
@@ -274,5 +275,83 @@ describe("appReducer", () => {
     expect(deleted.quickChats).toEqual([]);
     expect(deleted.selectedQuickChatId).toBeUndefined();
     expect(deleted.quickChatsSelected).toBe(true);
+  });
+
+  it("drills into nested composite snapshots and trims invalid paths", () => {
+    const nestedSnapshot: DaemonWireEnvelope = {
+      version: 2,
+      kind: "event",
+      sequence: 1,
+      event: {
+        type: "graphChanged",
+        graph: {
+          id: "root",
+          project: { path: "C:\\work\\nested", name: "Nested" },
+          edges: [],
+          nodes: [
+            {
+              id: "parent",
+              title: "Parent",
+              loopType: "proactive",
+              state: "idle",
+              subGraph: {
+                id: "child",
+                project: { path: "C:\\work\\nested", name: "Nested" },
+                edges: [],
+                nodes: [
+                  {
+                    id: "child-node",
+                    title: "Child",
+                    state: "running",
+                  },
+                ],
+              },
+            },
+          ],
+        },
+      },
+    };
+    const root = appReducer(initialAppState, {
+      type: "envelopeReceived",
+      envelope: nestedSnapshot,
+    });
+    const child = appReducer(root, {
+      type: "enterComposite",
+      nodeId: "parent",
+    });
+    expect(child.compositePath).toEqual(["parent"]);
+    expect(currentGraph(child)?.id).toBe("child");
+
+    const selected = appReducer(child, {
+      type: "selectNode",
+      projectPath: "C:\\work\\nested",
+      nodeId: "child-node",
+    });
+    expect(selectedNode(selected)?.title).toBe("Child");
+
+    const refreshed = appReducer(selected, {
+      type: "envelopeReceived",
+      envelope: {
+        ...nestedSnapshot,
+        sequence: 2,
+        event: {
+          type: "graphChanged",
+          graph: {
+            ...(nestedSnapshot.kind === "event" &&
+            nestedSnapshot.event.type === "graphChanged"
+              ? nestedSnapshot.event.graph
+              : {
+                  id: "root",
+                  project: { path: "C:\\work\\nested", name: "Nested" },
+                  nodes: [],
+                  edges: [],
+                }),
+            nodes: [],
+          },
+        },
+      },
+    });
+    expect(refreshed.compositePath).toEqual([]);
+    expect(refreshed.selectedNodeId).toBeUndefined();
   });
 });

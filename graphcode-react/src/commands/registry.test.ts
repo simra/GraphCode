@@ -67,6 +67,8 @@ describe("command registry", () => {
       editNode: vi.fn(),
       messageNode: vi.fn(),
       memoNode: vi.fn(),
+      refineNode: vi.fn(),
+      rollbackRefinement: vi.fn(async () => undefined),
       restartSession: vi.fn(async () => undefined),
       completeNode: vi.fn(),
       deleteNode: vi.fn(async () => undefined),
@@ -79,6 +81,8 @@ describe("command registry", () => {
       "loop.edit",
       "loop.message",
       "loop.memo",
+      "loop.refine",
+      "loop.rollbackRefinement",
       "loop.restartSession",
       "loop.delete",
       "loop.refreshUsage",
@@ -186,11 +190,15 @@ describe("command registry", () => {
       selectNode: vi.fn(),
       pilotComposite: vi.fn(async () => undefined),
       armComposite: vi.fn(async () => undefined),
+      openComposite: vi.fn(),
     };
 
     let commands = createCommandRegistry(state, actions);
     expect(
       commands.find((command) => command.id === "loop.pilotComposite")?.enabled,
+    ).toBe(true);
+    expect(
+      commands.find((command) => command.id === "loop.openComposite")?.enabled,
     ).toBe(true);
     expect(
       commands.find((command) => command.id === "loop.armComposite")

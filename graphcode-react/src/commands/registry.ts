@@ -1,5 +1,5 @@
 import type { AppState } from "../state/graphState";
-import { selectedNode } from "../state/graphState";
+import { currentGraph, selectedNode } from "../state/graphState";
 
 export type CommandId =
   | "app.commandPalette"
@@ -23,6 +23,9 @@ export type CommandId =
   | "loop.edit"
   | "loop.message"
   | "loop.memo"
+  | "loop.refine"
+  | "loop.rollbackRefinement"
+  | "loop.openComposite"
   | "loop.pilotComposite"
   | "loop.armComposite"
   | "loop.mailroomRefresh"
@@ -74,6 +77,9 @@ export interface CommandActions {
   editNode?(): void;
   messageNode?(): void;
   memoNode?(): void;
+  refineNode?(): void;
+  rollbackRefinement?(): Promise<void>;
+  openComposite?(): void;
   pilotComposite?(): Promise<void>;
   armComposite?(): Promise<void>;
   refreshMailroom?(): Promise<void>;
@@ -119,9 +125,7 @@ export function createCommandRegistry(
   state: AppState,
   actions: CommandActions,
 ): AppCommand[] {
-  const graph = state.selectedProjectPath
-    ? state.graphs[state.selectedProjectPath]
-    : undefined;
+  const graph = currentGraph(state);
   const projectGraph =
     graph?.project.path === "graphcode://global" ? undefined : graph;
   const node = selectedNode(state);
@@ -309,6 +313,58 @@ export function createCommandRegistry(
             ...unavailable(
               node
                 ? "Reconnect to graphcoded before adding a memo"
+                : "Select a loop first",
+            ),
+            execute: () => undefined,
+          }),
+    },
+    {
+      id: "loop.refine",
+      label: "Refine Playbook",
+      description: "Replace the selected loop's playbook for its next wake",
+      category: "Loop",
+      surfaces: ["node"],
+      ...(node && connected && actions.refineNode
+        ? { enabled: true, execute: actions.refineNode }
+        : {
+            ...unavailable(
+              node
+                ? "Reconnect to graphcoded before refining this playbook"
+                : "Select a loop first",
+            ),
+            execute: () => undefined,
+          }),
+    },
+    {
+      id: "loop.rollbackRefinement",
+      label: "Rollback Playbook",
+      description: "Ask graphcoded to restore the previous playbook version",
+      category: "Loop",
+      surfaces: ["node"],
+      danger: true,
+      ...(node && connected && actions.rollbackRefinement
+        ? { enabled: true, execute: actions.rollbackRefinement }
+        : {
+            ...unavailable(
+              node
+                ? "Reconnect to graphcoded before rolling back this playbook"
+                : "Select a loop first",
+            ),
+            execute: () => undefined,
+          }),
+    },
+    {
+      id: "loop.openComposite",
+      label: "Open Composite",
+      description: "Drill into the selected loop's authoritative child graph",
+      category: "Loop",
+      surfaces: ["node"],
+      ...(isComposite && actions.openComposite
+        ? { enabled: true, execute: actions.openComposite }
+        : {
+            ...unavailable(
+              node
+                ? "Select a composite with a child graph"
                 : "Select a loop first",
             ),
             execute: () => undefined,
