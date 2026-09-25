@@ -1148,6 +1148,7 @@ dependencies = [
 name = "graphcode-react"
 version = "0.1.0"
 dependencies = [
+ "fastrand",
  "hex",
  "serde",
  "serde_json",

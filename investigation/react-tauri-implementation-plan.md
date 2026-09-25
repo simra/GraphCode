@@ -22,9 +22,11 @@ The initial vertical slice is implemented in this branch:
   focused SVG graph preview;
 - explicit fixture fallback when a live daemon is unavailable.
 
-This slice does **not** yet provide a persistent native connection, replay after
-disconnect, graph mutation forms, settings, terminal streaming, packaging, or
-production parity.
+The connection layer now has a persistent Rust actor with stable client identity,
+request correlation, acknowledged replay cursors, reconnect/resync handling and
+explicit unknown-outcome errors. It still needs daemon-restart integration tests
+and byte-based queue limits. The slice does **not** yet provide graph mutation
+forms, settings, terminal streaming, packaging, or production parity.
 
 ## Goals
 
@@ -145,8 +147,7 @@ scripts.
 
 ### Rust connection actor
 
-Phase 2 replaces the initial one-shot command with one Tokio task owning the raw
-stream:
+The connection actor uses one Tokio task owning the raw stream:
 
 1. Discover endpoint and connect with a bounded timeout.
 2. Load or create a stable client UUID in Tauri app data.

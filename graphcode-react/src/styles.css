@@ -223,6 +223,12 @@ button:focus-visible,
   background: #7fc778;
 }
 
+.connection-connecting .connection-dot,
+.connection-reconnecting .connection-dot,
+.connection-resyncing .connection-dot {
+  background: #78a9c7;
+}
+
 .connection-fixture .connection-dot {
   background: #d3a766;
 }

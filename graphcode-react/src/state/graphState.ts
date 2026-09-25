@@ -6,7 +6,13 @@ import type {
 } from "../protocol/domain";
 
 export type ConnectionPhase =
-  "idle" | "connecting" | "connected" | "fixture" | "error";
+  | "idle"
+  | "connecting"
+  | "connected"
+  | "reconnecting"
+  | "resyncing"
+  | "fixture"
+  | "error";
 
 export interface AppState {
   connection: {
@@ -25,6 +31,12 @@ export interface AppState {
 export type AppAction =
   | { type: "connectionStarted" }
   | { type: "connectionReady"; endpoint: string }
+  | {
+      type: "connectionStatus";
+      phase: "connecting" | "connected" | "reconnecting" | "resyncing";
+      endpoint: string;
+      message?: string;
+    }
   | { type: "connectionFailed"; message: string }
   | { type: "fixtureLoaded"; reason: string }
   | { type: "selectProject"; path: string }
@@ -110,6 +122,16 @@ export function appReducer(state: AppState, action: AppAction): AppState {
         connection: {
           phase: "connected",
           endpoint: action.endpoint,
+          usingFixture: false,
+        },
+      };
+    case "connectionStatus":
+      return {
+        ...state,
+        connection: {
+          phase: action.phase,
+          endpoint: action.endpoint,
+          error: action.message,
           usingFixture: false,
         },
       };
