@@ -459,6 +459,17 @@ button:focus-visible,
   white-space: nowrap;
 }
 
+.project-list .project-attention {
+  color: #f0bd77;
+  font-weight: 700;
+}
+
+@media (forced-colors: active) {
+  .project-list .project-attention {
+    color: Mark;
+  }
+}
+
 .sidebar-footer {
   display: flex;
   justify-content: space-between;
