@@ -148,6 +148,26 @@ export type ArmCompositeCommand = GraphCommandEnvelope<{
   armComposite: { _0: string };
 }>;
 
+export interface MailboxCommand {
+  mailbox: {
+    projectPath: string;
+    query: {
+      selection: { board: Record<string, never> };
+      search: null;
+      fullBodies: true;
+      advanceCursor: null;
+    };
+  };
+}
+
+export type MailroomPostCommand = GraphCommandEnvelope<{
+  mailroomPost: {
+    text: string;
+    topic: string | null;
+    from: null;
+  };
+}>;
+
 export function stopNodeCommand(
   projectPath: string,
   nodeId: string,
@@ -336,6 +356,35 @@ export function armCompositeCommand(
     graphCommand: {
       projectPath,
       command: { armComposite: { _0: nodeId } },
+    },
+  };
+}
+
+export function mailboxCommand(projectPath: string): MailboxCommand {
+  return {
+    mailbox: {
+      projectPath,
+      query: {
+        selection: { board: {} },
+        search: null,
+        fullBodies: true,
+        advanceCursor: null,
+      },
+    },
+  };
+}
+
+export function mailroomPostCommand(
+  projectPath: string,
+  text: string,
+  topic: string | null,
+): MailroomPostCommand {
+  return {
+    graphCommand: {
+      projectPath,
+      command: {
+        mailroomPost: { text, topic, from: null },
+      },
     },
   };
 }

@@ -54,6 +54,32 @@ export interface TemplateFollow {
   missing: boolean;
 }
 
+export interface MailroomDigest {
+  count: number;
+  latestID: number;
+  fingerprint: number;
+}
+
+export interface MailroomPost {
+  id: number;
+  at: string | number;
+  authorID?: string;
+  author: string;
+  topic?: string;
+  body: string;
+  kind: "notice" | "letter";
+}
+
+export interface Mailbox {
+  posts: MailroomPost[];
+  bodiesTrimmed: boolean;
+  digest: MailroomDigest;
+  lastRead?: number;
+  highestDeliveredID?: number;
+  remaining: number;
+  prunedUnread: number;
+}
+
 export interface LoopSummary {
   beats: unknown[];
   passes: unknown[];
@@ -124,6 +150,7 @@ export interface LoopGraph {
   project: ProjectRef;
   nodes: LoopNode[];
   edges: LoopEdge[];
+  mailroomDigest?: MailroomDigest;
   revision?: number;
   [field: string]: unknown;
 }
@@ -138,6 +165,7 @@ export type DaemonEvent =
   | { type: "recentProjectsListed"; projects: ProjectRef[] }
   | { type: "graphChanged"; graph: LoopGraph }
   | { type: "nodesChanged"; change: NodesChanged }
+  | { type: "mailbox"; projectPath: string; mailbox: Mailbox }
   | { type: "errorOccurred"; message: string }
   | { type: "unsupported"; name: string; payload: unknown };
 

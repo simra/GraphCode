@@ -747,6 +747,38 @@ kbd {
   border-bottom: 1px solid #2b3029;
 }
 
+.mailroom-board ol {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.mailroom-board li {
+  padding: 10px;
+  border: 1px solid #32372f;
+  border-radius: 8px;
+  background: #171a16;
+}
+
+.mailroom-board li header {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  color: #dfe6da;
+}
+
+.mailroom-board li small {
+  color: #9db395;
+}
+
+.mailroom-board li p {
+  margin: 7px 0 0;
+  color: #c3cbc0;
+  white-space: pre-wrap;
+}
+
 .inspector-section:last-child {
   border-bottom: 0;
 }

@@ -7,6 +7,8 @@ import {
   deleteProjectGraphCommand,
   deleteNodeCommand,
   forgetProjectCommand,
+  mailboxCommand,
+  mailroomPostCommand,
   openProjectCommand,
   memoNodeCommand,
   messageNodeCommand,
@@ -198,6 +200,33 @@ describe("daemon commands", () => {
       graphCommand: {
         projectPath: project,
         command: { armComposite: { _0: node } },
+      },
+    });
+  });
+
+  it("encodes bounded Mailroom board reads and human posts", () => {
+    const project = "C:\\work\\graph";
+    expect(mailboxCommand(project)).toEqual({
+      mailbox: {
+        projectPath: project,
+        query: {
+          selection: { board: {} },
+          search: null,
+          fullBodies: true,
+          advanceCursor: null,
+        },
+      },
+    });
+    expect(mailroomPostCommand(project, "Build is green", "build")).toEqual({
+      graphCommand: {
+        projectPath: project,
+        command: {
+          mailroomPost: {
+            text: "Build is green",
+            topic: "build",
+            from: null,
+          },
+        },
       },
     });
   });

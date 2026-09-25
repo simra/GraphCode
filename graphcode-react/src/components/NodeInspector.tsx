@@ -1,6 +1,11 @@
 import type { ReactNode } from "react";
 import type { AppCommand } from "../commands/registry";
-import type { EncodedEnum, LoopGraph, LoopNode } from "../protocol/domain";
+import type {
+  EncodedEnum,
+  LoopGraph,
+  LoopNode,
+  Mailbox,
+} from "../protocol/domain";
 import { CommandMenu } from "./CommandMenu";
 
 function enumLabel(value: EncodedEnum | undefined): string | undefined {
@@ -79,6 +84,7 @@ function InspectorSection({
 export function NodeInspector({
   graph,
   node,
+  mailbox,
   commands = [],
   pendingCommandId,
   onClose,
@@ -86,6 +92,7 @@ export function NodeInspector({
 }: {
   graph?: LoopGraph;
   node?: LoopNode;
+  mailbox?: Mailbox;
   commands?: AppCommand[];
   pendingCommandId?: string;
   onClose(): void;
@@ -334,6 +341,10 @@ export function NodeInspector({
         </InspectorSection>
 
         <InspectorSection title="Mailroom and memory">
+          <Detail
+            label="Project posts"
+            value={graph.mailroomDigest?.count ?? mailbox?.digest.count}
+          />
           <Detail label="Last read post" value={node.lastMailroomRead} />
           <Detail
             label="Mailroom watch"
@@ -344,6 +355,33 @@ export function NodeInspector({
             value="Requires daemon investigation DT-001"
           />
         </InspectorSection>
+
+        {mailbox ? (
+          <section className="inspector-section mailroom-board">
+            <h3>Mailroom board</h3>
+            {mailbox.posts.length ? (
+              <ol>
+                {mailbox.posts.map((post) => (
+                  <li key={post.id}>
+                    <header>
+                      <strong>{post.author}</strong>
+                      <span>#{post.id}</span>
+                    </header>
+                    {post.topic ? <small>{post.topic}</small> : null}
+                    <p>{post.body}</p>
+                  </li>
+                ))}
+              </ol>
+            ) : (
+              <p>The Mailroom is empty.</p>
+            )}
+            {mailbox.bodiesTrimmed ? (
+              <p className="field-warning">
+                Bodies were triaged by the daemon; refresh requests full bodies.
+              </p>
+            ) : null}
+          </section>
+        ) : null}
 
         {node.subGraph || node.loopType === "proactive" ? (
           <InspectorSection title="Composite">

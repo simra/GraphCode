@@ -133,6 +133,43 @@ describe("decodeEnvelope", () => {
     expect(node.worktreeBinding?.branch).toBe("feature");
   });
 
+  it("decodes bounded Mailroom responses", () => {
+    const envelope = decodeEnvelope({
+      version: 2,
+      kind: "response",
+      requestID: "mailbox-request",
+      event: {
+        mailbox: {
+          projectPath: "C:\\work\\graph",
+          mailbox: {
+            posts: [
+              {
+                id: 3,
+                at: 788918400,
+                authorID: null,
+                author: "a human",
+                topic: "build",
+                body: "Build is green",
+                kind: "notice",
+              },
+            ],
+            bodiesTrimmed: false,
+            digest: { count: 1, latestID: 3, fingerprint: 42 },
+            lastRead: null,
+            highestDeliveredID: null,
+            remaining: 0,
+            prunedUnread: 0,
+          },
+        },
+      },
+    });
+    if (envelope.kind !== "response" || envelope.event?.type !== "mailbox") {
+      throw new Error("Expected mailbox response");
+    }
+    expect(envelope.event.projectPath).toBe("C:\\work\\graph");
+    expect(envelope.event.mailbox.posts[0].body).toBe("Build is green");
+  });
+
   it("rejects malformed response envelopes instead of silently defaulting", () => {
     expect(() =>
       decodeEnvelope({
