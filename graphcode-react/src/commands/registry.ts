@@ -7,6 +7,8 @@ export type CommandId =
   | "project.close"
   | "project.forget"
   | "project.deleteGraph"
+  | "edge.new"
+  | "edge.delete"
   | "loop.new"
   | "loop.stop"
   | "loop.rename"
@@ -79,12 +81,17 @@ export interface CommandActions {
   zoomOut?(): void;
   resetZoom?(): void;
   fitGraph?(): void;
+  openNewEdge?(): void;
 }
 
 export interface ProjectRowCommandActions {
   closeProject?(): Promise<void>;
   forgetProject?(): Promise<void>;
   deleteProjectGraph?(): Promise<void>;
+}
+
+export interface EdgeCommandActions {
+  deleteEdge?(): Promise<void>;
 }
 
 function unavailable(reason: string) {
@@ -484,6 +491,24 @@ export function createCommandRegistry(
           }),
     },
     {
+      id: "edge.new",
+      label: "New Edge",
+      description: "Connect two loops with a typed graph edge",
+      category: "Loop",
+      surfaces: ["canvas"],
+      ...(projectGraph && projectGraph.nodes.length >= 2
+        ? connected && actions.openNewEdge
+          ? { enabled: true, execute: actions.openNewEdge }
+          : {
+              ...unavailable("Reconnect to graphcoded before creating an edge"),
+              execute: () => undefined,
+            }
+        : {
+            ...unavailable("The selected project needs at least two loops"),
+            execute: () => undefined,
+          }),
+    },
+    {
       id: "view.zoomOut",
       label: "Zoom Out",
       description: "Reduce the selected graph viewport",
@@ -613,6 +638,33 @@ export function createProjectRowCommands(
         : {
             ...unavailable(
               "Reconnect to graphcoded before deleting this project's graph",
+            ),
+            execute: () => undefined,
+          }),
+    },
+  ];
+}
+
+export function createEdgeCommands(
+  connected: boolean,
+  edgeId: string | undefined,
+  actions: EdgeCommandActions,
+): AppCommand[] {
+  return [
+    {
+      id: "edge.delete",
+      label: "Delete Edge",
+      description: "Permanently remove the selected graph connection",
+      category: "Loop",
+      surfaces: [],
+      danger: true,
+      ...(edgeId && connected && actions.deleteEdge
+        ? { enabled: true, execute: actions.deleteEdge }
+        : {
+            ...unavailable(
+              edgeId
+                ? "Reconnect to graphcoded before deleting this edge"
+                : "This legacy edge has no stable ID and cannot be deleted",
             ),
             execute: () => undefined,
           }),

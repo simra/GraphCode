@@ -15,6 +15,7 @@ import { pickProjectFolder } from "./bridge/projects";
 import {
   commandMatchesShortcut,
   createCommandRegistry,
+  createEdgeCommands,
   createProjectRowCommands,
   isEditableTarget,
   type AppCommand,
@@ -32,6 +33,7 @@ import { LoopTextDialog } from "./components/LoopTextDialog";
 import { MailroomPostDialog } from "./components/MailroomPostDialog";
 import { MessageLoopDialog } from "./components/MessageLoopDialog";
 import { NewLoopDialog } from "./components/NewLoopDialog";
+import { NewEdgeDialog } from "./components/NewEdgeDialog";
 import { NodeInspector } from "./components/NodeInspector";
 import { ProjectRowActions } from "./components/ProjectRowActions";
 import { initialSnapshotFixture } from "./fixtures/initialSnapshot";
@@ -39,8 +41,10 @@ import {
   armCompositeCommand,
   closeProjectCommand,
   completeNodeCommand,
+  createEdgeCommand,
   createNodeCommand,
   deleteNodeCommand,
+  deleteEdgeCommand,
   deleteProjectGraphCommand,
   forgetProjectCommand,
   mailboxCommand,
@@ -64,6 +68,7 @@ export default function App() {
   const [state, dispatch] = useReducer(appReducer, initialAppState);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [newLoopOpen, setNewLoopOpen] = useState(false);
+  const [newEdgeOpen, setNewEdgeOpen] = useState(false);
   const [editingLoop, setEditingLoop] = useState<{
     projectPath: string;
     node: NonNullable<ReturnType<typeof selectedNode>>;
@@ -190,6 +195,7 @@ export default function App() {
               }
             : undefined,
         openNewLoop: () => setNewLoopOpen(true),
+        openNewEdge: () => setNewEdgeOpen(true),
         clearSelection: () => dispatch({ type: "clearNodeSelection" }),
         selectNode: (nodeId) => {
           if (!state.selectedProjectPath) return;
@@ -666,6 +672,37 @@ export default function App() {
             commands={canvasCommands}
             pendingCommandId={pendingCommandId}
             onExecuteCommand={(command) => void executeCommand(command)}
+            edgeCommands={(edge) =>
+              createEdgeCommands(
+                state.connection.phase === "connected",
+                edge.id,
+                {
+                  deleteEdge: edge.id
+                    ? async () => {
+                        if (!selectedProjectPath || !edge.id) return;
+                        const from =
+                          selectedGraph?.nodes.find(
+                            (node) => node.id === edge.from,
+                          )?.title ?? edge.from;
+                        const to =
+                          selectedGraph?.nodes.find(
+                            (node) => node.id === edge.to,
+                          )?.title ?? edge.to;
+                        if (
+                          !window.confirm(
+                            `Delete the edge from "${from}" to "${to}"? This cannot be undone.`,
+                          )
+                        ) {
+                          return;
+                        }
+                        await sendDaemonCommand(
+                          deleteEdgeCommand(selectedProjectPath, edge.id),
+                        );
+                      }
+                    : undefined,
+                },
+              )
+            }
             onSelectNode={(nodeId) => {
               if (!state.selectedProjectPath) return;
               dispatch({
@@ -714,6 +751,18 @@ export default function App() {
               setPendingCreatedNode(undefined);
               throw error;
             }
+          }}
+        />
+      ) : null}
+      {newEdgeOpen && selectedGraph && selectedProjectPath ? (
+        <NewEdgeDialog
+          nodes={selectedGraph.nodes}
+          initialFrom={inspectedNode?.id}
+          onClose={() => setNewEdgeOpen(false)}
+          onCreate={async (from, to, spec) => {
+            await sendDaemonCommand(
+              createEdgeCommand(selectedProjectPath, from, to, spec),
+            );
           }}
         />
       ) : null}

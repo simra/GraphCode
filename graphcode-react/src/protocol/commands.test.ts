@@ -3,9 +3,11 @@ import {
   armCompositeCommand,
   closeProjectCommand,
   completeNodeCommand,
+  createEdgeCommand,
   createNodeCommand,
   deleteProjectGraphCommand,
   deleteNodeCommand,
+  deleteEdgeCommand,
   forgetProjectCommand,
   mailboxCommand,
   mailroomPostCommand,
@@ -227,6 +229,52 @@ describe("daemon commands", () => {
             from: null,
           },
         },
+      },
+    });
+  });
+
+  it("encodes edge create and delete with the complete existing spec", () => {
+    const project = "C:\\work\\graph";
+    expect(
+      createEdgeCommand(project, "source", "target", {
+        kind: "handoff",
+        condition: "onSuccess",
+        payloadTransform: { template: { _0: "payload {{output}}" } },
+        cycleGuard: {
+          maxIterations: 3,
+          until: "test -f done",
+          stopAfterPassesWithoutImprovement: 2,
+        },
+        spawnTargetProjectPath: null,
+      }),
+    ).toEqual({
+      graphCommand: {
+        projectPath: project,
+        command: {
+          createEdge: {
+            from: "source",
+            to: "target",
+            spec: {
+              kind: "handoff",
+              condition: "onSuccess",
+              payloadTransform: {
+                template: { _0: "payload {{output}}" },
+              },
+              cycleGuard: {
+                maxIterations: 3,
+                until: "test -f done",
+                stopAfterPassesWithoutImprovement: 2,
+              },
+              spawnTargetProjectPath: null,
+            },
+          },
+        },
+      },
+    });
+    expect(deleteEdgeCommand(project, "edge")).toEqual({
+      graphCommand: {
+        projectPath: project,
+        command: { deleteEdge: { _0: "edge" } },
       },
     });
   });

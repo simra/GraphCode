@@ -168,6 +168,37 @@ export type MailroomPostCommand = GraphCommandEnvelope<{
   };
 }>;
 
+export type EdgeKindPayload = "handoff" | "message" | "spawn";
+export type EdgeConditionPayload = "always" | "onSuccess" | "onFailure";
+export type PayloadTransformPayload =
+  | { none: Record<string, never> }
+  | { template: { _0: string } }
+  | { script: { _0: string } };
+
+export interface EdgeSpecPayload {
+  kind: EdgeKindPayload;
+  condition: EdgeConditionPayload;
+  payloadTransform: PayloadTransformPayload;
+  cycleGuard: {
+    maxIterations: number | null;
+    until: string | null;
+    stopAfterPassesWithoutImprovement: number | null;
+  } | null;
+  spawnTargetProjectPath: string | null;
+}
+
+export type CreateEdgeCommand = GraphCommandEnvelope<{
+  createEdge: {
+    from: string;
+    to: string;
+    spec: EdgeSpecPayload;
+  };
+}>;
+
+export type DeleteEdgeCommand = GraphCommandEnvelope<{
+  deleteEdge: { _0: string };
+}>;
+
 export function stopNodeCommand(
   projectPath: string,
   nodeId: string,
@@ -385,6 +416,32 @@ export function mailroomPostCommand(
       command: {
         mailroomPost: { text, topic, from: null },
       },
+    },
+  };
+}
+
+export function createEdgeCommand(
+  projectPath: string,
+  from: string,
+  to: string,
+  spec: EdgeSpecPayload,
+): CreateEdgeCommand {
+  return {
+    graphCommand: {
+      projectPath,
+      command: { createEdge: { from, to, spec } },
+    },
+  };
+}
+
+export function deleteEdgeCommand(
+  projectPath: string,
+  edgeId: string,
+): DeleteEdgeCommand {
+  return {
+    graphCommand: {
+      projectPath,
+      command: { deleteEdge: { _0: edgeId } },
     },
   };
 }
