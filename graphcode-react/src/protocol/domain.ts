@@ -94,6 +94,10 @@ export interface Mailbox {
   prunedUnread: number;
 }
 
+export interface MailroomWatch {
+  topic?: string;
+}
+
 export interface LoopSummary {
   beats: unknown[];
   passes: unknown[];
@@ -134,7 +138,7 @@ export interface LoopNode {
   createdFromTemplateID?: string;
   templateFollow?: TemplateFollow;
   lastMailroomRead?: number;
-  mailroomWatch?: EncodedEnum;
+  mailroomWatch?: MailroomWatch;
   stallReason?: string;
   launchFailure?: EncodedEnum;
   resolution?: EncodedEnum;

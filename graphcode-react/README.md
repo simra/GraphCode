@@ -50,3 +50,7 @@ Composite snapshots can be drilled into through breadcrumbs, and graph mutations
 that view are wrapped through the authoritative `subGraphCommand` parent chain.
 Playbook refine and rollback use the existing daemon commands; current playbook and
 rollback-history reads remain blocked on DT-001.
+The inspector can load the whole Mailroom board, search it, query a selected loop's
+unread slice with or without an atomic cursor advance, post within the protocol byte
+limits, and configure that loop's all-post/topic/off watch. Nested Mailroom ownership
+is not established, so those controls fail closed while drilled into a composite.

@@ -32,6 +32,7 @@ import { EditLoopDialog } from "./components/EditLoopDialog";
 import { GraphCanvas, type GraphCanvasHandle } from "./components/GraphCanvas";
 import { LoopTextDialog } from "./components/LoopTextDialog";
 import { MailroomPostDialog } from "./components/MailroomPostDialog";
+import { MailroomWatchDialog } from "./components/MailroomWatchDialog";
 import { MessageLoopDialog } from "./components/MessageLoopDialog";
 import { NewLoopDialog } from "./components/NewLoopDialog";
 import { NewQuickChatDialog } from "./components/NewQuickChatDialog";
@@ -54,7 +55,10 @@ import {
   deleteProjectGraphCommand,
   forgetProjectCommand,
   mailboxCommand,
+  mailboxSearchCommand,
+  mailboxUnreadCommand,
   mailroomPostCommand,
+  mailroomWatchCommand,
   memoNodeCommand,
   messageNodeCommand,
   openQuickChatCommand,
@@ -100,6 +104,13 @@ export default function App() {
     projectPath: string;
     projectName: string;
   }>();
+  const [mailroomWatching, setMailroomWatching] = useState<{
+    projectPath: string;
+    nodeId: string;
+    nodeTitle: string;
+    currentTopic?: string;
+    watching: boolean;
+  }>();
   const [pendingCreatedNode, setPendingCreatedNode] = useState<{
     projectPath: string;
     nodeId: string;
@@ -113,7 +124,7 @@ export default function App() {
   }>();
   const [textDialog, setTextDialog] = useState<
     | {
-        kind: "rename" | "complete" | "memo" | "refine";
+        kind: "rename" | "complete" | "memo" | "refine" | "mailSearch";
         projectPath: string;
         nodeId: string;
         nodeTitle: string;
@@ -380,6 +391,58 @@ export default function App() {
               await sendDaemonCommand(mailboxCommand(selectedProjectPath));
             }
           : undefined,
+        loadUnreadMailroom:
+          selectedProjectPath && inspectedNode && !state.compositePath.length
+            ? async () => {
+                await sendDaemonCommand(
+                  mailboxUnreadCommand(
+                    selectedProjectPath,
+                    inspectedNode.id,
+                    false,
+                  ),
+                );
+              }
+            : undefined,
+        markUnreadMailroomRead:
+          selectedProjectPath && inspectedNode && !state.compositePath.length
+            ? async () => {
+                if (
+                  !window.confirm(
+                    `Load unread Mailroom posts for "${inspectedNode.title}" and atomically advance its cursor through the delivered slice?`,
+                  )
+                ) {
+                  return;
+                }
+                await sendDaemonCommand(
+                  mailboxUnreadCommand(
+                    selectedProjectPath,
+                    inspectedNode.id,
+                    true,
+                  ),
+                );
+              }
+            : undefined,
+        searchMailroom:
+          selectedProjectPath && inspectedNode && !state.compositePath.length
+            ? () =>
+                setTextDialog({
+                  kind: "mailSearch",
+                  projectPath: selectedProjectPath,
+                  nodeId: inspectedNode.id,
+                  nodeTitle: inspectedNode.title,
+                })
+            : undefined,
+        configureMailroomWatch:
+          selectedProjectPath && inspectedNode && !state.compositePath.length
+            ? () =>
+                setMailroomWatching({
+                  projectPath: selectedProjectPath,
+                  nodeId: inspectedNode.id,
+                  nodeTitle: inspectedNode.title,
+                  currentTopic: inspectedNode.mailroomWatch?.topic,
+                  watching: Boolean(inspectedNode.mailroomWatch),
+                })
+            : undefined,
         postMailroom:
           selectedProjectPath && selectedGraph
             ? () =>
@@ -1088,6 +1151,24 @@ export default function App() {
           }}
         />
       ) : null}
+      {mailroomWatching ? (
+        <MailroomWatchDialog
+          nodeTitle={mailroomWatching.nodeTitle}
+          currentTopic={mailroomWatching.currentTopic}
+          watching={mailroomWatching.watching}
+          onClose={() => setMailroomWatching(undefined)}
+          onSave={async (on, topic) => {
+            await sendDaemonCommand(
+              mailroomWatchCommand(
+                mailroomWatching.projectPath,
+                mailroomWatching.nodeId,
+                on,
+                topic,
+              ),
+            );
+          }}
+        />
+      ) : null}
       {textDialog?.kind === "rename" ? (
         <LoopTextDialog
           title={`Rename ${textDialog.nodeTitle}`}
@@ -1171,6 +1252,21 @@ export default function App() {
                   text,
                 ),
               ),
+            );
+          }}
+        />
+      ) : null}
+      {textDialog?.kind === "mailSearch" ? (
+        <LoopTextDialog
+          title={`Search ${selectedGraph?.project.name ?? "Mailroom"}`}
+          description="Filter the project board case-insensitively across author, topic, and complete post body. The read does not move any loop cursor."
+          label="Search text"
+          required
+          submitLabel="Search"
+          onClose={() => setTextDialog(undefined)}
+          onSubmit={async (search) => {
+            await sendDaemonCommand(
+              mailboxSearchCommand(textDialog.projectPath, search),
             );
           }}
         />

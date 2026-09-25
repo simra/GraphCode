@@ -349,7 +349,13 @@ export function NodeInspector({
           <Detail label="Last read post" value={node.lastMailroomRead} />
           <Detail
             label="Mailroom watch"
-            value={enumLabel(node.mailroomWatch)}
+            value={
+              node.mailroomWatch
+                ? node.mailroomWatch.topic
+                  ? `Topic: ${node.mailroomWatch.topic}`
+                  : "All posts"
+                : "Off"
+            }
           />
           <Detail
             label="Memory history"
@@ -381,6 +387,16 @@ export function NodeInspector({
                 Bodies were triaged by the daemon; refresh requests full bodies.
               </p>
             ) : null}
+            <dl>
+              <Detail label="Room posts" value={mailbox.digest.count} />
+              <Detail label="Cursor before read" value={mailbox.lastRead} />
+              <Detail
+                label="Highest delivered"
+                value={mailbox.highestDeliveredID}
+              />
+              <Detail label="Unread remaining" value={mailbox.remaining} />
+              <Detail label="Pruned unread" value={mailbox.prunedUnread} />
+            </dl>
           </section>
         ) : null}
 

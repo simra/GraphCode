@@ -150,6 +150,12 @@ const mailboxSchema: z.ZodType<Mailbox> = z.object({
   prunedUnread: z.number().int().nonnegative().default(0),
 });
 
+const mailroomWatchSchema = z
+  .object({
+    topic: optional(z.string()),
+  })
+  .passthrough();
+
 const loopNodeSchema: z.ZodType<LoopNode> = z.lazy(() =>
   z
     .object({
@@ -177,7 +183,7 @@ const loopNodeSchema: z.ZodType<LoopNode> = z.lazy(() =>
       createdFromTemplateID: optional(uuidLike),
       templateFollow: optional(templateFollowSchema),
       lastMailroomRead: optional(z.number().int()),
-      mailroomWatch: optional(encodedEnum),
+      mailroomWatch: optional(mailroomWatchSchema),
       stallReason: optional(z.string()),
       launchFailure: optional(encodedEnum),
       resolution: optional(encodedEnum),

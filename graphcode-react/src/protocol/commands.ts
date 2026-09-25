@@ -193,15 +193,22 @@ export type ArmCompositeCommand = GraphCommandEnvelope<{
   armComposite: { _0: string };
 }>;
 
+export type MailboxSelectionPayload =
+  | { board: Record<string, never> }
+  | { unread: { reader: string } }
+  | { post: { id: number } };
+
+export interface MailboxQueryPayload {
+  selection: MailboxSelectionPayload;
+  search: string | null;
+  fullBodies: boolean | null;
+  advanceCursor: boolean | null;
+}
+
 export interface MailboxCommand {
   mailbox: {
     projectPath: string;
-    query: {
-      selection: { board: Record<string, never> };
-      search: null;
-      fullBodies: true;
-      advanceCursor: null;
-    };
+    query: MailboxQueryPayload;
   };
 }
 
@@ -210,6 +217,14 @@ export type MailroomPostCommand = GraphCommandEnvelope<{
     text: string;
     topic: string | null;
     from: null;
+  };
+}>;
+
+export type MailroomWatchCommand = GraphCommandEnvelope<{
+  mailroomWatch: {
+    on: boolean;
+    topic: string | null;
+    from: string;
   };
 }>;
 
@@ -508,18 +523,46 @@ export function armCompositeCommand(
   };
 }
 
-export function mailboxCommand(projectPath: string): MailboxCommand {
+export function mailboxCommand(
+  projectPath: string,
+  query: MailboxQueryPayload = {
+    selection: { board: {} },
+    search: null,
+    fullBodies: true,
+    advanceCursor: null,
+  },
+): MailboxCommand {
   return {
     mailbox: {
       projectPath,
-      query: {
-        selection: { board: {} },
-        search: null,
-        fullBodies: true,
-        advanceCursor: null,
-      },
+      query,
     },
   };
+}
+
+export function mailboxSearchCommand(
+  projectPath: string,
+  search: string,
+): MailboxCommand {
+  return mailboxCommand(projectPath, {
+    selection: { board: {} },
+    search,
+    fullBodies: true,
+    advanceCursor: null,
+  });
+}
+
+export function mailboxUnreadCommand(
+  projectPath: string,
+  reader: string,
+  advanceCursor: boolean,
+): MailboxCommand {
+  return mailboxCommand(projectPath, {
+    selection: { unread: { reader } },
+    search: null,
+    fullBodies: null,
+    advanceCursor,
+  });
 }
 
 export function mailroomPostCommand(
@@ -532,6 +575,22 @@ export function mailroomPostCommand(
       projectPath,
       command: {
         mailroomPost: { text, topic, from: null },
+      },
+    },
+  };
+}
+
+export function mailroomWatchCommand(
+  projectPath: string,
+  nodeId: string,
+  on: boolean,
+  topic: string | null,
+): MailroomWatchCommand {
+  return {
+    graphCommand: {
+      projectPath,
+      command: {
+        mailroomWatch: { on, topic, from: nodeId },
       },
     },
   };
