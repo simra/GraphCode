@@ -10,6 +10,7 @@ import {
   type NewLoopFormState,
 } from "../forms/newLoop";
 import type { NodeDraftPayload } from "../protocol/commands";
+import { useDialogFocus } from "./dialogFocus";
 
 const stepNames = ["Shape", "Brief", "Execution", "Review"] as const;
 
@@ -49,7 +50,7 @@ export function NewLoopDialog({
   const [errors, setErrors] = useState<NewLoopErrors>({});
   const [submitError, setSubmitError] = useState<string>();
   const [submitting, setSubmitting] = useState(false);
-  const dialogRef = useRef<HTMLElement>(null);
+  const titleRef = useRef<HTMLInputElement>(null);
   const dirty = useMemo(
     () => JSON.stringify(form) !== JSON.stringify(initialNewLoopForm),
     [form],
@@ -77,6 +78,12 @@ export function NewLoopDialog({
     }
     onClose();
   }
+
+  const { dialogRef, handleDialogKeyDown } = useDialogFocus({
+    canClose: !submitting,
+    initialFocusRef: titleRef,
+    onClose: requestClose,
+  });
 
   function validateStep(targetStep: number): boolean {
     const nextErrors = validateNewLoop(form);
@@ -141,11 +148,7 @@ export function NewLoopDialog({
         aria-modal="true"
         aria-labelledby="new-loop-title"
         onKeyDown={(event) => {
-          if (event.key === "Escape") {
-            event.preventDefault();
-            requestClose();
-            return;
-          }
+          if (handleDialogKeyDown(event)) return;
           if (event.ctrlKey && event.key === "Enter") {
             event.preventDefault();
             if (step === stepNames.length - 1) {
@@ -154,22 +157,6 @@ export function NewLoopDialog({
               setStep((current) => current + 1);
             }
             return;
-          }
-          if (event.key !== "Tab") return;
-          const focusable = [
-            ...(dialogRef.current?.querySelectorAll<HTMLElement>(
-              'button:not(:disabled), input:not(:disabled), textarea:not(:disabled), select:not(:disabled), [tabindex="0"]',
-            ) ?? []),
-          ];
-          if (!focusable.length) return;
-          const first = focusable[0];
-          const last = focusable.at(-1)!;
-          if (event.shiftKey && document.activeElement === first) {
-            event.preventDefault();
-            last.focus();
-          } else if (!event.shiftKey && document.activeElement === last) {
-            event.preventDefault();
-            first.focus();
           }
         }}
       >
@@ -248,6 +235,7 @@ export function NewLoopDialog({
                     : " (optional)"}
                 </span>
                 <input
+                  ref={titleRef}
                   autoFocus
                   value={form.title}
                   onChange={(event) =>

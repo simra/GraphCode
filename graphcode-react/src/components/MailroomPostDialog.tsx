@@ -1,4 +1,5 @@
-import { useEffect, useRef, useState } from "react";
+import { useRef, useState } from "react";
+import { useDialogFocus } from "./dialogFocus";
 
 const encoder = new TextEncoder();
 
@@ -15,12 +16,12 @@ export function MailroomPostDialog({
   const [body, setBody] = useState("");
   const [error, setError] = useState<string>();
   const [submitting, setSubmitting] = useState(false);
-  const dialogRef = useRef<HTMLElement>(null);
   const bodyRef = useRef<HTMLTextAreaElement>(null);
-
-  useEffect(() => {
-    bodyRef.current?.focus();
-  }, []);
+  const { dialogRef, handleDialogKeyDown } = useDialogFocus({
+    canClose: !submitting,
+    initialFocusRef: bodyRef,
+    onClose,
+  });
 
   async function submit() {
     const trimmedBody = body.trim();
@@ -58,28 +59,10 @@ export function MailroomPostDialog({
         aria-modal="true"
         aria-labelledby="mailroom-post-title"
         onKeyDown={(event) => {
-          if (event.key === "Escape" && !submitting) {
-            event.preventDefault();
-            onClose();
-          } else if (event.ctrlKey && event.key === "Enter" && !submitting) {
+          if (handleDialogKeyDown(event)) return;
+          if (event.ctrlKey && event.key === "Enter" && !submitting) {
             event.preventDefault();
             void submit();
-          } else if (event.key === "Tab") {
-            const focusable = [
-              ...(dialogRef.current?.querySelectorAll<HTMLElement>(
-                'button:not(:disabled), input:not(:disabled), textarea:not(:disabled), [tabindex="0"]',
-              ) ?? []),
-            ];
-            if (!focusable.length) return;
-            const first = focusable[0];
-            const last = focusable.at(-1)!;
-            if (event.shiftKey && document.activeElement === first) {
-              event.preventDefault();
-              last.focus();
-            } else if (!event.shiftKey && document.activeElement === last) {
-              event.preventDefault();
-              first.focus();
-            }
           }
         }}
       >

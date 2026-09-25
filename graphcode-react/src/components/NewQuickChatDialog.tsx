@@ -1,5 +1,6 @@
-import { useEffect, useRef, useState } from "react";
+import { useRef, useState } from "react";
 import type { DraftBackend } from "../protocol/commands";
+import { useDialogFocus } from "./dialogFocus";
 
 const backendOptions: Array<{ value: DraftBackend; label: string }> = [
   { value: "claudeCode", label: "Claude Code" },
@@ -20,12 +21,12 @@ export function NewQuickChatDialog({
   const [backend, setBackend] = useState<DraftBackend>("claudeCode");
   const [error, setError] = useState<string>();
   const [submitting, setSubmitting] = useState(false);
-  const dialogRef = useRef<HTMLElement>(null);
   const titleRef = useRef<HTMLInputElement>(null);
-
-  useEffect(() => {
-    titleRef.current?.focus();
-  }, []);
+  const { dialogRef, handleDialogKeyDown } = useDialogFocus({
+    canClose: !submitting,
+    initialFocusRef: titleRef,
+    onClose,
+  });
 
   async function submit() {
     const trimmed = title.trim();
@@ -54,28 +55,10 @@ export function NewQuickChatDialog({
         aria-modal="true"
         aria-labelledby="new-quick-chat-title"
         onKeyDown={(event) => {
-          if (event.key === "Escape" && !submitting) {
-            event.preventDefault();
-            onClose();
-          } else if (event.key === "Enter" && !submitting) {
+          if (handleDialogKeyDown(event)) return;
+          if (event.key === "Enter" && !submitting) {
             event.preventDefault();
             void submit();
-          } else if (event.key === "Tab") {
-            const focusable = [
-              ...(dialogRef.current?.querySelectorAll<HTMLElement>(
-                'button:not(:disabled), input:not(:disabled), select:not(:disabled), [tabindex="0"]',
-              ) ?? []),
-            ];
-            if (!focusable.length) return;
-            const first = focusable[0];
-            const last = focusable.at(-1)!;
-            if (event.shiftKey && document.activeElement === first) {
-              event.preventDefault();
-              last.focus();
-            } else if (!event.shiftKey && document.activeElement === last) {
-              event.preventDefault();
-              first.focus();
-            }
           }
         }}
       >
