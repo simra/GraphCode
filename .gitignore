@@ -44,6 +44,12 @@ zig-out/
 # Browser-automation scratch (snapshots, screenshots, console dumps)
 .playwright-mcp/
 
+# React/Tauri client
+node_modules/
+dist/
+graphcode-react/src-tauri/target/
+graphcode-react/src-tauri/gen/schemas/
+
 # Signing material must never land in the repo. The Developer ID private key
 # lives in ~/Developer/certificates and in the login keychain, nowhere else.
 *.key

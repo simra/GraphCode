@@ -1,1 +1,4 @@
 *.swift text eol=lf
+graphcode-react/** text eol=lf
+graphcode-react/src-tauri/icons/*.ico binary
+investigation/react-tauri-implementation-plan.md text eol=lf
