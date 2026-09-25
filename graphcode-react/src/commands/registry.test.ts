@@ -101,4 +101,18 @@ describe("command registry", () => {
     expect(command?.label).toBe("Resume Session");
     expect(command?.enabled).toBe(true);
   });
+
+  it("enables native folder ingress only when its action is available", () => {
+    const openProjectFolder = vi.fn(async () => undefined);
+    const commands = createCommandRegistry(stateWithSelectedNode(), {
+      openPalette: vi.fn(),
+      openProjectFolder,
+      clearSelection: vi.fn(),
+      selectNode: vi.fn(),
+    });
+
+    expect(
+      commands.find((command) => command.id === "project.openFolder")?.enabled,
+    ).toBe(true);
+  });
 });
