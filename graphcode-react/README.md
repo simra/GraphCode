@@ -74,3 +74,7 @@ composite.
 The selected project's sidebar entry expands into a nested root/composite loop
 hierarchy. Sidebar selection, composite routing, canvas selection, breadcrumbs, and
 the inspector share the same reducer-validated graph location.
+
+Run `npm run test:a11y` for the axe-core/jsdom semantic gate. The packaged Windows
+Narrator, touch, DPI, contrast-theme, and focus-restoration procedure is documented in
+[`ACCESSIBILITY.md`](ACCESSIBILITY.md).
