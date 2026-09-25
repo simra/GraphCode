@@ -1357,6 +1357,14 @@ kbd {
   box-shadow: 0 20px 60px rgba(0, 0, 0, 0.24);
 }
 
+.edge-inspector .inspector-actions {
+  grid-template-columns: 1fr;
+}
+
+.edge-inspector .inspector-callout {
+  margin: 16px 0 0;
+}
+
 .inspector-empty {
   min-height: 300px;
   justify-content: center;
