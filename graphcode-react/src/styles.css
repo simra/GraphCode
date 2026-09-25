@@ -873,6 +873,14 @@ kbd {
   outline: none;
 }
 
+.graph-edge-preview {
+  fill: none;
+  stroke: #b9d5ae;
+  stroke-dasharray: 8 6;
+  stroke-width: 3;
+  pointer-events: none;
+}
+
 .canvas-toolbar .danger-command {
   color: #ffaaa2;
   border-color: #6d3e39;
@@ -897,6 +905,23 @@ kbd {
   cursor: pointer;
 }
 
+.edge-drag-handle {
+  fill: #20241e;
+  stroke: #9ecb91;
+  stroke-width: 3;
+  cursor: crosshair;
+  opacity: 0.7;
+  transition:
+    fill 120ms ease,
+    opacity 120ms ease;
+}
+
+.graph-node:hover .edge-drag-handle,
+.edge-drag-handle:hover {
+  fill: #9ecb91;
+  opacity: 1;
+}
+
 .visually-hidden {
   position: absolute;
   width: 1px;
@@ -913,6 +938,16 @@ kbd {
   fill: #232a21;
   stroke: #9ecb91;
   stroke-width: 2.5;
+}
+
+.graph-node-edge-source rect:first-child {
+  stroke-dasharray: 6 4;
+}
+
+.graph-node-edge-target rect:first-child {
+  fill: #293426;
+  stroke: #d5e8cf;
+  stroke-width: 4;
 }
 
 .node-stripe {

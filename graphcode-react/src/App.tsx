@@ -91,6 +91,10 @@ export default function App() {
   const [newLoopOpen, setNewLoopOpen] = useState(false);
   const [newQuickChatOpen, setNewQuickChatOpen] = useState(false);
   const [newEdgeOpen, setNewEdgeOpen] = useState(false);
+  const [newEdgeEndpoints, setNewEdgeEndpoints] = useState<{
+    from?: string;
+    to?: string;
+  }>();
   const [editingLoop, setEditingLoop] = useState<{
     projectPath: string;
     node: NonNullable<ReturnType<typeof selectedNode>>;
@@ -248,7 +252,10 @@ export default function App() {
             : undefined,
         openNewLoop: () => setNewLoopOpen(true),
         openNewQuickChat: () => setNewQuickChatOpen(true),
-        openNewEdge: () => setNewEdgeOpen(true),
+        openNewEdge: () => {
+          setNewEdgeEndpoints({ from: inspectedNode?.id });
+          setNewEdgeOpen(true);
+        },
         clearSelection: () => dispatch({ type: "clearNodeSelection" }),
         selectNode: (nodeId) => {
           if (!state.selectedProjectPath) return;
@@ -981,6 +988,14 @@ export default function App() {
               commands={canvasCommands}
               pendingCommandId={pendingCommandId}
               onExecuteCommand={(command) => void executeCommand(command)}
+              onCreateEdge={
+                state.connection.phase === "connected"
+                  ? (from, to) => {
+                      setNewEdgeEndpoints({ from, to });
+                      setNewEdgeOpen(true);
+                    }
+                  : undefined
+              }
               edgeCommands={(edge) =>
                 createEdgeCommands(
                   state.connection.phase === "connected",
@@ -1090,9 +1105,14 @@ export default function App() {
       ) : null}
       {newEdgeOpen && selectedGraph && selectedProjectPath ? (
         <NewEdgeDialog
+          key={`${newEdgeEndpoints?.from ?? ""}-${newEdgeEndpoints?.to ?? ""}`}
           nodes={selectedGraph.nodes}
-          initialFrom={inspectedNode?.id}
-          onClose={() => setNewEdgeOpen(false)}
+          initialFrom={newEdgeEndpoints?.from}
+          initialTo={newEdgeEndpoints?.to}
+          onClose={() => {
+            setNewEdgeOpen(false);
+            setNewEdgeEndpoints(undefined);
+          }}
           onCreate={async (from, to, spec) => {
             await sendDaemonCommand(
               routeGraphCommand(
