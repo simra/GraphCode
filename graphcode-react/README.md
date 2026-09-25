@@ -40,8 +40,9 @@ The native bridge respects `GRAPHCODE_DAEMON_PIPE` (the Windows shell override),
 `GRAPHCODE_SUPPORT_DIR`. On Windows it otherwise derives the same
 SID/support-directory/rendezvous-secret pipe name as GraphcodeKit.
 
-The current slice negotiates protocol v2, announces `nodesChanged`, asks the daemon
-to restore open projects, loads recent projects, and returns the received snapshots
-to React. Reconnect/replay, long-lived event streaming, mutations, and terminal
-streaming are specified in
-`investigation/react-tauri-implementation-plan.md` but are not implemented yet.
+The client negotiates protocol v2, announces `nodesChanged`, restores open projects,
+loads recents and Quick Chats, opens the global graph, and maintains a persistent
+reconnecting event stream with replay acknowledgement. React mutations use the typed
+command registry and wait for correlated daemon outcomes. Quick Chat list, create,
+open, rename, delete, activity, and navigation are implemented; the opened workspace
+explicitly remains non-interactive until the local zmx terminal bridge is available.

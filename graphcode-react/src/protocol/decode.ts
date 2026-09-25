@@ -5,6 +5,8 @@ import type {
   LoopGraph,
   LoopNode,
   Mailbox,
+  QuickChat,
+  QuickChatActivity,
 } from "./domain";
 
 const uuidLike = z.string().min(1);
@@ -29,6 +31,24 @@ const presenceSchema = z
     confidence: z.string().optional(),
     observedAt: z.union([z.string(), z.number()]).optional(),
     exitCode: optional(z.number().int()),
+  })
+  .passthrough();
+
+const quickChatActivitySchema: z.ZodType<QuickChatActivity> = z
+  .object({
+    sequence: z.number().int().nonnegative(),
+    text: optional(z.string()),
+    presence: optional(presenceSchema),
+  })
+  .passthrough();
+
+const quickChatSchema: z.ZodType<QuickChat> = z
+  .object({
+    id: uuidLike,
+    title: z.string(),
+    backend: z.string().min(1),
+    createdAt: z.union([z.string(), z.number()]),
+    activity: optional(quickChatActivitySchema),
   })
   .passthrough();
 
@@ -267,6 +287,30 @@ function decodeEvent(raw: Record<string, unknown>): DaemonEvent {
       };
     case "nodesChanged":
       return { type: name, change: nodesChangedSchema.parse(payload) };
+    case "quickChatsListed":
+      return {
+        type: name,
+        chats: z.array(quickChatSchema).parse(singleAssociatedValue(payload)),
+      };
+    case "quickChatChanged":
+      return {
+        type: name,
+        chat: quickChatSchema.parse(singleAssociatedValue(payload)),
+      };
+    case "quickChatDeleted":
+      return {
+        type: name,
+        id: uuidLike.parse(singleAssociatedValue(payload)),
+      };
+    case "quickChatActivity": {
+      const decoded = z
+        .object({
+          id: uuidLike,
+          activity: quickChatActivitySchema,
+        })
+        .parse(payload);
+      return { type: name, ...decoded };
+    }
     case "mailbox": {
       const decoded = z
         .object({

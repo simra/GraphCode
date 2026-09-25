@@ -17,6 +17,36 @@ export type DraftLoopType =
 export type DraftBackend =
   "claudeCode" | "copilotCLI" | "codex" | "openCode" | "pi";
 
+export interface ListQuickChatsCommand {
+  listQuickChats: Record<string, never>;
+}
+
+export interface CreateQuickChatCommand {
+  createQuickChat: {
+    title: string;
+    backend: DraftBackend;
+  };
+}
+
+export interface OpenQuickChatCommand {
+  openQuickChat: {
+    id: string;
+  };
+}
+
+export interface RenameQuickChatCommand {
+  renameQuickChat: {
+    id: string;
+    title: string;
+  };
+}
+
+export interface DeleteQuickChatCommand {
+  deleteQuickChat: {
+    id: string;
+  };
+}
+
 export type DraftModelTier = "fast" | "standard" | "capable";
 
 export interface GoalDraft {
@@ -209,6 +239,32 @@ export function stopNodeCommand(
       command: { stopNode: { _0: nodeId } },
     },
   };
+}
+
+export function listQuickChatsCommand(): ListQuickChatsCommand {
+  return { listQuickChats: {} };
+}
+
+export function createQuickChatCommand(
+  title: string,
+  backend: DraftBackend,
+): CreateQuickChatCommand {
+  return { createQuickChat: { title, backend } };
+}
+
+export function openQuickChatCommand(id: string): OpenQuickChatCommand {
+  return { openQuickChat: { id } };
+}
+
+export function renameQuickChatCommand(
+  id: string,
+  title: string,
+): RenameQuickChatCommand {
+  return { renameQuickChat: { id, title } };
+}
+
+export function deleteQuickChatCommand(id: string): DeleteQuickChatCommand {
+  return { deleteQuickChat: { id } };
 }
 
 export function createNodeCommand(

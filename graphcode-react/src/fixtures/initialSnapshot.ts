@@ -22,6 +22,27 @@ export const initialSnapshotFixture: DaemonWireEnvelope[] = [
     kind: "event",
     sequence: 2,
     event: {
+      type: "quickChatsListed",
+      chats: [
+        {
+          id: "77777777-7777-4777-8777-777777777777",
+          title: "Review the next frontend slice",
+          backend: "copilotCLI",
+          createdAt: "2026-09-25T12:00:00Z",
+          activity: {
+            sequence: 1,
+            text: "Ready for a focused question",
+            presence: { presence: "idle", confidence: "reported" },
+          },
+        },
+      ],
+    },
+  },
+  {
+    version: 2,
+    kind: "event",
+    sequence: 3,
+    event: {
       type: "graphChanged",
       graph: {
         id: "11111111-1111-4111-8111-111111111111",

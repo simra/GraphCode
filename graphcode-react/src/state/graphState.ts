@@ -5,6 +5,7 @@ import type {
   LoopNode,
   Mailbox,
   ProjectRef,
+  QuickChat,
 } from "../protocol/domain";
 
 export type ConnectionPhase =
@@ -26,6 +27,9 @@ export interface AppState {
   recentProjects: ProjectRef[];
   graphs: Record<string, LoopGraph>;
   mailboxes: Record<string, Mailbox>;
+  quickChats: QuickChat[];
+  quickChatsSelected: boolean;
+  selectedQuickChatId?: string;
   selectedProjectPath?: string;
   selectedNodeId?: string;
   lastSequence: number;
@@ -43,6 +47,8 @@ export type AppAction =
     }
   | { type: "connectionFailed"; message: string }
   | { type: "fixtureLoaded"; reason: string }
+  | { type: "selectQuickChats" }
+  | { type: "selectQuickChat"; id: string }
   | { type: "selectProject"; path: string }
   | {
       type: "projectRemoved";
@@ -58,6 +64,8 @@ export const initialAppState: AppState = {
   recentProjects: [],
   graphs: {},
   mailboxes: {},
+  quickChats: [],
+  quickChatsSelected: false,
   lastSequence: 0,
   protocolWarnings: [],
 };
@@ -111,6 +119,45 @@ function applyDaemonEvent(state: AppState, event: DaemonEvent): AppState {
         graphs: { ...state.graphs, [event.change.projectPath]: graph },
       };
     }
+    case "quickChatsListed": {
+      const selectedQuickChatId = event.chats.some(
+        (chat) => chat.id === state.selectedQuickChatId,
+      )
+        ? state.selectedQuickChatId
+        : undefined;
+      return { ...state, quickChats: event.chats, selectedQuickChatId };
+    }
+    case "quickChatChanged": {
+      const existingIndex = state.quickChats.findIndex(
+        (chat) => chat.id === event.chat.id,
+      );
+      const quickChats =
+        existingIndex === -1
+          ? [...state.quickChats, event.chat]
+          : state.quickChats.map((chat, index) =>
+              index === existingIndex ? event.chat : chat,
+            );
+      return { ...state, quickChats };
+    }
+    case "quickChatDeleted":
+      return {
+        ...state,
+        quickChats: state.quickChats.filter((chat) => chat.id !== event.id),
+        selectedQuickChatId:
+          state.selectedQuickChatId === event.id
+            ? undefined
+            : state.selectedQuickChatId,
+      };
+    case "quickChatActivity":
+      return {
+        ...state,
+        quickChats: state.quickChats.map((chat) =>
+          chat.id === event.id &&
+          (chat.activity?.sequence ?? -1) < event.activity.sequence
+            ? { ...chat, activity: event.activity }
+            : chat,
+        ),
+      };
     case "mailbox":
       return {
         ...state,
@@ -183,10 +230,28 @@ export function appReducer(state: AppState, action: AppAction): AppState {
           usingFixture: true,
         },
       };
+    case "selectQuickChats":
+      return {
+        ...state,
+        quickChatsSelected: true,
+        selectedQuickChatId: undefined,
+        selectedNodeId: undefined,
+      };
+    case "selectQuickChat":
+      return state.quickChats.some((chat) => chat.id === action.id)
+        ? {
+            ...state,
+            quickChatsSelected: true,
+            selectedQuickChatId: action.id,
+            selectedNodeId: undefined,
+          }
+        : state;
     case "selectProject":
       return state.graphs[action.path]
         ? {
             ...state,
+            quickChatsSelected: false,
+            selectedQuickChatId: undefined,
             selectedProjectPath: action.path,
             selectedNodeId:
               action.path === state.selectedProjectPath
@@ -228,6 +293,8 @@ export function appReducer(state: AppState, action: AppAction): AppState {
       return graph?.nodes.some((node) => node.id === action.nodeId)
         ? {
             ...state,
+            quickChatsSelected: false,
+            selectedQuickChatId: undefined,
             selectedProjectPath: action.projectPath,
             selectedNodeId: action.nodeId,
           }
@@ -272,4 +339,9 @@ export function selectedNode(state: AppState): LoopNode | undefined {
   return state.graphs[state.selectedProjectPath]?.nodes.find(
     (node) => node.id === state.selectedNodeId,
   );
+}
+
+export function selectedQuickChat(state: AppState): QuickChat | undefined {
+  if (!state.selectedQuickChatId) return undefined;
+  return state.quickChats.find((chat) => chat.id === state.selectedQuickChatId);
 }

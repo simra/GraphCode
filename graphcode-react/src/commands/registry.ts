@@ -7,6 +7,10 @@ export type CommandId =
   | "project.close"
   | "project.forget"
   | "project.deleteGraph"
+  | "chat.new"
+  | "chat.open"
+  | "chat.rename"
+  | "chat.delete"
   | "edge.new"
   | "edge.delete"
   | "loop.new"
@@ -61,6 +65,7 @@ export interface AppCommand {
 export interface CommandActions {
   openPalette(): void;
   openProjectFolder?(): Promise<void>;
+  openNewQuickChat?(): void;
   openNewLoop?(): void;
   clearSelection(): void;
   selectNode(nodeId: string): void;
@@ -92,6 +97,12 @@ export interface ProjectRowCommandActions {
 
 export interface EdgeCommandActions {
   deleteEdge?(): Promise<void>;
+}
+
+export interface QuickChatCommandActions {
+  openQuickChat?(): Promise<void>;
+  renameQuickChat?(): void;
+  deleteQuickChat?(): Promise<void>;
 }
 
 function unavailable(reason: string) {
@@ -165,6 +176,21 @@ export function createCommandRegistry(
               connected
                 ? "Folder selection requires the Tauri desktop client"
                 : "Reconnect to graphcoded before opening a project",
+            ),
+            execute: () => undefined,
+          }),
+    },
+    {
+      id: "chat.new",
+      label: "New Quick Chat",
+      description: "Create an ad-hoc daemon-owned chat session",
+      category: "Application",
+      surfaces: ["header"],
+      ...(connected && actions.openNewQuickChat
+        ? { enabled: true, execute: actions.openNewQuickChat }
+        : {
+            ...unavailable(
+              "Reconnect to graphcoded before creating a Quick Chat",
             ),
             execute: () => undefined,
           }),
@@ -666,6 +692,54 @@ export function createEdgeCommands(
                 ? "Reconnect to graphcoded before deleting this edge"
                 : "This legacy edge has no stable ID and cannot be deleted",
             ),
+            execute: () => undefined,
+          }),
+    },
+  ];
+}
+
+export function createQuickChatCommands(
+  connected: boolean,
+  actions: QuickChatCommandActions,
+): AppCommand[] {
+  return [
+    {
+      id: "chat.open",
+      label: "Open Chat",
+      description: "Start or reconnect to this chat's daemon-owned session",
+      category: "Application",
+      surfaces: [],
+      ...(connected && actions.openQuickChat
+        ? { enabled: true, execute: actions.openQuickChat }
+        : {
+            ...unavailable("Reconnect to graphcoded before opening this chat"),
+            execute: () => undefined,
+          }),
+    },
+    {
+      id: "chat.rename",
+      label: "Rename Chat",
+      description: "Change this chat's title without changing its identity",
+      category: "Application",
+      surfaces: [],
+      ...(connected && actions.renameQuickChat
+        ? { enabled: true, execute: actions.renameQuickChat }
+        : {
+            ...unavailable("Reconnect to graphcoded before renaming this chat"),
+            execute: () => undefined,
+          }),
+    },
+    {
+      id: "chat.delete",
+      label: "Delete Chat",
+      description: "Terminate this chat session and delete its durable record",
+      category: "Application",
+      surfaces: [],
+      danger: true,
+      ...(connected && actions.deleteQuickChat
+        ? { enabled: true, execute: actions.deleteQuickChat }
+        : {
+            ...unavailable("Reconnect to graphcoded before deleting this chat"),
             execute: () => undefined,
           }),
     },

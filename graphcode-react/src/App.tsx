@@ -17,6 +17,7 @@ import {
   createCommandRegistry,
   createEdgeCommands,
   createProjectRowCommands,
+  createQuickChatCommands,
   isEditableTarget,
   type AppCommand,
   type CommandId,
@@ -33,9 +34,11 @@ import { LoopTextDialog } from "./components/LoopTextDialog";
 import { MailroomPostDialog } from "./components/MailroomPostDialog";
 import { MessageLoopDialog } from "./components/MessageLoopDialog";
 import { NewLoopDialog } from "./components/NewLoopDialog";
+import { NewQuickChatDialog } from "./components/NewQuickChatDialog";
 import { NewEdgeDialog } from "./components/NewEdgeDialog";
 import { NodeInspector } from "./components/NodeInspector";
 import { ProjectRowActions } from "./components/ProjectRowActions";
+import { QuickChatsView } from "./components/QuickChatsView";
 import { initialSnapshotFixture } from "./fixtures/initialSnapshot";
 import {
   armCompositeCommand,
@@ -43,6 +46,8 @@ import {
   completeNodeCommand,
   createEdgeCommand,
   createNodeCommand,
+  createQuickChatCommand,
+  deleteQuickChatCommand,
   deleteNodeCommand,
   deleteEdgeCommand,
   deleteProjectGraphCommand,
@@ -51,23 +56,31 @@ import {
   mailroomPostCommand,
   memoNodeCommand,
   messageNodeCommand,
+  openQuickChatCommand,
   openProjectCommand,
   pilotCompositeCommand,
   refreshUsageCommand,
   renameNodeCommand,
+  renameQuickChatCommand,
   restartNodeCommand,
   resumeSessionCommand,
   stopNodeCommand,
   type NodeDraftPayload,
   updateNodeCommand,
 } from "./protocol/commands";
-import { appReducer, initialAppState, selectedNode } from "./state/graphState";
+import {
+  appReducer,
+  initialAppState,
+  selectedNode,
+  selectedQuickChat,
+} from "./state/graphState";
 import { deriveProjectNavigation } from "./state/projectNavigation";
 
 export default function App() {
   const [state, dispatch] = useReducer(appReducer, initialAppState);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [newLoopOpen, setNewLoopOpen] = useState(false);
+  const [newQuickChatOpen, setNewQuickChatOpen] = useState(false);
   const [newEdgeOpen, setNewEdgeOpen] = useState(false);
   const [editingLoop, setEditingLoop] = useState<{
     projectPath: string;
@@ -89,6 +102,10 @@ export default function App() {
   const [pendingCommandId, setPendingCommandId] = useState<CommandId>();
   const [commandError, setCommandError] = useState<string>();
   const [openingProjectPath, setOpeningProjectPath] = useState<string>();
+  const [renamingQuickChat, setRenamingQuickChat] = useState<{
+    id: string;
+    title: string;
+  }>();
   const [textDialog, setTextDialog] = useState<
     | {
         kind: "rename" | "complete" | "memo";
@@ -153,6 +170,7 @@ export default function App() {
     : undefined;
   const selectedProjectPath = state.selectedProjectPath;
   const inspectedNode = selectedNode(state);
+  const inspectedQuickChat = selectedQuickChat(state);
   const inspectedNodeState =
     typeof inspectedNode?.state === "string"
       ? inspectedNode.state
@@ -195,6 +213,7 @@ export default function App() {
               }
             : undefined,
         openNewLoop: () => setNewLoopOpen(true),
+        openNewQuickChat: () => setNewQuickChatOpen(true),
         openNewEdge: () => setNewEdgeOpen(true),
         clearSelection: () => dispatch({ type: "clearNodeSelection" }),
         selectNode: (nodeId) => {
@@ -408,6 +427,41 @@ export default function App() {
     }
   }, []);
 
+  function quickChatCommands(chat: (typeof state.quickChats)[number]) {
+    return createQuickChatCommands(state.connection.phase === "connected", {
+      openQuickChat: async () => {
+        const response = await sendDaemonCommand(openQuickChatCommand(chat.id));
+        if (
+          response.kind === "response" &&
+          response.event?.type === "quickChatChanged"
+        ) {
+          dispatch({ type: "envelopeReceived", envelope: response });
+          dispatch({ type: "selectQuickChat", id: response.event.chat.id });
+        }
+      },
+      renameQuickChat: () =>
+        setRenamingQuickChat({ id: chat.id, title: chat.title }),
+      deleteQuickChat: async () => {
+        if (
+          !window.confirm(
+            `Delete "${chat.title}"? Its session and scrollback will be terminated and cannot be restored.`,
+          )
+        ) {
+          return;
+        }
+        const response = await sendDaemonCommand(
+          deleteQuickChatCommand(chat.id),
+        );
+        if (
+          response.kind === "response" &&
+          response.event?.type === "quickChatDeleted"
+        ) {
+          dispatch({ type: "envelopeReceived", envelope: response });
+        }
+      },
+    });
+  }
+
   function projectRowCommands(
     project: { path: string; name: string },
     isOpen: boolean,
@@ -527,8 +581,74 @@ export default function App() {
             <span>React preview</span>
           </div>
         </div>
-        <nav aria-labelledby="projects-heading">
-          <div className="section-heading">
+        <nav aria-label="Destinations">
+          <div className="section-heading quick-chats-heading">
+            <h2 id="quick-chats-heading">Quick Chats</h2>
+            <button
+              type="button"
+              aria-label="New Quick Chat"
+              disabled={
+                !commands.find((command) => command.id === "chat.new")?.enabled
+              }
+              onClick={() => {
+                const command = commands.find(
+                  (candidate) => candidate.id === "chat.new",
+                );
+                if (command) void executeCommand(command);
+              }}
+            >
+              +
+            </button>
+          </div>
+          <button
+            className={`quick-chats-link ${
+              state.quickChatsSelected && !state.selectedQuickChatId
+                ? "project-selected"
+                : ""
+            }`}
+            type="button"
+            aria-expanded="true"
+            onClick={() => dispatch({ type: "selectQuickChats" })}
+          >
+            <span aria-hidden="true">◌</span>
+            <span>
+              <strong>All Quick Chats</strong>
+              <small>
+                {state.quickChats.length
+                  ? `${state.quickChats.length} conversation${
+                      state.quickChats.length === 1 ? "" : "s"
+                    }`
+                  : "No conversations yet"}
+              </small>
+            </span>
+          </button>
+          <ul className="quick-chat-sidebar-list" aria-label="Quick Chats">
+            {state.quickChats.map((chat) => {
+              const openCommand = quickChatCommands(chat)[0];
+              return (
+                <li key={chat.id}>
+                  <button
+                    type="button"
+                    className={
+                      state.selectedQuickChatId === chat.id
+                        ? "project-selected"
+                        : ""
+                    }
+                    disabled={
+                      !openCommand.enabled ||
+                      pendingCommandId === openCommand.id
+                    }
+                    title={openCommand.disabledReason}
+                    onClick={() => void executeCommand(openCommand)}
+                  >
+                    <span>{chat.title}</span>
+                    <small>{chat.activity?.text ?? chat.backend}</small>
+                  </button>
+                </li>
+              );
+            })}
+          </ul>
+          <div className="section-heading projects-section-heading">
             <h2 id="projects-heading">Projects</h2>
             <span>
               {projectNavigation.open.length + projectNavigation.recent.length}
@@ -636,7 +756,12 @@ export default function App() {
         <header className="app-header">
           <div>
             <p className="eyebrow">Daemon-owned orchestration</p>
-            <h1>{selectedGraph?.project.name ?? "GraphCode"}</h1>
+            <h1>
+              {inspectedQuickChat?.title ??
+                (state.quickChatsSelected
+                  ? "Quick Chats"
+                  : (selectedGraph?.project.name ?? "GraphCode"))}
+            </h1>
           </div>
           <div className="header-actions">
             {headerCommands.map((command) => (
@@ -664,68 +789,85 @@ export default function App() {
             {state.protocolWarnings.at(-1)}
           </div>
         ) : null}
-        <div className="content-layout">
-          <GraphCanvas
-            ref={graphCanvasRef}
-            graph={selectedGraph}
-            selectedNodeId={state.selectedNodeId}
-            commands={canvasCommands}
+        {state.quickChatsSelected ? (
+          <QuickChatsView
+            chats={state.quickChats}
+            selectedChat={inspectedQuickChat}
             pendingCommandId={pendingCommandId}
-            onExecuteCommand={(command) => void executeCommand(command)}
-            edgeCommands={(edge) =>
-              createEdgeCommands(
-                state.connection.phase === "connected",
-                edge.id,
-                {
-                  deleteEdge: edge.id
-                    ? async () => {
-                        if (!selectedProjectPath || !edge.id) return;
-                        const from =
-                          selectedGraph?.nodes.find(
-                            (node) => node.id === edge.from,
-                          )?.title ?? edge.from;
-                        const to =
-                          selectedGraph?.nodes.find(
-                            (node) => node.id === edge.to,
-                          )?.title ?? edge.to;
-                        if (
-                          !window.confirm(
-                            `Delete the edge from "${from}" to "${to}"? This cannot be undone.`,
-                          )
-                        ) {
-                          return;
-                        }
-                        await sendDaemonCommand(
-                          deleteEdgeCommand(selectedProjectPath, edge.id),
-                        );
-                      }
-                    : undefined,
-                },
-              )
-            }
-            onSelectNode={(nodeId) => {
-              if (!state.selectedProjectPath) return;
-              dispatch({
-                type: "selectNode",
-                projectPath: state.selectedProjectPath,
-                nodeId,
-              });
+            commandsForChat={quickChatCommands}
+            onBack={() => dispatch({ type: "selectQuickChats" })}
+            onNewChat={() => {
+              const command = commands.find(
+                (candidate) => candidate.id === "chat.new",
+              );
+              if (command) void executeCommand(command);
             }}
+            onExecute={(command) => void executeCommand(command)}
           />
-          <NodeInspector
-            graph={selectedGraph}
-            node={inspectedNode}
-            mailbox={
-              selectedProjectPath
-                ? state.mailboxes[selectedProjectPath]
-                : undefined
-            }
-            commands={nodeCommands}
-            pendingCommandId={pendingCommandId}
-            onClose={() => dispatch({ type: "clearNodeSelection" })}
-            onExecuteCommand={(command) => void executeCommand(command)}
-          />
-        </div>
+        ) : (
+          <div className="content-layout">
+            <GraphCanvas
+              ref={graphCanvasRef}
+              graph={selectedGraph}
+              selectedNodeId={state.selectedNodeId}
+              commands={canvasCommands}
+              pendingCommandId={pendingCommandId}
+              onExecuteCommand={(command) => void executeCommand(command)}
+              edgeCommands={(edge) =>
+                createEdgeCommands(
+                  state.connection.phase === "connected",
+                  edge.id,
+                  {
+                    deleteEdge: edge.id
+                      ? async () => {
+                          if (!selectedProjectPath || !edge.id) return;
+                          const from =
+                            selectedGraph?.nodes.find(
+                              (node) => node.id === edge.from,
+                            )?.title ?? edge.from;
+                          const to =
+                            selectedGraph?.nodes.find(
+                              (node) => node.id === edge.to,
+                            )?.title ?? edge.to;
+                          if (
+                            !window.confirm(
+                              `Delete the edge from "${from}" to "${to}"? This cannot be undone.`,
+                            )
+                          ) {
+                            return;
+                          }
+                          await sendDaemonCommand(
+                            deleteEdgeCommand(selectedProjectPath, edge.id),
+                          );
+                        }
+                      : undefined,
+                  },
+                )
+              }
+              onSelectNode={(nodeId) => {
+                if (!state.selectedProjectPath) return;
+                dispatch({
+                  type: "selectNode",
+                  projectPath: state.selectedProjectPath,
+                  nodeId,
+                });
+              }}
+            />
+            <NodeInspector
+              graph={selectedGraph}
+              node={inspectedNode}
+              mailbox={
+                selectedProjectPath
+                  ? state.mailboxes[selectedProjectPath]
+                  : undefined
+              }
+              commands={nodeCommands}
+              pendingCommandId={pendingCommandId}
+              onClose={() => dispatch({ type: "clearNodeSelection" })}
+              onExecuteCommand={(command) => void executeCommand(command)}
+            />
+          </div>
+        )}
       </section>
       <CommandPalette
         commands={commands}
@@ -750,6 +892,26 @@ export default function App() {
             } catch (error) {
               setPendingCreatedNode(undefined);
               throw error;
+            }
+          }}
+        />
+      ) : null}
+      {newQuickChatOpen ? (
+        <NewQuickChatDialog
+          onClose={() => setNewQuickChatOpen(false)}
+          onCreate={async (title, backend) => {
+            const response = await sendDaemonCommand(
+              createQuickChatCommand(title, backend),
+            );
+            if (
+              response.kind === "response" &&
+              response.event?.type === "quickChatChanged"
+            ) {
+              dispatch({ type: "envelopeReceived", envelope: response });
+              dispatch({
+                type: "selectQuickChat",
+                id: response.event.chat.id,
+              });
             }
           }}
         />
@@ -863,6 +1025,28 @@ export default function App() {
             await sendDaemonCommand(
               memoNodeCommand(textDialog.projectPath, textDialog.nodeId, text),
             );
+          }}
+        />
+      ) : null}
+      {renamingQuickChat ? (
+        <LoopTextDialog
+          title={`Rename ${renamingQuickChat.title}`}
+          description="The chat keeps its stable identity, backend, session, and scrollback."
+          label="Chat title"
+          initialValue={renamingQuickChat.title}
+          required
+          submitLabel="Rename"
+          onClose={() => setRenamingQuickChat(undefined)}
+          onSubmit={async (title) => {
+            const response = await sendDaemonCommand(
+              renameQuickChatCommand(renamingQuickChat.id, title),
+            );
+            if (
+              response.kind === "response" &&
+              response.event?.type === "quickChatChanged"
+            ) {
+              dispatch({ type: "envelopeReceived", envelope: response });
+            }
           }}
         />
       ) : null}
