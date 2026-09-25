@@ -96,6 +96,7 @@ import {
   selectedNode,
   selectedQuickChat,
 } from "./state/graphState";
+import { attentionItems, attentionSummary } from "./state/attention";
 import { deriveProjectNavigation } from "./state/projectNavigation";
 
 export default function App() {
@@ -291,6 +292,16 @@ export default function App() {
   const projectNavigation = useMemo(
     () => deriveProjectNavigation(state.recentProjects, state.graphs),
     [state.graphs, state.recentProjects],
+  );
+  const attentionByProject = useMemo(
+    () =>
+      Object.fromEntries(
+        Object.entries(state.graphs).map(([path, graph]) => [
+          path,
+          attentionItems(graph),
+        ]),
+      ),
+    [state.graphs],
   );
   const compositeBreadcrumbs = useMemo(() => {
     if (!rootGraph) return [];
@@ -1041,83 +1052,92 @@ export default function App() {
           ) : null}
           <p className="project-group-label">Open</p>
           <ul className="project-list" aria-label="Open projects">
-            {projectNavigation.open.map((project) => (
-              <li className="project-row" key={project.path}>
-                <button
-                  className={
-                    project.path === state.selectedProjectPath &&
-                    !state.mailroomSelected
-                      ? "project-selected"
-                      : ""
-                  }
-                  onClick={() =>
-                    dispatch({ type: "selectProject", path: project.path })
-                  }
-                >
-                  <span aria-hidden="true">⌁</span>
-                  <span>
-                    <strong>{project.name}</strong>
-                    <small>{project.path}</small>
-                  </span>
-                </button>
-                <ProjectRowActions
-                  projectName={project.name}
-                  commands={projectRowCommands(project, true)}
-                  pendingCommandId={pendingCommandId}
-                  onExecute={(command) => void executeCommand(command)}
-                />
-                {project.path === state.selectedProjectPath ? (
-                  <>
-                    <button
-                      className={`project-mailroom-link ${
-                        state.mailroomSelected ? "project-selected" : ""
-                      }`}
-                      type="button"
-                      disabled={
-                        !commands.find(
-                          (command) => command.id === "project.openMailroom",
-                        )?.enabled
-                      }
-                      onClick={() => {
-                        const command = commands.find(
-                          (candidate) =>
-                            candidate.id === "project.openMailroom",
-                        );
-                        if (command) void executeCommand(command);
-                      }}
-                    >
-                      <span aria-hidden="true">✉</span>
-                      <span>Mailroom</span>
-                      <small>
-                        {state.mailboxes[project.path]?.digest.count ??
-                          state.graphs[project.path]?.mailroomDigest?.count ??
-                          0}
-                      </small>
-                    </button>
-                    <ProjectGraphTree
-                      graph={state.graphs[project.path]}
-                      compositePath={state.compositePath}
-                      selectedNodeId={state.selectedNodeId}
-                      onSelectNode={(compositePath, nodeId) =>
-                        dispatch({
-                          type: "selectGraphLocation",
-                          projectPath: project.path,
-                          compositePath,
-                          nodeId,
-                        })
-                      }
-                      onOpenGraph={(compositePath) =>
-                        dispatch({
-                          type: "selectGraphLocation",
-                          projectPath: project.path,
-                          compositePath,
-                        })
-                      }
-                    />
-                  </>
-                ) : null}
-              </li>
-            ))}
+            {projectNavigation.open.map((project) => {
+              const attention = attentionByProject[project.path] ?? [];
+              return (
+                <li className="project-row" key={project.path}>
+                  <button
+                    className={
+                      project.path === state.selectedProjectPath &&
+                      !state.mailroomSelected
+                        ? "project-selected"
+                        : ""
+                    }
+                    onClick={() =>
+                      dispatch({ type: "selectProject", path: project.path })
+                    }
+                  >
+                    <span aria-hidden="true">⌁</span>
+                    <span>
+                      <strong>{project.name}</strong>
+                      <small>{project.path}</small>
+                      {attention.length ? (
+                        <small className="project-attention">
+                          <span aria-hidden="true">!</span>{" "}
+                          {attentionSummary(attention)}
+                        </small>
+                      ) : null}
+                    </span>
+                  </button>
+                  <ProjectRowActions
+                    projectName={project.name}
+                    commands={projectRowCommands(project, true)}
+                    pendingCommandId={pendingCommandId}
+                    onExecute={(command) => void executeCommand(command)}
+                  />
+                  {project.path === state.selectedProjectPath ? (
+                    <>
+                      <button
+                        className={`project-mailroom-link ${
+                          state.mailroomSelected ? "project-selected" : ""
+                        }`}
+                        type="button"
+                        disabled={
+                          !commands.find(
+                            (command) => command.id === "project.openMailroom",
+                          )?.enabled
+                        }
+                        onClick={() => {
+                          const command = commands.find(
+                            (candidate) =>
+                              candidate.id === "project.openMailroom",
+                          );
+                          if (command) void executeCommand(command);
+                        }}
+                      >
+                        <span aria-hidden="true">✉</span>
+                        <span>Mailroom</span>
+                        <small>
+                          {state.mailboxes[project.path]?.digest.count ??
+                            state.graphs[project.path]?.mailroomDigest?.count ??
+                            0}
+                        </small>
+                      </button>
+                      <ProjectGraphTree
+                        graph={state.graphs[project.path]}
+                        compositePath={state.compositePath}
+                        selectedNodeId={state.selectedNodeId}
+                        onSelectNode={(compositePath, nodeId) =>
+                          dispatch({
+                            type: "selectGraphLocation",
+                            projectPath: project.path,
+                            compositePath,
+                            nodeId,
+                          })
+                        }
+                        onOpenGraph={(compositePath) =>
+                          dispatch({
+                            type: "selectGraphLocation",
+                            projectPath: project.path,
+                            compositePath,
+                          })
+                        }
+                      />
+                    </>
+                  ) : null}
+                </li>
+              );
+            })}
           </ul>
           <p className="project-group-label">Recent</p>
           <ul
