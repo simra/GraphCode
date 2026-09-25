@@ -18,7 +18,8 @@ export function ConnectionBanner({
   return (
     <div
       className={`connection-banner connection-${connection.phase}`}
-      role="status"
+      role="region"
+      aria-label="Daemon connection status"
     >
       <span className="connection-dot" aria-hidden="true" />
       <strong>{label}</strong>

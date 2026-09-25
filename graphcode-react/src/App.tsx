@@ -39,6 +39,7 @@ import { EditLoopDialog } from "./components/EditLoopDialog";
 import { EdgeInspector } from "./components/EdgeInspector";
 import { GraphCanvas, type GraphCanvasHandle } from "./components/GraphCanvas";
 import { LoopTextDialog } from "./components/LoopTextDialog";
+import { LiveRegion } from "./components/LiveRegion";
 import { MailroomPostDialog } from "./components/MailroomPostDialog";
 import { MailroomWatchDialog } from "./components/MailroomWatchDialog";
 import { MailroomView } from "./components/MailroomView";
@@ -134,6 +135,7 @@ export default function App() {
   }>();
   const [pendingCommandId, setPendingCommandId] = useState<CommandId>();
   const [commandError, setCommandError] = useState<string>();
+  const [liveAnnouncement, setLiveAnnouncement] = useState("");
   const [openingProjectPath, setOpeningProjectPath] = useState<string>();
   const [renamingQuickChat, setRenamingQuickChat] = useState<{
     id: string;
@@ -151,6 +153,22 @@ export default function App() {
     | undefined
   >();
   const graphCanvasRef = useRef<GraphCanvasHandle>(null);
+  const announcementTimerRef = useRef<number | undefined>(undefined);
+  const previousConnectionPhaseRef = useRef<
+    (typeof state.connection)["phase"] | undefined
+  >(undefined);
+  const previousSelectionKeyRef = useRef<string | undefined>(undefined);
+
+  const announce = useCallback((message: string) => {
+    if (announcementTimerRef.current !== undefined) {
+      window.clearTimeout(announcementTimerRef.current);
+    }
+    setLiveAnnouncement("");
+    announcementTimerRef.current = window.setTimeout(() => {
+      setLiveAnnouncement(message);
+      announcementTimerRef.current = undefined;
+    }, 0);
+  }, []);
 
   useEffect(() => {
     let active = true;
@@ -199,6 +217,15 @@ export default function App() {
       void connection?.dispose();
     };
   }, []);
+
+  useEffect(
+    () => () => {
+      if (announcementTimerRef.current !== undefined) {
+        window.clearTimeout(announcementTimerRef.current);
+      }
+    },
+    [],
+  );
 
   useEffect(() => {
     let active = true;
@@ -254,6 +281,13 @@ export default function App() {
     inspectedNodeState &&
     ["succeeded", "failed", "stalled", "stopped"].includes(inspectedNodeState),
   );
+  const selectionKey = inspectedEdge
+    ? `edge:${selectedProjectPath}:${selectedViewKey}:${selectedEdgeKey}`
+    : inspectedNode
+      ? `node:${selectedProjectPath}:${selectedViewKey}:${inspectedNode.id}`
+      : inspectedQuickChat
+        ? `chat:${inspectedQuickChat.id}`
+        : undefined;
   const projectNavigation = useMemo(
     () => deriveProjectNavigation(state.recentProjects, state.graphs),
     [state.graphs, state.recentProjects],
@@ -275,22 +309,26 @@ export default function App() {
       addressGraphCommand(command, state.compositePath),
     [state.compositePath],
   );
-  const requestOpenProject = useCallback(async (path: string) => {
-    setOpeningProjectPath(path);
-    try {
-      const response = await sendDaemonCommand(openProjectCommand(path));
-      if (
-        response.kind === "response" &&
-        response.event?.type === "graphChanged"
-      ) {
-        setOpeningProjectPath(response.event.graph.project.path);
-        dispatch({ type: "envelopeReceived", envelope: response });
+  const requestOpenProject = useCallback(
+    async (path: string) => {
+      setOpeningProjectPath(path);
+      try {
+        const response = await sendDaemonCommand(openProjectCommand(path));
+        if (
+          response.kind === "response" &&
+          response.event?.type === "graphChanged"
+        ) {
+          setOpeningProjectPath(response.event.graph.project.path);
+          dispatch({ type: "envelopeReceived", envelope: response });
+          announce(`Opened project ${response.event.graph.project.name}.`);
+        }
+      } catch (error) {
+        setOpeningProjectPath(undefined);
+        throw error;
       }
-    } catch (error) {
-      setOpeningProjectPath(undefined);
-      throw error;
-    }
-  }, []);
+    },
+    [announce],
+  );
   const commands = useMemo(
     () =>
       createCommandRegistry(state, {
@@ -638,21 +676,91 @@ export default function App() {
     setOpeningProjectPath(undefined);
   }, [openingProjectPath, state.graphs]);
 
-  const executeCommand = useCallback(async (command: AppCommand) => {
-    if (!command.enabled) return;
-    setPendingCommandId(command.id);
-    setCommandError(undefined);
-    try {
-      await command.execute();
-      if (command.id !== "app.commandPalette") {
-        setPaletteOpen(false);
+  const executeCommand = useCallback(
+    async (command: AppCommand) => {
+      if (!command.enabled) return;
+      setPendingCommandId(command.id);
+      setCommandError(undefined);
+      try {
+        await command.execute();
+        if (
+          [
+            "project.close",
+            "project.forget",
+            "project.deleteGraph",
+            "chat.delete",
+            "edge.delete",
+            "loop.stop",
+            "loop.restartSession",
+            "loop.delete",
+            "loop.refreshUsage",
+            "loop.rollbackRefinement",
+            "loop.pilotComposite",
+            "loop.armComposite",
+            "loop.mailroomRefresh",
+            "loop.mailroomUnread",
+            "loop.mailroomMarkRead",
+            "mailroom.readPost",
+          ].includes(command.id)
+        ) {
+          announce(`${command.label} completed.`);
+        }
+        if (command.id !== "app.commandPalette") {
+          setPaletteOpen(false);
+        }
+      } catch (error) {
+        setCommandError(error instanceof Error ? error.message : String(error));
+      } finally {
+        setPendingCommandId(undefined);
       }
-    } catch (error) {
-      setCommandError(error instanceof Error ? error.message : String(error));
-    } finally {
-      setPendingCommandId(undefined);
+    },
+    [announce],
+  );
+
+  useEffect(() => {
+    const previous = previousConnectionPhaseRef.current;
+    previousConnectionPhaseRef.current = state.connection.phase;
+    if (previous === state.connection.phase) return;
+    const message = {
+      connected: "Connected to graphcoded.",
+      reconnecting: "Connection lost. Reconnecting to graphcoded.",
+      resyncing: "Connection restored. Resynchronizing daemon state.",
+      fixture: "Daemon unavailable. Previewing repository fixture data.",
+      error: "The graphcoded connection failed.",
+      idle: undefined,
+      connecting: previous ? "Connecting to graphcoded." : undefined,
+    }[state.connection.phase];
+    if (message) announce(message);
+  }, [announce, state.connection.phase]);
+
+  useEffect(() => {
+    if (!selectionKey) {
+      previousSelectionKeyRef.current = undefined;
+      return;
     }
-  }, []);
+    if (previousSelectionKeyRef.current === selectionKey) return;
+    previousSelectionKeyRef.current = selectionKey;
+    if (inspectedEdge && selectedGraph) {
+      const from =
+        selectedGraph.nodes.find((node) => node.id === inspectedEdge.from)
+          ?.title ?? inspectedEdge.from;
+      const to =
+        selectedGraph.nodes.find((node) => node.id === inspectedEdge.to)
+          ?.title ?? inspectedEdge.to;
+      announce(`Selected edge from ${from} to ${to}.`);
+    } else if (inspectedNode) {
+      announce(`Selected loop ${inspectedNode.title}.`);
+    } else if (inspectedQuickChat) {
+      announce(`Selected Quick Chat ${inspectedQuickChat.title}.`);
+    }
+  }, [
+    announce,
+    inspectedEdge,
+    inspectedNode,
+    inspectedQuickChat,
+    selectedGraph,
+    selectionKey,
+  ]);
 
   function quickChatCommands(chat: (typeof state.quickChats)[number]) {
     return createQuickChatCommands(state.connection.phase === "connected", {
@@ -1087,6 +1195,7 @@ export default function App() {
           </div>
         </header>
         <ConnectionBanner connection={state.connection} />
+        <LiveRegion message={liveAnnouncement} />
         {commandError ? (
           <div className="command-error" role="alert">
             {commandError}
@@ -1355,6 +1464,7 @@ export default function App() {
                   createNodeCommand(selectedProjectPath, draft),
                 ),
               );
+              announce(`Created loop ${draft.title}.`);
             } catch (error) {
               setPendingCreatedNode(undefined);
               throw error;
@@ -1378,6 +1488,7 @@ export default function App() {
                 type: "selectQuickChat",
                 id: response.event.chat.id,
               });
+              announce(`Created Quick Chat ${response.event.chat.title}.`);
             }
           }}
         />
@@ -1398,6 +1509,7 @@ export default function App() {
                 createEdgeCommand(selectedProjectPath, from, to, spec),
               ),
             );
+            announce("Created edge.");
           }}
         />
       ) : null}
@@ -1415,6 +1527,7 @@ export default function App() {
                 ),
               ),
             );
+            announce(`Updated loop ${editingLoop.node.title}.`);
           }}
         />
       ) : null}
@@ -1433,6 +1546,11 @@ export default function App() {
                 ),
               ),
             );
+            announce(
+              followUp
+                ? `Queued a follow-up for ${messagingLoop.nodeTitle}.`
+                : `Sent a message to ${messagingLoop.nodeTitle}.`,
+            );
           }}
         />
       ) : null}
@@ -1447,6 +1565,7 @@ export default function App() {
             await sendDaemonCommand(
               mailboxCommand(mailroomPosting.projectPath),
             );
+            announce(`Posted to ${mailroomPosting.projectName} Mailroom.`);
           }}
         />
       ) : null}
@@ -1464,6 +1583,11 @@ export default function App() {
                 on,
                 topic,
               ),
+            );
+            announce(
+              on
+                ? `Updated the Mailroom watch for ${mailroomWatching.nodeTitle}.`
+                : `Stopped the Mailroom watch for ${mailroomWatching.nodeTitle}.`,
             );
           }}
         />
@@ -1487,6 +1611,7 @@ export default function App() {
                 ),
               ),
             );
+            announce(`Renamed loop to ${title}.`);
           }}
         />
       ) : null}
@@ -1508,6 +1633,7 @@ export default function App() {
                 ),
               ),
             );
+            announce(`Completed ${textDialog.nodeTitle}.`);
           }}
         />
       ) : null}
@@ -1530,6 +1656,7 @@ export default function App() {
                 ),
               ),
             );
+            announce(`Added a memo to ${textDialog.nodeTitle}.`);
           }}
         />
       ) : null}
@@ -1552,6 +1679,7 @@ export default function App() {
                 ),
               ),
             );
+            announce(`Replaced the playbook for ${textDialog.nodeTitle}.`);
           }}
         />
       ) : null}
@@ -1567,6 +1695,7 @@ export default function App() {
             await sendDaemonCommand(
               mailboxSearchCommand(textDialog.projectPath, search),
             );
+            announce("Mailroom search results loaded.");
           }}
         />
       ) : null}
@@ -1588,6 +1717,7 @@ export default function App() {
               response.event?.type === "quickChatChanged"
             ) {
               dispatch({ type: "envelopeReceived", envelope: response });
+              announce(`Renamed Quick Chat to ${response.event.chat.title}.`);
             }
           }}
         />

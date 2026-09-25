@@ -75,7 +75,11 @@ export async function sendDaemonCommand(
   command: object,
 ): Promise<DaemonWireEnvelope> {
   const raw = await invoke<unknown>("send_daemon_command", { command });
-  return decodeEnvelope(raw);
+  const envelope = decodeEnvelope(raw);
+  if (envelope.kind === "error") {
+    throw new Error(`${envelope.error.code}: ${envelope.error.message}`);
+  }
+  return envelope;
 }
 
 export async function acknowledgeDaemonSequence(
