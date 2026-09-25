@@ -1125,7 +1125,7 @@ kbd {
 }
 
 .graph-node {
-  cursor: pointer;
+  cursor: move;
 }
 
 .edge-drag-handle {

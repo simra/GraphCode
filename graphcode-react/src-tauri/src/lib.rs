@@ -210,6 +210,26 @@ fn save_ui_viewport(
         .map_err(|error| BridgeError::UiLayout(error.to_string()))
 }
 
+#[tauri::command]
+fn save_ui_node_positions(
+    app: tauri::AppHandle,
+    state: State<'_, BridgeState>,
+    project_path: String,
+    view_key: String,
+    positions: std::collections::BTreeMap<String, ui_layout::Position>,
+) -> Result<(), BridgeError> {
+    let _guard = state
+        .ui_layout
+        .lock()
+        .expect("UI layout state mutex poisoned");
+    let state_directory = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| BridgeError::AppData(error.to_string()))?;
+    ui_layout::save_node_positions(&state_directory, project_path, view_key, positions)
+        .map_err(|error| BridgeError::UiLayout(error.to_string()))
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -224,7 +244,8 @@ pub fn run() {
             acknowledge_daemon_sequence,
             set_native_menu,
             load_ui_layout,
-            save_ui_viewport
+            save_ui_viewport,
+            save_ui_node_positions
         ])
         .run(tauri::generate_context!())
         .expect("failed to run GraphCode React");

@@ -44,10 +44,36 @@ impl Viewport {
     }
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct Position {
+    pub x: f64,
+    pub y: f64,
+}
+
+impl Position {
+    fn validate(&self) -> io::Result<()> {
+        if !self.x.is_finite()
+            || !self.y.is_finite()
+            || self.x < 0.0
+            || self.y < 0.0
+            || self.x > MAX_VIEWPORT_VALUE
+            || self.y > MAX_VIEWPORT_VALUE
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "node positions must be finite, non-negative, and bounded",
+            ));
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProjectLayout {
     pub views: BTreeMap<String, Viewport>,
+    #[serde(default)]
+    pub node_positions: BTreeMap<String, BTreeMap<String, Position>>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -97,8 +123,37 @@ pub fn load(state_directory: &Path) -> io::Result<LayoutState> {
             validate_key(view_key, 8_192, "view key")?;
             viewport.validate()?;
         }
+        for (view_key, positions) in &project.node_positions {
+            validate_key(view_key, 8_192, "view key")?;
+            for (node_id, position) in positions {
+                validate_key(node_id, 8_192, "node ID")?;
+                position.validate()?;
+            }
+        }
     }
     Ok(state)
+}
+
+pub fn save_node_positions(
+    state_directory: &Path,
+    project_path: String,
+    view_key: String,
+    positions: BTreeMap<String, Position>,
+) -> io::Result<()> {
+    validate_key(&project_path, 32_768, "project path")?;
+    validate_key(&view_key, 8_192, "view key")?;
+    for (node_id, position) in &positions {
+        validate_key(node_id, 8_192, "node ID")?;
+        position.validate()?;
+    }
+    let mut state = load(state_directory)?;
+    let project = state.projects.entry(project_path).or_default();
+    if positions.is_empty() {
+        project.node_positions.remove(&view_key);
+    } else {
+        project.node_positions.insert(view_key, positions);
+    }
+    persist(state_directory, &state)
 }
 
 pub fn save_viewport(
@@ -228,6 +283,39 @@ mod tests {
         assert_eq!(state.version, LAYOUT_VERSION);
         assert_eq!(viewport.x, 10.0);
         assert_eq!(viewport.width, 900.0);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn adds_node_positions_without_changing_the_layout_version() {
+        let directory = temporary_directory();
+        save_viewport(
+            &directory,
+            "C:\\work\\graph".into(),
+            "root".into(),
+            Viewport {
+                x: 0.0,
+                y: 0.0,
+                width: 900.0,
+                height: 420.0,
+            },
+        )
+        .unwrap();
+        save_node_positions(
+            &directory,
+            "C:\\work\\graph".into(),
+            "root".into(),
+            BTreeMap::from([("node-a".into(), Position { x: 120.0, y: 80.0 })]),
+        )
+        .unwrap();
+
+        let state = load(&directory).unwrap();
+        assert_eq!(state.version, LAYOUT_VERSION);
+        assert_eq!(
+            state.projects["C:\\work\\graph"].node_positions["root"]["node-a"].x,
+            120.0
+        );
+        assert_eq!(state.projects["C:\\work\\graph"].views["root"].width, 900.0);
         fs::remove_dir_all(directory).unwrap();
     }
 

@@ -307,6 +307,7 @@ describe("command registry", () => {
       selectNode: vi.fn(),
       openNewEdge: vi.fn(),
     });
+
     expect(commands.find((command) => command.id === "edge.new")?.enabled).toBe(
       true,
     );
@@ -315,6 +316,21 @@ describe("command registry", () => {
       deleteEdge: vi.fn(async () => undefined),
     });
     expect(missingId[0].disabledReason).toContain("no stable ID");
+  });
+
+  it("exposes client-owned automatic layout reset", () => {
+    const resetLayout = vi.fn();
+    const commands = createCommandRegistry(stateWithSelectedNode(), {
+      openPalette: vi.fn(),
+      clearSelection: vi.fn(),
+      selectNode: vi.fn(),
+      resetLayout,
+    });
+
+    const reset = commands.find((command) => command.id === "view.resetLayout");
+    expect(reset?.enabled).toBe(true);
+    reset?.execute();
+    expect(resetLayout).toHaveBeenCalledOnce();
   });
 
   it("creates a correlated deep-read command for a Mailroom post", () => {

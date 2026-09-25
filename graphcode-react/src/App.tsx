@@ -14,6 +14,7 @@ import {
 import { pickProjectFolder } from "./bridge/projects";
 import {
   loadUiLayout,
+  saveUiNodePositions,
   saveUiViewport,
   type UiLayoutState,
 } from "./bridge/uiLayout";
@@ -229,6 +230,9 @@ export default function App() {
     : "root";
   const savedViewport = selectedProjectPath
     ? uiLayout?.projects[selectedProjectPath]?.views[selectedViewKey]
+    : undefined;
+  const savedNodePositions = selectedProjectPath
+    ? uiLayout?.projects[selectedProjectPath]?.nodePositions[selectedViewKey]
     : undefined;
   const inspectedNode = selectedNode(state);
   const inspectedQuickChat = selectedQuickChat(state);
@@ -563,6 +567,7 @@ export default function App() {
         zoomOut: () => graphCanvasRef.current?.zoomOut(),
         resetZoom: () => graphCanvasRef.current?.resetZoom(),
         fitGraph: () => graphCanvasRef.current?.fitGraph(),
+        resetLayout: () => graphCanvasRef.current?.resetLayout(),
       }),
     [
       inspectedNode,
@@ -1096,6 +1101,7 @@ export default function App() {
               commands={canvasCommands}
               pendingCommandId={pendingCommandId}
               initialViewport={savedViewport}
+              initialNodePositions={savedNodePositions}
               viewportKey={
                 selectedProjectPath
                   ? `${selectedProjectPath}\0${selectedViewKey}`
@@ -1135,6 +1141,8 @@ export default function App() {
                           ...current.projects[projectPath]?.views,
                           [viewKey]: viewport,
                         },
+                        nodePositions:
+                          current.projects[projectPath]?.nodePositions ?? {},
                       },
                     },
                   };
@@ -1157,6 +1165,49 @@ export default function App() {
                               : String(error)
                           }`,
                         ),
+                    );
+                  }, 250),
+                );
+              }}
+              onNodePositionsChange={(positions) => {
+                if (!uiLayout || !selectedProjectPath) return;
+                const projectPath = selectedProjectPath;
+                const viewKey = selectedViewKey;
+                setUiLayout((current) => {
+                  if (!current) return current;
+                  return {
+                    ...current,
+                    projects: {
+                      ...current.projects,
+                      [projectPath]: {
+                        views: current.projects[projectPath]?.views ?? {},
+                        nodePositions: {
+                          ...current.projects[projectPath]?.nodePositions,
+                          [viewKey]: positions,
+                        },
+                      },
+                    },
+                  };
+                });
+                const timerKey = `${projectPath}\0${viewKey}\0positions`;
+                const existingTimer = layoutSaveTimers.current.get(timerKey);
+                if (existingTimer !== undefined) {
+                  window.clearTimeout(existingTimer);
+                }
+                layoutSaveTimers.current.set(
+                  timerKey,
+                  window.setTimeout(() => {
+                    layoutSaveTimers.current.delete(timerKey);
+                    void saveUiNodePositions(
+                      projectPath,
+                      viewKey,
+                      positions,
+                    ).catch((error: unknown) =>
+                      setCommandError(
+                        `UI layout save failed: ${
+                          error instanceof Error ? error.message : String(error)
+                        }`,
+                      ),
                     );
                   }, 250),
                 );

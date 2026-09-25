@@ -56,6 +56,9 @@ dashed fired-edge styling so state is not communicated by color alone.
 Root and composite graph viewports persist per project in a validated version-1
 Tauri app-data file. Writes are debounced and atomically replaced; invalid,
 oversized, or unsupported state is reported instead of silently applied.
+Pointer drag or Alt+Arrow repositions individual loops in the same per-view store;
+Reset Layout returns to the deterministic dependency layout without mutating the
+daemon graph.
 Wheel zoom remains anchored under the pointer, while two-touch pinch zoom tracks
 both scale and midpoint translation in the same coordinates used for node and edge
 hit testing.

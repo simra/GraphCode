@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import type { LoopNode } from "../protocol/domain";
 import {
   adjacentNodeId,
+  applyNodePositions,
   buildGraphLayout,
   edgeTargetAtPoint,
   GraphCanvas,
@@ -52,6 +53,19 @@ describe("graph layout", () => {
     expect(adjacentNodeId("center", "right", positions)).toBe("right-near");
     expect(adjacentNodeId("center", "down", positions)).toBe("down");
     expect(adjacentNodeId("center", "left", positions)).toBeUndefined();
+  });
+
+  it("applies saved node positions and expands the layout bounds", () => {
+    const automatic = buildGraphLayout(nodes.slice(0, 2), []);
+    const positioned = applyNodePositions(automatic, nodes.slice(0, 2), {
+      a: { x: 1200, y: 800 },
+      removed: { x: 5000, y: 5000 },
+    });
+
+    expect(positioned.positions.get("a")).toEqual({ x: 1200, y: 800 });
+    expect(positioned.positions.has("removed")).toBe(false);
+    expect(positioned.width).toBeGreaterThan(1200);
+    expect(positioned.height).toBeGreaterThan(800);
   });
 
   it("resolves pointer edge targets while excluding the source", () => {
@@ -117,6 +131,7 @@ describe("graph layout", () => {
       "use New Edge for a keyboard accessible alternative",
     );
     expect(markup).toContain("Arrow keys move between nearby loops");
+    expect(markup).toContain("Alt+Arrow repositions a loop");
     expect(markup).toContain("aria-keyshortcuts=");
   });
 });
