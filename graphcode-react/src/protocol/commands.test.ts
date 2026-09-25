@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  addressGraphCommand,
   armCompositeCommand,
   closeProjectCommand,
   completeNodeCommand,
@@ -19,11 +20,13 @@ import {
   memoNodeCommand,
   messageNodeCommand,
   refreshUsageCommand,
+  refineNodeCommand,
   pilotCompositeCommand,
   renameNodeCommand,
   renameQuickChatCommand,
   restartNodeCommand,
   resumeSessionCommand,
+  rollbackRefinementCommand,
   stopNodeCommand,
   updateNodeCommand,
 } from "./commands";
@@ -196,6 +199,7 @@ describe("daemon commands", () => {
         },
       },
     });
+
     expect(messageNodeCommand(project, node, "Later", true)).toEqual({
       graphCommand: {
         projectPath: project,
@@ -214,6 +218,50 @@ describe("daemon commands", () => {
         projectPath: project,
         command: {
           memoNode: { _0: node, text: "Remember this", from: null },
+        },
+      },
+    });
+  });
+
+  it("encodes playbook refinement and nested graph addressing", () => {
+    const project = "C:\\work\\graph";
+    const node = "33333333-3333-4333-8333-333333333333";
+    expect(refineNodeCommand(project, node, "Use the verifier first")).toEqual({
+      graphCommand: {
+        projectPath: project,
+        command: {
+          refineNode: {
+            _0: node,
+            text: "Use the verifier first",
+            from: null,
+          },
+        },
+      },
+    });
+    expect(rollbackRefinementCommand(project, node)).toEqual({
+      graphCommand: {
+        projectPath: project,
+        command: { rollbackRefinement: { _0: node, from: null } },
+      },
+    });
+    expect(
+      addressGraphCommand(deleteNodeCommand(project, node), [
+        "11111111-1111-4111-8111-111111111111",
+        "22222222-2222-4222-8222-222222222222",
+      ]),
+    ).toEqual({
+      graphCommand: {
+        projectPath: project,
+        command: {
+          subGraphCommand: {
+            nodeID: "11111111-1111-4111-8111-111111111111",
+            command: {
+              subGraphCommand: {
+                nodeID: "22222222-2222-4222-8222-222222222222",
+                command: { deleteNode: { _0: node } },
+              },
+            },
+          },
         },
       },
     });

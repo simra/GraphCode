@@ -465,6 +465,41 @@ kbd {
   font-size: 0.84rem;
 }
 
+.composite-breadcrumb {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 7px;
+  margin: -6px 0 18px;
+  color: #818a7e;
+  font-size: 0.8rem;
+}
+
+.composite-breadcrumb span {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.composite-breadcrumb button {
+  padding: 4px 7px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  color: #bfc6bb;
+  background: transparent;
+  cursor: pointer;
+}
+
+.composite-breadcrumb button:hover:not(:disabled) {
+  border-color: #465743;
+  background: #252d23;
+}
+
+.composite-breadcrumb button[aria-current="page"] {
+  color: #8da586;
+  cursor: default;
+}
+
 .content-layout {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(340px, 400px);

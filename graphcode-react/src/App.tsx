@@ -41,6 +41,7 @@ import { ProjectRowActions } from "./components/ProjectRowActions";
 import { QuickChatsView } from "./components/QuickChatsView";
 import { initialSnapshotFixture } from "./fixtures/initialSnapshot";
 import {
+  addressGraphCommand,
   armCompositeCommand,
   closeProjectCommand,
   completeNodeCommand,
@@ -60,16 +61,20 @@ import {
   openProjectCommand,
   pilotCompositeCommand,
   refreshUsageCommand,
+  refineNodeCommand,
   renameNodeCommand,
   renameQuickChatCommand,
   restartNodeCommand,
   resumeSessionCommand,
+  rollbackRefinementCommand,
   stopNodeCommand,
   type NodeDraftPayload,
+  type GraphCommandEnvelope,
   updateNodeCommand,
 } from "./protocol/commands";
 import {
   appReducer,
+  currentGraph,
   initialAppState,
   selectedNode,
   selectedQuickChat,
@@ -108,7 +113,7 @@ export default function App() {
   }>();
   const [textDialog, setTextDialog] = useState<
     | {
-        kind: "rename" | "complete" | "memo";
+        kind: "rename" | "complete" | "memo" | "refine";
         projectPath: string;
         nodeId: string;
         nodeTitle: string;
@@ -165,9 +170,10 @@ export default function App() {
     };
   }, []);
 
-  const selectedGraph = state.selectedProjectPath
+  const rootGraph = state.selectedProjectPath
     ? state.graphs[state.selectedProjectPath]
     : undefined;
+  const selectedGraph = currentGraph(state);
   const selectedProjectPath = state.selectedProjectPath;
   const inspectedNode = selectedNode(state);
   const inspectedQuickChat = selectedQuickChat(state);
@@ -184,6 +190,23 @@ export default function App() {
   const projectNavigation = useMemo(
     () => deriveProjectNavigation(state.recentProjects, state.graphs),
     [state.graphs, state.recentProjects],
+  );
+  const compositeBreadcrumbs = useMemo(() => {
+    if (!rootGraph) return [];
+    const breadcrumbs = [{ depth: 0, label: rootGraph.project.name }];
+    let graph = rootGraph;
+    state.compositePath.forEach((nodeId, index) => {
+      const node = graph.nodes.find((candidate) => candidate.id === nodeId);
+      if (!node?.subGraph) return;
+      breadcrumbs.push({ depth: index + 1, label: node.title });
+      graph = node.subGraph;
+    });
+    return breadcrumbs;
+  }, [rootGraph, state.compositePath]);
+  const routeGraphCommand = useCallback(
+    <TCommand,>(command: GraphCommandEnvelope<TCommand>) =>
+      addressGraphCommand(command, state.compositePath),
+    [state.compositePath],
   );
   const requestOpenProject = useCallback(async (path: string) => {
     setOpeningProjectPath(path);
@@ -235,7 +258,9 @@ export default function App() {
                   return;
                 }
                 await sendDaemonCommand(
-                  stopNodeCommand(selectedProjectPath, inspectedNode.id),
+                  routeGraphCommand(
+                    stopNodeCommand(selectedProjectPath, inspectedNode.id),
+                  ),
                 );
               }
             : undefined,
@@ -276,6 +301,43 @@ export default function App() {
                   nodeTitle: inspectedNode.title,
                 })
             : undefined,
+        refineNode:
+          selectedProjectPath && inspectedNode
+            ? () =>
+                setTextDialog({
+                  kind: "refine",
+                  projectPath: selectedProjectPath,
+                  nodeId: inspectedNode.id,
+                  nodeTitle: inspectedNode.title,
+                })
+            : undefined,
+        rollbackRefinement:
+          selectedProjectPath && inspectedNode
+            ? async () => {
+                if (
+                  !window.confirm(
+                    `Restore the previous playbook for "${inspectedNode.title}"? graphcoded will refuse this if no rollback snapshot exists.`,
+                  )
+                ) {
+                  return;
+                }
+                await sendDaemonCommand(
+                  routeGraphCommand(
+                    rollbackRefinementCommand(
+                      selectedProjectPath,
+                      inspectedNode.id,
+                    ),
+                  ),
+                );
+              }
+            : undefined,
+        openComposite: inspectedNode?.subGraph
+          ? () =>
+              dispatch({
+                type: "enterComposite",
+                nodeId: inspectedNode.id,
+              })
+          : undefined,
         pilotComposite:
           selectedProjectPath && inspectedNode
             ? async () => {
@@ -287,7 +349,12 @@ export default function App() {
                   return;
                 }
                 await sendDaemonCommand(
-                  pilotCompositeCommand(selectedProjectPath, inspectedNode.id),
+                  routeGraphCommand(
+                    pilotCompositeCommand(
+                      selectedProjectPath,
+                      inspectedNode.id,
+                    ),
+                  ),
                 );
               }
             : undefined,
@@ -302,7 +369,9 @@ export default function App() {
                   return;
                 }
                 await sendDaemonCommand(
-                  armCompositeCommand(selectedProjectPath, inspectedNode.id),
+                  routeGraphCommand(
+                    armCompositeCommand(selectedProjectPath, inspectedNode.id),
+                  ),
                 );
               }
             : undefined,
@@ -332,11 +401,18 @@ export default function App() {
                 }
                 await sendDaemonCommand(
                   inspectedNodeResolved
-                    ? resumeSessionCommand(
-                        selectedProjectPath,
-                        inspectedNode.id,
+                    ? routeGraphCommand(
+                        resumeSessionCommand(
+                          selectedProjectPath,
+                          inspectedNode.id,
+                        ),
                       )
-                    : restartNodeCommand(selectedProjectPath, inspectedNode.id),
+                    : routeGraphCommand(
+                        restartNodeCommand(
+                          selectedProjectPath,
+                          inspectedNode.id,
+                        ),
+                      ),
                 );
               }
             : undefined,
@@ -361,7 +437,9 @@ export default function App() {
                   return;
                 }
                 await sendDaemonCommand(
-                  deleteNodeCommand(selectedProjectPath, inspectedNode.id),
+                  routeGraphCommand(
+                    deleteNodeCommand(selectedProjectPath, inspectedNode.id),
+                  ),
                 );
               }
             : undefined,
@@ -379,6 +457,7 @@ export default function App() {
       inspectedNode,
       inspectedNodeResolved,
       requestOpenProject,
+      routeGraphCommand,
       selectedProjectPath,
       selectedGraph,
       state,
@@ -789,6 +868,32 @@ export default function App() {
             {state.protocolWarnings.at(-1)}
           </div>
         ) : null}
+        {!state.quickChatsSelected && compositeBreadcrumbs.length > 1 ? (
+          <nav className="composite-breadcrumb" aria-label="Composite path">
+            {compositeBreadcrumbs.map((breadcrumb, index) => (
+              <span key={`${breadcrumb.depth}-${breadcrumb.label}`}>
+                {index ? <span aria-hidden="true">/</span> : null}
+                <button
+                  type="button"
+                  aria-current={
+                    breadcrumb.depth === state.compositePath.length
+                      ? "page"
+                      : undefined
+                  }
+                  disabled={breadcrumb.depth === state.compositePath.length}
+                  onClick={() =>
+                    dispatch({
+                      type: "leaveComposite",
+                      depth: breadcrumb.depth,
+                    })
+                  }
+                >
+                  {breadcrumb.label}
+                </button>
+              </span>
+            ))}
+          </nav>
+        ) : null}
         {state.quickChatsSelected ? (
           <QuickChatsView
             chats={state.quickChats}
@@ -837,7 +942,9 @@ export default function App() {
                             return;
                           }
                           await sendDaemonCommand(
-                            deleteEdgeCommand(selectedProjectPath, edge.id),
+                            routeGraphCommand(
+                              deleteEdgeCommand(selectedProjectPath, edge.id),
+                            ),
                           );
                         }
                       : undefined,
@@ -887,7 +994,9 @@ export default function App() {
             });
             try {
               await sendDaemonCommand(
-                createNodeCommand(selectedProjectPath, draft),
+                routeGraphCommand(
+                  createNodeCommand(selectedProjectPath, draft),
+                ),
               );
             } catch (error) {
               setPendingCreatedNode(undefined);
@@ -923,7 +1032,9 @@ export default function App() {
           onClose={() => setNewEdgeOpen(false)}
           onCreate={async (from, to, spec) => {
             await sendDaemonCommand(
-              createEdgeCommand(selectedProjectPath, from, to, spec),
+              routeGraphCommand(
+                createEdgeCommand(selectedProjectPath, from, to, spec),
+              ),
             );
           }}
         />
@@ -934,10 +1045,12 @@ export default function App() {
           onClose={() => setEditingLoop(undefined)}
           onSave={async (update) => {
             await sendDaemonCommand(
-              updateNodeCommand(
-                editingLoop.projectPath,
-                editingLoop.node.id,
-                update,
+              routeGraphCommand(
+                updateNodeCommand(
+                  editingLoop.projectPath,
+                  editingLoop.node.id,
+                  update,
+                ),
               ),
             );
           }}
@@ -949,11 +1062,13 @@ export default function App() {
           onClose={() => setMessagingLoop(undefined)}
           onSend={async (text, followUp) => {
             await sendDaemonCommand(
-              messageNodeCommand(
-                messagingLoop.projectPath,
-                messagingLoop.nodeId,
-                text,
-                followUp,
+              routeGraphCommand(
+                messageNodeCommand(
+                  messagingLoop.projectPath,
+                  messagingLoop.nodeId,
+                  text,
+                  followUp,
+                ),
               ),
             );
           }}
@@ -984,10 +1099,12 @@ export default function App() {
           onClose={() => setTextDialog(undefined)}
           onSubmit={async (title) => {
             await sendDaemonCommand(
-              renameNodeCommand(
-                textDialog.projectPath,
-                textDialog.nodeId,
-                title,
+              routeGraphCommand(
+                renameNodeCommand(
+                  textDialog.projectPath,
+                  textDialog.nodeId,
+                  title,
+                ),
               ),
             );
           }}
@@ -1003,10 +1120,12 @@ export default function App() {
           onClose={() => setTextDialog(undefined)}
           onSubmit={async (result) => {
             await sendDaemonCommand(
-              completeNodeCommand(
-                textDialog.projectPath,
-                textDialog.nodeId,
-                result || null,
+              routeGraphCommand(
+                completeNodeCommand(
+                  textDialog.projectPath,
+                  textDialog.nodeId,
+                  result || null,
+                ),
               ),
             );
           }}
@@ -1023,7 +1142,35 @@ export default function App() {
           onClose={() => setTextDialog(undefined)}
           onSubmit={async (text) => {
             await sendDaemonCommand(
-              memoNodeCommand(textDialog.projectPath, textDialog.nodeId, text),
+              routeGraphCommand(
+                memoNodeCommand(
+                  textDialog.projectPath,
+                  textDialog.nodeId,
+                  text,
+                ),
+              ),
+            );
+          }}
+        />
+      ) : null}
+      {textDialog?.kind === "refine" ? (
+        <LoopTextDialog
+          title={`Refine ${textDialog.nodeTitle}`}
+          description="Replace this loop's complete playbook for its next wake. Reading the current playbook and rollback history remains blocked on DT-001."
+          label="Replacement playbook"
+          multiline
+          required
+          submitLabel="Replace playbook"
+          onClose={() => setTextDialog(undefined)}
+          onSubmit={async (text) => {
+            await sendDaemonCommand(
+              routeGraphCommand(
+                refineNodeCommand(
+                  textDialog.projectPath,
+                  textDialog.nodeId,
+                  text,
+                ),
+              ),
             );
           }}
         />

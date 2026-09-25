@@ -46,3 +46,7 @@ reconnecting event stream with replay acknowledgement. React mutations use the t
 command registry and wait for correlated daemon outcomes. Quick Chat list, create,
 open, rename, delete, activity, and navigation are implemented; the opened workspace
 explicitly remains non-interactive until the local zmx terminal bridge is available.
+Composite snapshots can be drilled into through breadcrumbs, and graph mutations in
+that view are wrapped through the authoritative `subGraphCommand` parent chain.
+Playbook refine and rollback use the existing daemon commands; current playbook and
+rollback-history reads remain blocked on DT-001.
