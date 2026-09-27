@@ -41,6 +41,7 @@ import { ConnectionBanner } from "./components/ConnectionBanner";
 import { EditLoopDialog } from "./components/EditLoopDialog";
 import { EdgeInspector } from "./components/EdgeInspector";
 import { GraphCanvas, type GraphCanvasHandle } from "./components/GraphCanvas";
+import { InspectorPane } from "./components/InspectorPane";
 import { LoopTextDialog } from "./components/LoopTextDialog";
 import { LiveRegion } from "./components/LiveRegion";
 import { MailroomPostDialog } from "./components/MailroomPostDialog";
@@ -1446,30 +1447,41 @@ export default function App() {
                 });
               }}
             />
-            {selectedGraph && inspectedEdge ? (
-              <EdgeInspector
-                graph={selectedGraph}
-                edge={inspectedEdge}
-                commands={commandsForEdge(inspectedEdge)}
-                pendingCommandId={pendingCommandId}
-                onClose={() => setSelectedEdgeKey(undefined)}
-                onExecuteCommand={(command) => void executeCommand(command)}
-              />
-            ) : (
-              <NodeInspector
-                graph={selectedGraph}
-                node={inspectedNode}
-                mailbox={
-                  selectedProjectPath
-                    ? state.mailboxes[selectedProjectPath]
-                    : undefined
+            <InspectorPane
+              selectionKey={selectionKey}
+              onClose={() => {
+                if (inspectedEdge) {
+                  setSelectedEdgeKey(undefined);
+                } else {
+                  dispatch({ type: "clearNodeSelection" });
                 }
-                commands={nodeCommands}
-                pendingCommandId={pendingCommandId}
-                onClose={() => dispatch({ type: "clearNodeSelection" })}
-                onExecuteCommand={(command) => void executeCommand(command)}
-              />
-            )}
+              }}
+            >
+              {selectedGraph && inspectedEdge ? (
+                <EdgeInspector
+                  graph={selectedGraph}
+                  edge={inspectedEdge}
+                  commands={commandsForEdge(inspectedEdge)}
+                  pendingCommandId={pendingCommandId}
+                  onClose={() => setSelectedEdgeKey(undefined)}
+                  onExecuteCommand={(command) => void executeCommand(command)}
+                />
+              ) : (
+                <NodeInspector
+                  graph={selectedGraph}
+                  node={inspectedNode}
+                  mailbox={
+                    selectedProjectPath
+                      ? state.mailboxes[selectedProjectPath]
+                      : undefined
+                  }
+                  commands={nodeCommands}
+                  pendingCommandId={pendingCommandId}
+                  onClose={() => dispatch({ type: "clearNodeSelection" })}
+                  onExecuteCommand={(command) => void executeCommand(command)}
+                />
+              )}
+            </InspectorPane>
           </div>
         )}
       </section>
