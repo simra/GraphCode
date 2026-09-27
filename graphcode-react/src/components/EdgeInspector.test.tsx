@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import { EdgeInspector } from "./EdgeInspector";
 
 describe("EdgeInspector", () => {
-  it("shows endpoint, delivery, firing, and supported delete details", () => {
+  it("shows endpoint, delivery, firing, and supported edit details", () => {
     const markup = renderToStaticMarkup(
       <EdgeInspector
         graph={{
@@ -26,6 +26,15 @@ describe("EdgeInspector", () => {
         }}
         commands={[
           {
+            id: "edge.edit",
+            label: "Edit Edge",
+            description: "Edit",
+            category: "Loop",
+            surfaces: [],
+            enabled: true,
+            execute: () => undefined,
+          },
+          {
             id: "edge.delete",
             label: "Delete Edge",
             description: "Delete",
@@ -45,7 +54,8 @@ describe("EdgeInspector", () => {
     expect(markup).toContain("Build");
     expect(markup).toContain("handoff");
     expect(markup).toContain("Fired 3 times");
+    expect(markup).toContain("Edit Edge");
     expect(markup).toContain("Delete Edge");
-    expect(markup).toContain("DT-002");
+    expect(markup).toContain("atomic precondition");
   });
 });

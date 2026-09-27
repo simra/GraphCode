@@ -206,6 +206,16 @@ const loopEdgeSchema = z
     kind: z.string().optional(),
     condition: encodedEnum.optional(),
     payloadTransform: encodedEnum.optional(),
+    cycleGuard: optional(
+      z.object({
+        maxIterations: optional(z.number().int().positive()),
+        until: optional(z.string()),
+        stopAfterPassesWithoutImprovement: optional(
+          z.number().int().positive(),
+        ),
+      }),
+    ),
+    spawnTargetProjectPath: optional(z.string()),
     fireCount: z.number().int().nonnegative().optional(),
   })
   .passthrough();

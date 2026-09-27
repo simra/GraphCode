@@ -127,6 +127,7 @@ export function NodeInspector({
   const primaryCommandIds = new Set([
     "loop.message",
     "loop.edit",
+    ...(node.loopType === "sketch" ? ["loop.promote" as const] : []),
     ...(node.loopType === "composite" && node.subGraph
       ? ["loop.openComposite" as const]
       : []),

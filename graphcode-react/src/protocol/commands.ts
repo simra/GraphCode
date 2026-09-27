@@ -259,6 +259,29 @@ export type DeleteEdgeCommand = GraphCommandEnvelope<{
   deleteEdge: { _0: string };
 }>;
 
+export type UpdateEdgeCommand = GraphCommandEnvelope<{
+  updateEdge: {
+    id: string;
+    from: string;
+    to: string;
+    expectedSpec: EdgeSpecPayload;
+    spec: EdgeSpecPayload;
+  };
+}>;
+
+export type SketchPromotionPayload =
+  | { goal: { _0: GoalDraft } }
+  | { turn: { pausesBeforeWritesOnly: boolean } }
+  | { timed: { triggerPrompt: string } };
+
+export type PromoteNodeCommand = GraphCommandEnvelope<{
+  promoteNode: {
+    _0: string;
+    promotion: SketchPromotionPayload;
+    promotedBy: null;
+  };
+}>;
+
 export function stopNodeCommand(
   projectPath: string,
   nodeId: string,
@@ -622,6 +645,24 @@ export function createEdgeCommand(
   };
 }
 
+export function updateEdgeCommand(
+  projectPath: string,
+  id: string,
+  from: string,
+  to: string,
+  expectedSpec: EdgeSpecPayload,
+  spec: EdgeSpecPayload,
+): UpdateEdgeCommand {
+  return {
+    graphCommand: {
+      projectPath,
+      command: {
+        updateEdge: { id, from, to, expectedSpec, spec },
+      },
+    },
+  };
+}
+
 export function deleteEdgeCommand(
   projectPath: string,
   edgeId: string,
@@ -630,6 +671,25 @@ export function deleteEdgeCommand(
     graphCommand: {
       projectPath,
       command: { deleteEdge: { _0: edgeId } },
+    },
+  };
+}
+
+export function promoteNodeCommand(
+  projectPath: string,
+  nodeId: string,
+  promotion: SketchPromotionPayload,
+): PromoteNodeCommand {
+  return {
+    graphCommand: {
+      projectPath,
+      command: {
+        promoteNode: {
+          _0: nodeId,
+          promotion,
+          promotedBy: null,
+        },
+      },
     },
   };
 }

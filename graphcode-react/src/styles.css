@@ -1986,6 +1986,14 @@ kbd {
   margin-bottom: 20px;
 }
 
+.promotion-targets {
+  padding: 0;
+}
+
+.promotion-targets .loop-type-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
 .loop-type-grid label {
   display: grid;
   min-height: 112px;

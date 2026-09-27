@@ -23,6 +23,7 @@ import {
   openProjectCommand,
   memoNodeCommand,
   messageNodeCommand,
+  promoteNodeCommand,
   refreshUsageCommand,
   refineNodeCommand,
   pilotCompositeCommand,
@@ -32,6 +33,7 @@ import {
   resumeSessionCommand,
   rollbackRefinementCommand,
   stopNodeCommand,
+  updateEdgeCommand,
   updateNodeCommand,
 } from "./commands";
 
@@ -360,20 +362,25 @@ describe("daemon commands", () => {
     });
   });
 
-  it("encodes edge create and delete with the complete existing spec", () => {
+  it("encodes edge create, checked update, and delete with the complete existing spec", () => {
     const project = "C:\\work\\graph";
+    const expectedSpec = {
+      kind: "handoff" as const,
+      condition: "onSuccess" as const,
+      payloadTransform: { template: { _0: "payload {{output}}" } },
+      cycleGuard: {
+        maxIterations: 3,
+        until: "test -f done",
+        stopAfterPassesWithoutImprovement: 2,
+      },
+      spawnTargetProjectPath: null,
+    };
+    const updatedSpec = {
+      ...expectedSpec,
+      kind: "message" as const,
+    };
     expect(
-      createEdgeCommand(project, "source", "target", {
-        kind: "handoff",
-        condition: "onSuccess",
-        payloadTransform: { template: { _0: "payload {{output}}" } },
-        cycleGuard: {
-          maxIterations: 3,
-          until: "test -f done",
-          stopAfterPassesWithoutImprovement: 2,
-        },
-        spawnTargetProjectPath: null,
-      }),
+      createEdgeCommand(project, "source", "target", expectedSpec),
     ).toEqual({
       graphCommand: {
         projectPath: project,
@@ -398,10 +405,82 @@ describe("daemon commands", () => {
         },
       },
     });
+    expect(
+      updateEdgeCommand(
+        project,
+        "edge",
+        "source",
+        "target",
+        expectedSpec,
+        updatedSpec,
+      ),
+    ).toEqual({
+      graphCommand: {
+        projectPath: project,
+        command: {
+          updateEdge: {
+            id: "edge",
+            from: "source",
+            to: "target",
+            expectedSpec,
+            spec: updatedSpec,
+          },
+        },
+      },
+    });
     expect(deleteEdgeCommand(project, "edge")).toEqual({
       graphCommand: {
         projectPath: project,
         command: { deleteEdge: { _0: "edge" } },
+      },
+    });
+  });
+
+  it("encodes all authoritative sketch promotion associated-value shapes", () => {
+    const project = "C:\\work\\graph";
+    const node = "11111111-1111-4111-8111-111111111111";
+    const goal = {
+      summary: 'Done "well" 雪',
+      predicate: null,
+      pollIntervalSeconds: 60,
+      stallAfterSeconds: null,
+      metricCommand: null,
+      metricDirection: "maximize" as const,
+      tokenBudget: null,
+      skipsUnchangedWorkspace: false,
+    };
+    expect(promoteNodeCommand(project, node, { goal: { _0: goal } })).toEqual({
+      graphCommand: {
+        projectPath: project,
+        command: {
+          promoteNode: {
+            _0: node,
+            promotion: { goal: { _0: goal } },
+            promotedBy: null,
+          },
+        },
+      },
+    });
+    expect(
+      promoteNodeCommand(project, node, {
+        turn: { pausesBeforeWritesOnly: true },
+      }).graphCommand.command,
+    ).toEqual({
+      promoteNode: {
+        _0: node,
+        promotion: { turn: { pausesBeforeWritesOnly: true } },
+        promotedBy: null,
+      },
+    });
+    expect(
+      promoteNodeCommand(project, node, {
+        timed: { triggerPrompt: '/loop 1h watch "雪"' },
+      }).graphCommand.command,
+    ).toEqual({
+      promoteNode: {
+        _0: node,
+        promotion: { timed: { triggerPrompt: '/loop 1h watch "雪"' } },
+        promotedBy: null,
       },
     });
   });

@@ -329,7 +329,7 @@ describe("command registry", () => {
     ).toBe(true);
   });
 
-  it("enables edge creation and refuses deletion without a stable edge ID", () => {
+  it("enables edge creation and refuses stable-ID actions without an ID", () => {
     const state = stateWithSelectedNode();
     const commands = createCommandRegistry(state, {
       openPalette: vi.fn(),
@@ -343,9 +343,41 @@ describe("command registry", () => {
     );
 
     const missingId = createEdgeCommands(true, undefined, {
+      editEdge: vi.fn(),
       deleteEdge: vi.fn(async () => undefined),
     });
-    expect(missingId[0].disabledReason).toContain("no stable ID");
+    expect(
+      missingId.find((command) => command.id === "edge.edit")?.disabledReason,
+    ).toContain("no stable ID");
+    expect(
+      missingId.find((command) => command.id === "edge.delete")?.disabledReason,
+    ).toContain("no stable ID");
+  });
+
+  it("offers promotion only for a connected sketch and editing for stable edges", () => {
+    const state = stateWithSelectedNode();
+    state.graphs["C:\\work\\graph"].nodes[0].loopType = "sketch";
+    const promoteNode = vi.fn();
+    const promotion = createCommandRegistry(state, {
+      openPalette: vi.fn(),
+      clearSelection: vi.fn(),
+      selectNode: vi.fn(),
+      promoteNode,
+    }).find((command) => command.id === "loop.promote");
+    expect(promotion?.enabled).toBe(true);
+    promotion?.execute();
+    expect(promoteNode).toHaveBeenCalledOnce();
+
+    const editEdge = vi.fn();
+    const edgeCommands = createEdgeCommands(true, "edge", {
+      editEdge,
+      deleteEdge: vi.fn(async () => undefined),
+    });
+    expect(
+      edgeCommands.find((command) => command.id === "edge.edit")?.enabled,
+    ).toBe(true);
+    edgeCommands.find((command) => command.id === "edge.edit")?.execute();
+    expect(editEdge).toHaveBeenCalledOnce();
   });
 
   it("exposes client-owned automatic layout reset", () => {

@@ -103,9 +103,9 @@ export function EdgeInspector({
           </dl>
         </section>
         <p className="inspector-callout">
-          Existing-edge editing is unavailable until the daemon provides the
-          atomic DT-002 update contract. Delete remains authoritative and
-          requires a stable edge ID.
+          Edits use this edge's current delivery specification as an atomic
+          precondition. If the edge changed elsewhere, graphcoded refuses the
+          update instead of overwriting it.
         </p>
       </div>
     </aside>

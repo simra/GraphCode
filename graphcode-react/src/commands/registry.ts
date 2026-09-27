@@ -13,6 +13,7 @@ export type CommandId =
   | "chat.rename"
   | "chat.delete"
   | "edge.new"
+  | "edge.edit"
   | "edge.delete"
   | "loop.new"
   | "loop.stop"
@@ -22,6 +23,7 @@ export type CommandId =
   | "loop.delete"
   | "loop.refreshUsage"
   | "loop.edit"
+  | "loop.promote"
   | "loop.message"
   | "loop.memo"
   | "loop.refine"
@@ -107,6 +109,7 @@ export interface CommandActions {
   stopNode?(): Promise<void>;
   renameNode?(): void;
   editNode?(): void;
+  promoteNode?(): void;
   messageNode?(): void;
   memoNode?(): void;
   refineNode?(): void;
@@ -139,6 +142,7 @@ export interface ProjectRowCommandActions {
 }
 
 export interface EdgeCommandActions {
+  editEdge?(): void;
   deleteEdge?(): Promise<void>;
 }
 
@@ -343,6 +347,26 @@ export function createCommandRegistry(
                 ? "Reconnect to graphcoded before editing this loop"
                 : "Select a loop first",
             ),
+            execute: () => undefined,
+          }),
+    },
+    {
+      id: "loop.promote",
+      label: "Promote Main Loop",
+      description: "Give this sketch a goal, turn boundary, or cadence",
+      category: "Loop",
+      surfaces: ["node"],
+      ...(node?.loopType === "sketch"
+        ? connected && actions.promoteNode
+          ? { enabled: true, execute: actions.promoteNode }
+          : {
+              ...unavailable(
+                "Reconnect to graphcoded before promoting this loop",
+              ),
+              execute: () => undefined,
+            }
+        : {
+            ...unavailable("Only Main sketch loops can be promoted"),
             execute: () => undefined,
           }),
     },
@@ -901,6 +925,23 @@ export function createEdgeCommands(
   actions: EdgeCommandActions,
 ): AppCommand[] {
   return [
+    {
+      id: "edge.edit",
+      label: "Edit Edge",
+      description: "Update this connection without changing its identity",
+      category: "Loop",
+      surfaces: [],
+      ...(edgeId && connected && actions.editEdge
+        ? { enabled: true, execute: actions.editEdge }
+        : {
+            ...unavailable(
+              edgeId
+                ? "Reconnect to graphcoded before editing this edge"
+                : "This legacy edge has no stable ID and cannot be edited",
+            ),
+            execute: () => undefined,
+          }),
+    },
     {
       id: "edge.delete",
       label: "Delete Edge",

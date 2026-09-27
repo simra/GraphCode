@@ -55,7 +55,9 @@ import { NodeInspector } from "./components/NodeInspector";
 import { ProjectGraphTree } from "./components/ProjectGraphTree";
 import { ProjectRowActions } from "./components/ProjectRowActions";
 import { QuickChatsView } from "./components/QuickChatsView";
+import { SketchPromotionDialog } from "./components/SketchPromotionDialog";
 import { initialSnapshotFixture } from "./fixtures/initialSnapshot";
+import { edgeSpecFromSnapshot } from "./forms/edgeSpec";
 import {
   addressGraphCommand,
   armCompositeCommand,
@@ -80,6 +82,7 @@ import {
   openQuickChatCommand,
   openProjectCommand,
   pilotCompositeCommand,
+  promoteNodeCommand,
   refreshUsageCommand,
   refineNodeCommand,
   renameNodeCommand,
@@ -88,6 +91,8 @@ import {
   resumeSessionCommand,
   rollbackRefinementCommand,
   stopNodeCommand,
+  updateEdgeCommand,
+  type EdgeSpecPayload,
   type NodeDraftPayload,
   type GraphCommandEnvelope,
   updateNodeCommand,
@@ -114,6 +119,11 @@ export default function App() {
     from?: string;
     to?: string;
   }>();
+  const [editingEdge, setEditingEdge] = useState<{
+    projectPath: string;
+    edge: LoopEdge;
+    expectedSpec: EdgeSpecPayload;
+  }>();
   const [editingLoop, setEditingLoop] = useState<{
     projectPath: string;
     node: NonNullable<ReturnType<typeof selectedNode>>;
@@ -122,6 +132,10 @@ export default function App() {
     projectPath: string;
     nodeId: string;
     nodeTitle: string;
+  }>();
+  const [promotingNode, setPromotingNode] = useState<{
+    projectPath: string;
+    node: NonNullable<ReturnType<typeof selectedNode>>;
   }>();
   const [mailroomPosting, setMailroomPosting] = useState<{
     projectPath: string;
@@ -402,6 +416,14 @@ export default function App() {
           selectedProjectPath && inspectedNode
             ? () =>
                 setEditingLoop({
+                  projectPath: selectedProjectPath,
+                  node: inspectedNode,
+                })
+            : undefined,
+        promoteNode:
+          selectedProjectPath && inspectedNode?.loopType === "sketch"
+            ? () =>
+                setPromotingNode({
                   projectPath: selectedProjectPath,
                   node: inspectedNode,
                 })
@@ -850,6 +872,15 @@ export default function App() {
 
   function commandsForEdge(edge: LoopEdge) {
     return createEdgeCommands(state.connection.phase === "connected", edge.id, {
+      editEdge:
+        edge.id && selectedProjectPath
+          ? () =>
+              setEditingEdge({
+                projectPath: selectedProjectPath,
+                edge,
+                expectedSpec: edgeSpecFromSnapshot(edge),
+              })
+          : undefined,
       deleteEdge: edge.id
         ? async () => {
             if (!selectedProjectPath || !edge.id) return;
@@ -1556,6 +1587,31 @@ export default function App() {
           }}
         />
       ) : null}
+      {editingEdge ? (
+        <NewEdgeDialog
+          key={editingEdge.edge.id}
+          nodes={selectedGraph?.nodes ?? []}
+          edge={editingEdge.edge}
+          onClose={() => setEditingEdge(undefined)}
+          onUpdate={async (spec) => {
+            const edge = editingEdge.edge;
+            if (!edge.id) throw new Error("This edge has no stable ID.");
+            await sendDaemonCommand(
+              routeGraphCommand(
+                updateEdgeCommand(
+                  editingEdge.projectPath,
+                  edge.id,
+                  edge.from,
+                  edge.to,
+                  editingEdge.expectedSpec,
+                  spec,
+                ),
+              ),
+            );
+            announce("Updated edge.");
+          }}
+        />
+      ) : null}
       {editingLoop ? (
         <EditLoopDialog
           node={editingLoop.node}
@@ -1571,6 +1627,24 @@ export default function App() {
               ),
             );
             announce(`Updated loop ${editingLoop.node.title}.`);
+          }}
+        />
+      ) : null}
+      {promotingNode ? (
+        <SketchPromotionDialog
+          node={promotingNode.node}
+          onClose={() => setPromotingNode(undefined)}
+          onPromote={async (promotion) => {
+            await sendDaemonCommand(
+              routeGraphCommand(
+                promoteNodeCommand(
+                  promotingNode.projectPath,
+                  promotingNode.node.id,
+                  promotion,
+                ),
+              ),
+            );
+            announce(`Promoted ${promotingNode.node.title}.`);
           }}
         />
       ) : null}

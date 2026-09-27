@@ -159,6 +159,12 @@ export interface LoopEdge {
   kind?: string;
   condition?: EncodedEnum;
   payloadTransform?: EncodedEnum;
+  cycleGuard?: {
+    maxIterations?: number;
+    until?: string;
+    stopAfterPassesWithoutImprovement?: number;
+  };
+  spawnTargetProjectPath?: string;
   fireCount?: number;
   [field: string]: unknown;
 }
