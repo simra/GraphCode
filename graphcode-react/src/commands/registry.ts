@@ -123,6 +123,7 @@ export interface CommandActions {
   searchMailroom?(): void;
   configureMailroomWatch?(): void;
   postMailroom?(): void;
+  openTerminal?(): void;
   restartSession?(): Promise<void>;
   completeNode?(): void;
   deleteNode?(): Promise<void>;
@@ -710,14 +711,24 @@ export function createCommandRegistry(
       label: "Open Terminal",
       description: "Attach to the selected loop's zmx session",
       category: "Loop",
-      shortcut: { key: "Enter", label: "Enter" },
       surfaces: ["node"],
-      ...unavailable(
-        node
-          ? "Terminal streaming requires the zmx bridge"
-          : "Select a loop first",
-      ),
-      execute: () => undefined,
+      ...(node &&
+      node.loopType !== "sketch" &&
+      !isComposite &&
+      actions.openTerminal
+        ? { enabled: true, execute: actions.openTerminal }
+        : {
+            ...unavailable(
+              node
+                ? isComposite
+                  ? "Composite loops open their child graph"
+                  : node.loopType === "sketch"
+                    ? "Promote this sketch before opening a terminal"
+                    : "Terminal streaming requires the desktop app"
+                : "Select a loop first",
+            ),
+            execute: () => undefined,
+          }),
     },
     {
       id: "loop.delete",

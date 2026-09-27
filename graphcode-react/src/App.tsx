@@ -44,6 +44,7 @@ import { GraphCanvas, type GraphCanvasHandle } from "./components/GraphCanvas";
 import { InspectorPane } from "./components/InspectorPane";
 import { LoopTextDialog } from "./components/LoopTextDialog";
 import { LiveRegion } from "./components/LiveRegion";
+import { LoopWorkspace } from "./components/LoopWorkspace";
 import { MailroomPostDialog } from "./components/MailroomPostDialog";
 import { MailroomWatchDialog } from "./components/MailroomWatchDialog";
 import { MailroomView } from "./components/MailroomView";
@@ -114,6 +115,7 @@ export default function App() {
   const [newLoopOpen, setNewLoopOpen] = useState(false);
   const [newQuickChatOpen, setNewQuickChatOpen] = useState(false);
   const [newEdgeOpen, setNewEdgeOpen] = useState(false);
+  const [terminalNodeId, setTerminalNodeId] = useState<string>();
   const [selectedEdgeKey, setSelectedEdgeKey] = useState<string>();
   const [newEdgeEndpoints, setNewEdgeEndpoints] = useState<{
     from?: string;
@@ -300,6 +302,15 @@ export default function App() {
     inspectedNodeState &&
     ["succeeded", "failed", "stalled", "stopped"].includes(inspectedNodeState),
   );
+  const terminalNode =
+    terminalNodeId && inspectedNode?.id === terminalNodeId
+      ? inspectedNode
+      : undefined;
+  useEffect(() => {
+    if (terminalNodeId && inspectedNode?.id !== terminalNodeId) {
+      setTerminalNodeId(undefined);
+    }
+  }, [inspectedNode?.id, terminalNodeId]);
   const selectionKey = inspectedEdge
     ? `edge:${selectedProjectPath}:${selectedViewKey}:${selectedEdgeKey}`
     : inspectedNode
@@ -372,6 +383,10 @@ export default function App() {
         openNewLoop: () => setNewLoopOpen(true),
         openNewQuickChat: () => setNewQuickChatOpen(true),
         openMailroom: () => dispatch({ type: "selectMailroom" }),
+        openTerminal:
+          "__TAURI_INTERNALS__" in window && inspectedNode
+            ? () => setTerminalNodeId(inspectedNode.id)
+            : undefined,
         openNewEdge: () => {
           setNewEdgeEndpoints({ from: inspectedNode?.id });
           setNewEdgeOpen(true);
@@ -1296,7 +1311,16 @@ export default function App() {
             ))}
           </nav>
         ) : null}
-        {state.quickChatsSelected ? (
+        {terminalNode && selectedGraph ? (
+          <LoopWorkspace
+            graph={selectedGraph}
+            node={terminalNode}
+            commands={nodeCommands}
+            pendingCommandId={pendingCommandId}
+            onBack={() => setTerminalNodeId(undefined)}
+            onExecuteCommand={(command) => void executeCommand(command)}
+          />
+        ) : state.quickChatsSelected ? (
           <QuickChatsView
             chats={state.quickChats}
             selectedChat={inspectedQuickChat}

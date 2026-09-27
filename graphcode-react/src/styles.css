@@ -643,6 +643,95 @@ kbd {
   gap: 18px;
 }
 
+.loop-workspace {
+  min-width: 0;
+}
+
+.loop-workspace-header {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 24px;
+  margin-bottom: 14px;
+}
+
+.loop-workspace-header h2 {
+  margin: 4px 0 0;
+  font-size: 1.45rem;
+}
+
+.workspace-back {
+  margin: 0 0 10px;
+  padding: 0;
+  border: 0;
+  color: #a9c5a1;
+  background: transparent;
+  cursor: pointer;
+}
+
+.workspace-back:hover {
+  color: #d7f3ce;
+}
+
+.terminal-phase {
+  padding: 6px 10px;
+  border: 1px solid #434a40;
+  border-radius: 999px;
+  color: #abb2a7;
+  background: #1d211c;
+  font-size: 0.76rem;
+}
+
+.terminal-phase-connected {
+  border-color: #4f7049;
+  color: #b9e4ad;
+}
+
+.terminal-phase-failed {
+  border-color: #734b43;
+  color: #e6b0a5;
+}
+
+.terminal-notice,
+.terminal-error {
+  margin: 0 0 12px;
+  padding: 9px 12px;
+  border: 1px solid #5b5537;
+  border-radius: 8px;
+  color: #dfcf92;
+  background: rgba(91, 79, 43, 0.2);
+  font-size: 0.82rem;
+}
+
+.terminal-error {
+  border-color: #734b43;
+  color: #e6b0a5;
+  background: rgba(99, 50, 42, 0.22);
+}
+
+.loop-workspace-content {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(340px, 400px);
+  align-items: start;
+  gap: 18px;
+  min-width: 0;
+}
+
+.terminal-host {
+  min-width: 0;
+  height: max(520px, calc(100vh - 230px));
+  padding: 12px;
+  overflow: hidden;
+  border: 1px solid #30362d;
+  border-radius: 14px;
+  background: #0d0f0c;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.015);
+}
+
+.terminal-host .xterm {
+  height: 100%;
+}
+
 .mailroom-view {
   min-width: 0;
   border: 1px solid #30362d;
@@ -2226,6 +2315,15 @@ kbd {
     grid-template-columns: minmax(0, 1fr);
   }
 
+  .loop-workspace-content {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .loop-workspace-content > .node-inspector {
+    position: static;
+    max-height: none;
+  }
+
   @media (max-width: 900px) {
     .mailroom-header {
       align-items: stretch;
@@ -2362,6 +2460,15 @@ kbd {
   .quick-chat-workspace > header {
     align-items: flex-start;
     flex-direction: column;
+  }
+
+  .loop-workspace-header {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .terminal-host {
+    height: min(68vh, 620px);
   }
 }
 

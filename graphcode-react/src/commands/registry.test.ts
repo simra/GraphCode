@@ -77,6 +77,36 @@ describe("command registry", () => {
     ).toContain("next frontend task");
   });
 
+  it("opens terminals for executable loops but not sketches", () => {
+    const state = stateWithSelectedNode();
+    const openTerminal = vi.fn();
+    let commands = createCommandRegistry(state, {
+      openPalette: vi.fn(),
+      clearSelection: vi.fn(),
+      selectNode: vi.fn(),
+      openTerminal,
+    });
+
+    const command = commands.find(
+      (candidate) => candidate.id === "loop.openTerminal",
+    );
+    expect(command?.enabled).toBe(true);
+    command?.execute();
+    expect(openTerminal).toHaveBeenCalledOnce();
+
+    state.graphs["C:\\work\\graph"].nodes[0].loopType = "sketch";
+    commands = createCommandRegistry(state, {
+      openPalette: vi.fn(),
+      clearSelection: vi.fn(),
+      selectNode: vi.fn(),
+      openTerminal,
+    });
+    expect(
+      commands.find((candidate) => candidate.id === "loop.openTerminal")
+        ?.disabledReason,
+    ).toContain("Promote this sketch");
+  });
+
   it("uses the same registry execution for relative navigation", () => {
     const selectNode = vi.fn();
     const commands = createCommandRegistry(stateWithSelectedNode(), {
