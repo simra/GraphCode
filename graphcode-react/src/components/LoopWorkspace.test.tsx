@@ -17,7 +17,9 @@ const bridge = vi.hoisted(() => ({
 const xterm = vi.hoisted(() => ({
   dataHandler: undefined as ((data: string) => void) | undefined,
   dispose: vi.fn(),
+  fitCalls: 0,
   focus: vi.fn(),
+  instance: undefined as { cols: number; rows: number } | undefined,
   writes: [] as Uint8Array[],
 }));
 
@@ -28,7 +30,13 @@ vi.mock("../bridge/terminal", () => ({
 
 vi.mock("@xterm/addon-fit", () => ({
   FitAddon: class {
-    fit() {}
+    fit() {
+      xterm.fitCalls += 1;
+      if (xterm.fitCalls > 1 && xterm.instance) {
+        xterm.instance.cols = 112;
+        xterm.instance.rows = 31;
+      }
+    }
   },
 }));
 
@@ -36,6 +44,9 @@ vi.mock("@xterm/xterm", () => ({
   Terminal: class {
     cols = 80;
     rows = 24;
+    constructor() {
+      xterm.instance = this;
+    }
     loadAddon() {}
     open() {}
     focus = xterm.focus;
@@ -80,6 +91,8 @@ beforeEach(() => {
   vi.stubGlobal("ResizeObserver", ResizeObserverStub);
   xterm.writes = [];
   xterm.dataHandler = undefined;
+  xterm.fitCalls = 0;
+  xterm.instance = undefined;
   bridge.loadTerminalHistory.mockReset();
   bridge.loadTerminalHistory.mockResolvedValue({
     bytes: new TextEncoder().encode("history"),
@@ -95,6 +108,7 @@ beforeEach(() => {
     close: bridge.close,
   });
   bridge.write.mockClear();
+  bridge.resize.mockClear();
   bridge.close.mockClear();
 });
 
@@ -130,6 +144,7 @@ describe("LoopWorkspace", () => {
     );
     expect(new TextDecoder().decode(xterm.writes[0])).toBe("history");
     expect(container.textContent).toContain("Live");
+    expect(bridge.resize).toHaveBeenCalledWith(112, 31);
 
     await act(async () => {
       xterm.dataHandler?.("echo test\r");

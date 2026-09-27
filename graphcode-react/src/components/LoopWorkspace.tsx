@@ -43,6 +43,9 @@ export function LoopWorkspace({
 
     let active = true;
     let resizeTimer: number | undefined;
+    let inputSubscription: { dispose(): void } | undefined;
+    let lastSentColumns: number | undefined;
+    let lastSentRows: number | undefined;
     const terminal = new Terminal({
       cursorBlink: true,
       convertEol: false,
@@ -69,6 +72,26 @@ export function LoopWorkspace({
       setError(value instanceof Error ? value.message : String(value));
     };
 
+    const fitAndResize = () => {
+      if (!active) return;
+      fit.fit();
+      const connection = connectionRef.current;
+      if (
+        !connection ||
+        (terminal.cols === lastSentColumns && terminal.rows === lastSentRows)
+      ) {
+        return;
+      }
+      lastSentColumns = terminal.cols;
+      lastSentRows = terminal.rows;
+      void connection.resize(terminal.cols, terminal.rows).catch(reportError);
+    };
+
+    const scheduleFit = () => {
+      window.clearTimeout(resizeTimer);
+      resizeTimer = window.setTimeout(fitAndResize, 100);
+    };
+
     void (async () => {
       try {
         const history = await loadTerminalHistory(node.id);
@@ -80,10 +103,12 @@ export function LoopWorkspace({
           );
         }
         if (!active) return;
+        const openedColumns = terminal.cols;
+        const openedRows = terminal.rows;
         const connection = await openTerminal(
           node.id,
-          terminal.cols,
-          terminal.rows,
+          openedColumns,
+          openedRows,
           {
             onOutput(bytes, _sequence, acknowledge) {
               if (!active) return;
@@ -102,8 +127,14 @@ export function LoopWorkspace({
           return;
         }
         connectionRef.current = connection;
-        terminal.onData((data) => {
+        lastSentColumns = openedColumns;
+        lastSentRows = openedRows;
+        inputSubscription = terminal.onData((data) => {
           void connection.write(data).catch(reportError);
+        });
+        fitAndResize();
+        void document.fonts?.ready.then(() => {
+          if (active) scheduleFit();
         });
         setPhase("connected");
       } catch (caught) {
@@ -111,22 +142,18 @@ export function LoopWorkspace({
       }
     })();
 
-    const resizeObserver = new ResizeObserver(() => {
-      window.clearTimeout(resizeTimer);
-      resizeTimer = window.setTimeout(() => {
-        if (!active) return;
-        fit.fit();
-        void connectionRef.current
-          ?.resize(terminal.cols, terminal.rows)
-          .catch(reportError);
-      }, 100);
-    });
+    const resizeObserver = new ResizeObserver(scheduleFit);
     resizeObserver.observe(container);
+    window.addEventListener("resize", scheduleFit);
+    window.visualViewport?.addEventListener("resize", scheduleFit);
 
     return () => {
       active = false;
       resizeObserver.disconnect();
+      window.removeEventListener("resize", scheduleFit);
+      window.visualViewport?.removeEventListener("resize", scheduleFit);
       window.clearTimeout(resizeTimer);
+      inputSubscription?.dispose();
       const connection = connectionRef.current;
       connectionRef.current = undefined;
       if (connection) void connection.close();
