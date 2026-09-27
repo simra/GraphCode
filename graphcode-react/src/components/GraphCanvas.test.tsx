@@ -7,6 +7,7 @@ import {
   buildGraphLayout,
   edgeTargetAtPoint,
   GraphCanvas,
+  shouldHydrateLayout,
   zoomedViewport,
 } from "./GraphCanvas";
 
@@ -111,6 +112,21 @@ describe("graph layout", () => {
 
     expect(zoomed.x + zoomed.width * 0.6).toBe(anchor.x);
     expect(zoomed.y + zoomed.height * 0.4).toBe(anchor.y);
+  });
+
+  it("hydrates layout only when the view changes or storage becomes ready", () => {
+    expect(shouldHydrateLayout(undefined, false, "project:root", false)).toBe(
+      true,
+    );
+    expect(
+      shouldHydrateLayout("project:root", false, "project:root", true),
+    ).toBe(true);
+    expect(
+      shouldHydrateLayout("project:root", true, "project:root", true),
+    ).toBe(false);
+    expect(
+      shouldHydrateLayout("project:root", true, "project:composite", true),
+    ).toBe(true);
   });
 
   it("exposes pointer connection handles and describes the keyboard alternative", () => {

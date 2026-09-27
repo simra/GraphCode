@@ -75,6 +75,15 @@ export interface GraphCanvasHandle {
   resetLayout(): void;
 }
 
+export function shouldHydrateLayout(
+  previousKey: string | undefined,
+  previousReady: boolean,
+  nextKey: string | undefined,
+  nextReady: boolean,
+): boolean {
+  return previousKey !== nextKey || (!previousReady && nextReady);
+}
+
 export function edgeTargetAtPoint(
   nodes: LoopNode[],
   positions: Map<string, Position>,
@@ -275,6 +284,7 @@ export const GraphCanvas = forwardRef<
     pendingCommandId?: string;
     initialViewport?: Viewport;
     initialNodePositions?: Record<string, Position>;
+    layoutReady?: boolean;
     viewportKey?: string;
     onSelectNode?(nodeId: string): void;
     onSelectEdge?(edgeKey?: string): void;
@@ -292,6 +302,7 @@ export const GraphCanvas = forwardRef<
     pendingCommandId,
     initialViewport,
     initialNodePositions = emptyNodePositions,
+    layoutReady = false,
     viewportKey,
     onSelectNode,
     onSelectEdge,
@@ -328,10 +339,30 @@ export const GraphCanvas = forwardRef<
   const svgRef = useRef<SVGSVGElement>(null);
   const onViewportChangeRef = useRef(onViewportChange);
   const onNodePositionsChangeRef = useRef(onNodePositionsChange);
+  const viewportHydrationRef = useRef<{
+    key: string | undefined;
+    ready: boolean;
+  }>({ key: undefined, ready: false });
+  const nodePositionHydrationRef = useRef<{
+    key: string | undefined;
+    ready: boolean;
+  }>({ key: undefined, ready: false });
   onViewportChangeRef.current = onViewportChange;
   onNodePositionsChangeRef.current = onNodePositionsChange;
 
   useEffect(() => {
+    const previous = viewportHydrationRef.current;
+    if (
+      !shouldHydrateLayout(
+        previous.key,
+        previous.ready,
+        viewportKey,
+        layoutReady,
+      )
+    ) {
+      return;
+    }
+    viewportHydrationRef.current = { key: viewportKey, ready: layoutReady };
     const next = initialViewport ?? fittedViewport(automaticLayout);
     setViewport((current) =>
       current.x === next.x &&
@@ -345,17 +376,24 @@ export const GraphCanvas = forwardRef<
     edgeDragRef.current = undefined;
     touchPointersRef.current.clear();
     pinchRef.current = undefined;
-  }, [
-    graph?.id,
-    initialViewport?.height,
-    initialViewport?.width,
-    initialViewport?.x,
-    initialViewport?.y,
-    automaticLayout,
-    viewportKey,
-  ]);
+  }, [automaticLayout, initialViewport, layoutReady, viewportKey]);
 
   useEffect(() => {
+    const previous = nodePositionHydrationRef.current;
+    if (
+      !shouldHydrateLayout(
+        previous.key,
+        previous.ready,
+        viewportKey,
+        layoutReady,
+      )
+    ) {
+      return;
+    }
+    nodePositionHydrationRef.current = {
+      key: viewportKey,
+      ready: layoutReady,
+    };
     setNodePositions((current) => {
       const currentEntries = Object.entries(current);
       const nextEntries = Object.entries(initialNodePositions);
@@ -369,7 +407,7 @@ export const GraphCanvas = forwardRef<
         : initialNodePositions;
     });
     nodeDragRef.current = undefined;
-  }, [graph?.id, initialNodePositions, viewportKey]);
+  }, [initialNodePositions, layoutReady, viewportKey]);
 
   useEffect(() => {
     onViewportChangeRef.current?.(viewport);

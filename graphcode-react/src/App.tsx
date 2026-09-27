@@ -1312,6 +1312,7 @@ export default function App() {
               pendingCommandId={pendingCommandId}
               initialViewport={savedViewport}
               initialNodePositions={savedNodePositions}
+              layoutReady={uiLayout !== undefined}
               viewportKey={
                 selectedProjectPath
                   ? `${selectedProjectPath}\0${selectedViewKey}`
