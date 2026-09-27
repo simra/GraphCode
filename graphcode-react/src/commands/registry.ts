@@ -3,6 +3,8 @@ import { currentGraph, selectedNode } from "../state/graphState";
 
 export type CommandId =
   | "app.commandPalette"
+  | "app.settings"
+  | "workspace.manage"
   | "project.openFolder"
   | "project.close"
   | "project.forget"
@@ -100,6 +102,8 @@ export function selectHeaderCommands(
 
 export interface CommandActions {
   openPalette(): void;
+  openSettings?(): void;
+  manageWorkspaces?(): void;
   openProjectFolder?(): Promise<void>;
   openNewQuickChat?(): void;
   openNewLoop?(): void;
@@ -220,6 +224,32 @@ export function createCommandRegistry(
       surfaces: ["header"],
       enabled: true,
       execute: actions.openPalette,
+    },
+    {
+      id: "app.settings",
+      label: "Settings",
+      description: "Configure this GraphCode workspace",
+      category: "Application",
+      surfaces: [],
+      ...(actions.openSettings
+        ? { enabled: true, execute: actions.openSettings }
+        : {
+            ...unavailable("Settings require the Tauri desktop client"),
+            execute: () => undefined,
+          }),
+    },
+    {
+      id: "workspace.manage",
+      label: "Manage Workspaces",
+      description: "Create, rename, or open an isolated GraphCode workspace",
+      category: "Application",
+      surfaces: [],
+      ...(actions.manageWorkspaces
+        ? { enabled: true, execute: actions.manageWorkspaces }
+        : {
+            ...unavailable("Workspaces require the Tauri desktop client"),
+            execute: () => undefined,
+          }),
     },
     {
       id: "project.openFolder",

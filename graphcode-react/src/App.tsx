@@ -56,7 +56,9 @@ import { NodeInspector } from "./components/NodeInspector";
 import { ProjectGraphTree } from "./components/ProjectGraphTree";
 import { ProjectRowActions } from "./components/ProjectRowActions";
 import { QuickChatsView } from "./components/QuickChatsView";
+import { SettingsDialog } from "./components/SettingsDialog";
 import { SketchPromotionDialog } from "./components/SketchPromotionDialog";
+import { WorkspacesDialog } from "./components/WorkspacesDialog";
 import { initialSnapshotFixture } from "./fixtures/initialSnapshot";
 import { edgeSpecFromSnapshot } from "./forms/edgeSpec";
 import {
@@ -116,6 +118,8 @@ export default function App() {
   const [newQuickChatOpen, setNewQuickChatOpen] = useState(false);
   const [newEdgeOpen, setNewEdgeOpen] = useState(false);
   const [terminalNodeId, setTerminalNodeId] = useState<string>();
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [workspacesOpen, setWorkspacesOpen] = useState(false);
   const [selectedEdgeKey, setSelectedEdgeKey] = useState<string>();
   const [newEdgeEndpoints, setNewEdgeEndpoints] = useState<{
     from?: string;
@@ -373,6 +377,14 @@ export default function App() {
     () =>
       createCommandRegistry(state, {
         openPalette: () => setPaletteOpen(true),
+        openSettings:
+          "__TAURI_INTERNALS__" in window
+            ? () => setSettingsOpen(true)
+            : undefined,
+        manageWorkspaces:
+          "__TAURI_INTERNALS__" in window
+            ? () => setWorkspacesOpen(true)
+            : undefined,
         openProjectFolder:
           "__TAURI_INTERNALS__" in window
             ? async () => {
@@ -1239,8 +1251,24 @@ export default function App() {
           </ul>
         </nav>
         <div className="sidebar-footer">
-          <span>Protocol v2</span>
-          <span>Sequence {state.lastSequence}</span>
+          <div>
+            {commands
+              .filter((command) =>
+                ["workspace.manage", "app.settings"].includes(command.id),
+              )
+              .map((command) => (
+                <button
+                  key={command.id}
+                  type="button"
+                  disabled={!command.enabled}
+                  title={command.disabledReason}
+                  onClick={() => void executeCommand(command)}
+                >
+                  {command.label}
+                </button>
+              ))}
+          </div>
+          <span>Protocol v2 · Sequence {state.lastSequence}</span>
         </div>
       </aside>
       <section className="main-column">
@@ -1547,6 +1575,12 @@ export default function App() {
         onClose={() => setPaletteOpen(false)}
         onExecute={(command) => void executeCommand(command)}
       />
+      {settingsOpen ? (
+        <SettingsDialog onClose={() => setSettingsOpen(false)} />
+      ) : null}
+      {workspacesOpen ? (
+        <WorkspacesDialog onClose={() => setWorkspacesOpen(false)} />
+      ) : null}
       {newLoopOpen && selectedGraph && selectedProjectPath ? (
         <NewLoopDialog
           projectName={selectedGraph.project.name}

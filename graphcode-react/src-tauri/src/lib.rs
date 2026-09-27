@@ -1,9 +1,11 @@
 mod connection;
 mod endpoint;
 mod protocol;
+mod settings;
 mod terminal;
 mod transport;
 mod ui_layout;
+mod workspace;
 
 use std::sync::Mutex;
 
@@ -17,12 +19,26 @@ use tauri::{
 };
 use thiserror::Error;
 
-#[derive(Default)]
 struct BridgeState {
     connection: Mutex<Option<ConnectionHandle>>,
     native_menu_revision: Mutex<u64>,
+    settings: Mutex<()>,
     terminal: terminal::TerminalManager,
     ui_layout: Mutex<()>,
+    _workspace_guard: workspace::WorkspaceGuard,
+}
+
+impl BridgeState {
+    fn new() -> Result<Self, workspace::WorkspaceError> {
+        Ok(Self {
+            connection: Mutex::new(None),
+            native_menu_revision: Mutex::new(0),
+            settings: Mutex::new(()),
+            terminal: terminal::TerminalManager::default(),
+            ui_layout: Mutex::new(()),
+            _workspace_guard: workspace::WorkspaceGuard::acquire()?,
+        })
+    }
 }
 
 #[derive(Debug, Error)]
@@ -41,8 +57,14 @@ enum BridgeError {
     Menu(String),
     #[error("failed to access persistent UI layout: {0}")]
     UiLayout(String),
+    #[error("workspace operation failed to finish: {0}")]
+    WorkspaceTask(String),
+    #[error(transparent)]
+    Settings(#[from] settings::SettingsError),
     #[error(transparent)]
     Terminal(#[from] terminal::TerminalError),
+    #[error(transparent)]
+    Workspace(#[from] workspace::WorkspaceError),
     #[error(transparent)]
     Connection(#[from] connection::ConnectionError),
 }
@@ -214,6 +236,57 @@ async fn load_terminal_history(
 }
 
 #[tauri::command]
+fn load_settings(state: State<'_, BridgeState>) -> Result<settings::SettingsSnapshot, BridgeError> {
+    let _guard = state.settings.lock().expect("settings mutex poisoned");
+    settings::load().map_err(Into::into)
+}
+
+#[tauri::command]
+fn set_daemon_heartbeat_enabled(
+    state: State<'_, BridgeState>,
+    expected_revision: String,
+    enabled: bool,
+) -> Result<settings::SettingsSnapshot, BridgeError> {
+    let _guard = state.settings.lock().expect("settings mutex poisoned");
+    settings::set_daemon_heartbeat(&expected_revision, enabled).map_err(Into::into)
+}
+
+#[tauri::command]
+async fn list_workspaces() -> Result<Vec<workspace::WorkspaceSummary>, BridgeError> {
+    tauri::async_runtime::spawn_blocking(workspace::list)
+        .await
+        .map_err(|error| BridgeError::WorkspaceTask(error.to_string()))?
+        .map_err(Into::into)
+}
+
+#[tauri::command]
+async fn create_workspace(name: String) -> Result<workspace::WorkspaceSummary, BridgeError> {
+    tauri::async_runtime::spawn_blocking(move || workspace::create(&name))
+        .await
+        .map_err(|error| BridgeError::WorkspaceTask(error.to_string()))?
+        .map_err(Into::into)
+}
+
+#[tauri::command]
+async fn rename_workspace(
+    id: String,
+    name: String,
+) -> Result<workspace::WorkspaceSummary, BridgeError> {
+    tauri::async_runtime::spawn_blocking(move || workspace::rename(&id, &name))
+        .await
+        .map_err(|error| BridgeError::WorkspaceTask(error.to_string()))?
+        .map_err(Into::into)
+}
+
+#[tauri::command]
+async fn open_workspace(id: String) -> Result<(), BridgeError> {
+    tauri::async_runtime::spawn_blocking(move || workspace::open(&id))
+        .await
+        .map_err(|error| BridgeError::WorkspaceTask(error.to_string()))?
+        .map_err(Into::into)
+}
+
+#[tauri::command]
 fn set_native_menu(
     app: tauri::AppHandle,
     state: State<'_, BridgeState>,
@@ -322,9 +395,10 @@ fn save_ui_node_positions(
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    let state = BridgeState::new().expect("failed to initialize GraphCode workspace state");
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
-        .manage(BridgeState::default())
+        .manage(state)
         .on_menu_event(|app, event| {
             let _ = app.emit("menu://command", event.id().as_ref());
         })
@@ -338,6 +412,12 @@ pub fn run() {
             acknowledge_terminal_output,
             close_terminal,
             load_terminal_history,
+            load_settings,
+            set_daemon_heartbeat_enabled,
+            list_workspaces,
+            create_workspace,
+            rename_workspace,
+            open_workspace,
             set_native_menu,
             load_ui_layout,
             save_ui_viewport,

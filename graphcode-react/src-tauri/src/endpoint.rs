@@ -140,7 +140,7 @@ fn discover_windows() -> Result<DaemonEndpoint, EndpointError> {
 }
 
 #[cfg(windows)]
-fn current_windows_sid() -> Result<String, EndpointError> {
+pub(crate) fn current_windows_sid() -> Result<String, EndpointError> {
     use std::ffi::c_void;
     use std::ptr::{null_mut, NonNull};
     use windows_sys::Win32::Foundation::{CloseHandle, LocalFree, HANDLE, HLOCAL};
