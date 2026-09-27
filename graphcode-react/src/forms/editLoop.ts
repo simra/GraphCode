@@ -20,6 +20,52 @@ export type EditLoopErrors = Partial<
   Record<keyof EditLoopFormState | "form", string>
 >;
 
+export interface TimedSchedule {
+  scheduler: "daemon" | "session" | "unconfigured";
+  cadence?: string;
+  task?: string;
+}
+
+export function parseSessionSchedule(
+  prompt: string | undefined,
+): { cadence: string; task: string } | undefined {
+  const match = prompt?.trim().match(/^\/(?:loop|every)\s+(\S+)\s+([\s\S]+)$/i);
+  if (!match) return undefined;
+  return { cadence: match[1], task: match[2].trim() };
+}
+
+export function timedSchedule(node: LoopNode): TimedSchedule {
+  if (
+    node.heartbeatIntervalSeconds !== undefined &&
+    node.heartbeatIntervalSeconds > 0
+  ) {
+    return {
+      scheduler: "daemon",
+      cadence: formatScheduleSeconds(node.heartbeatIntervalSeconds),
+      task: node.triggerPrompt?.trim(),
+    };
+  }
+  const sessionSchedule = parseSessionSchedule(node.triggerPrompt);
+  return sessionSchedule
+    ? { scheduler: "session", ...sessionSchedule }
+    : {
+        scheduler: "unconfigured",
+        task: node.triggerPrompt?.trim(),
+      };
+}
+
+function formatScheduleSeconds(seconds: number): string {
+  if (seconds % 3600 === 0) {
+    const hours = seconds / 3600;
+    return `${hours} ${hours === 1 ? "hour" : "hours"}`;
+  }
+  if (seconds % 60 === 0) {
+    const minutes = seconds / 60;
+    return `${minutes} ${minutes === 1 ? "minute" : "minutes"}`;
+  }
+  return `${seconds} ${seconds === 1 ? "second" : "seconds"}`;
+}
+
 export function editLoopInitialState(node: LoopNode): EditLoopFormState {
   return {
     goalSummary: node.goal?.summary ?? "",
@@ -96,6 +142,14 @@ export function validateEditLoop(
       errors,
       false,
     );
+    if (
+      !form.heartbeatIntervalSeconds.trim() &&
+      form.triggerPrompt.trim() &&
+      !parseSessionSchedule(form.triggerPrompt)
+    ) {
+      errors.heartbeatIntervalSeconds =
+        "Set a daemon heartbeat or begin the prompt with /loop <interval> or /every <interval>.";
+    }
   }
   return errors;
 }

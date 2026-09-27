@@ -76,4 +76,64 @@ describe("NodeInspector", () => {
     expect(markup).toContain("Unread remaining");
     expect(markup).toContain("Pruned unread");
   });
+
+  it("does not repeat matching state and presence badges", () => {
+    const markup = renderToStaticMarkup(
+      <NodeInspector
+        graph={graph}
+        node={{ ...node, state: "idle", presence: { presence: "idle" } }}
+        onClose={() => undefined}
+      />,
+    );
+    expect(markup.match(/status-badge status-idle/g)).toHaveLength(1);
+    expect(markup).not.toContain("<dt>Presence</dt>");
+  });
+
+  it("shows a timed schedule without irrelevant inert actions", () => {
+    const markup = renderToStaticMarkup(
+      <NodeInspector
+        graph={graph}
+        node={{
+          ...node,
+          loopType: "timeBased",
+          triggerPrompt: "Check the weather",
+          heartbeatIntervalSeconds: 900,
+        }}
+        commands={[
+          {
+            id: "loop.edit",
+            label: "Edit Loop",
+            description: "Edit",
+            category: "Loop",
+            surfaces: ["node"],
+            enabled: true,
+            execute: () => undefined,
+          },
+          {
+            id: "loop.openComposite",
+            label: "Open Composite",
+            description: "Open",
+            category: "Loop",
+            surfaces: ["node"],
+            enabled: false,
+            execute: () => undefined,
+          },
+          {
+            id: "loop.openTerminal",
+            label: "Open Terminal",
+            description: "Open",
+            category: "Loop",
+            surfaces: ["node"],
+            enabled: false,
+            execute: () => undefined,
+          },
+        ]}
+        onClose={() => undefined}
+      />,
+    );
+    expect(markup).toContain("GraphCode daemon heartbeat");
+    expect(markup).toContain("15 minutes");
+    expect(markup).not.toContain("Open Composite");
+    expect(markup).not.toContain("Open Terminal");
+  });
 });

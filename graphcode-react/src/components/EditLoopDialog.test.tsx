@@ -30,4 +30,26 @@ describe("EditLoopDialog", () => {
     expect(markup).toContain("immutable after creation");
     expect(markup).toContain("All tests pass");
   });
+
+  it("explains both supported timed scheduling models", () => {
+    const markup = renderToStaticMarkup(
+      <EditLoopDialog
+        node={{
+          id: "timed",
+          title: "Weather",
+          loopType: "timeBased",
+          state: "idle",
+          triggerPrompt: "Check the weather",
+          heartbeatIntervalSeconds: 900,
+        }}
+        onClose={() => undefined}
+        onSave={async () => undefined}
+      />,
+    );
+
+    expect(markup).toContain("graphcoded");
+    expect(markup).toContain("/loop 15m task");
+    expect(markup).toContain("/every 1h task");
+    expect(markup).toContain("Daemon heartbeat interval in seconds");
+  });
 });

@@ -6,6 +6,7 @@ import type {
   LoopNode,
   Mailbox,
 } from "../protocol/domain";
+import { timedSchedule } from "../forms/editLoop";
 import { CommandMenu } from "./CommandMenu";
 
 function enumLabel(value: EncodedEnum | undefined): string | undefined {
@@ -116,18 +117,34 @@ export function NodeInspector({
 
   const state = enumLabel(node.state) ?? "unknown";
   const presence = node.presence?.presence;
+  const displayedPresence =
+    presence?.toLocaleLowerCase() === state.toLocaleLowerCase()
+      ? undefined
+      : presence;
+  const schedule =
+    node.loopType === "timeBased" ? timedSchedule(node) : undefined;
   const currentBeat = node.summary?.beats.at(-1);
   const primaryCommandIds = new Set([
-    "loop.openTerminal",
     "loop.message",
     "loop.edit",
-    "loop.openComposite",
+    ...(node.loopType === "composite" && node.subGraph
+      ? ["loop.openComposite" as const]
+      : []),
+    ...(commands.some(
+      (command) => command.id === "loop.openTerminal" && command.enabled,
+    )
+      ? ["loop.openTerminal" as const]
+      : []),
   ]);
   const primaryCommands = commands.filter((command) =>
     primaryCommandIds.has(command.id),
   );
   const overflowCommands = commands.filter(
-    (command) => !primaryCommandIds.has(command.id),
+    (command) =>
+      !primaryCommandIds.has(command.id) &&
+      command.id !== "loop.openTerminal" &&
+      (command.id !== "loop.openComposite" ||
+        (node.loopType === "composite" && Boolean(node.subGraph))),
   );
   const totalTokens =
     node.usage?.inputTokens !== undefined ||
@@ -161,8 +178,8 @@ export function NodeInspector({
         <span className={`status-badge status-${state}`}>
           {sentence(state)}
         </span>
-        {presence ? (
-          <span className="status-badge">{sentence(presence)}</span>
+        {displayedPresence ? (
+          <span className="status-badge">{sentence(displayedPresence)}</span>
         ) : null}
         {node.hasActiveDependents ? (
           <span className="status-badge">Active dependents</span>
@@ -203,7 +220,7 @@ export function NodeInspector({
       <div className="inspector-scroll">
         <InspectorSection title="Overview">
           <Detail label="State" value={sentence(state)} />
-          <Detail label="Presence" value={sentence(presence)} />
+          <Detail label="Presence" value={sentence(displayedPresence)} />
           <Detail label="Activity" value={node.activity} />
           <Detail label="Backend" value={sentence(node.backend)} />
           <Detail
@@ -231,6 +248,29 @@ export function NodeInspector({
           <Detail label="Goal" value={node.goal?.summary} />
           <Detail label="Predicate" value={node.goal?.predicate} code />
         </InspectorSection>
+
+        {schedule ? (
+          <InspectorSection title="Schedule">
+            <Detail
+              label="Scheduler"
+              value={
+                schedule.scheduler === "daemon"
+                  ? "GraphCode daemon heartbeat"
+                  : schedule.scheduler === "session"
+                    ? "Session-managed /loop or /every"
+                    : "Not configured"
+              }
+            />
+            <Detail label="Cadence" value={schedule.cadence} />
+            <Detail label="Scheduled task" value={schedule.task} />
+            {schedule.scheduler === "unconfigured" ? (
+              <Detail
+                label="Action needed"
+                value="Use Edit to set a heartbeat interval or add a /loop or /every directive."
+              />
+            ) : null}
+          </InspectorSection>
+        ) : null}
 
         {node.goal ? (
           <InspectorSection title="Goal and metrics">

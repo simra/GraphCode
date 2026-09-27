@@ -3,6 +3,8 @@ import type { LoopNode } from "../protocol/domain";
 import {
   buildNodeUpdate,
   editLoopInitialState,
+  parseSessionSchedule,
+  timedSchedule,
   validateEditLoop,
 } from "./editLoop";
 
@@ -51,6 +53,42 @@ describe("loop editing", () => {
     expect(validateEditLoop(goalNode, form)).toMatchObject({
       goalSummary: expect.any(String),
       pollIntervalSeconds: expect.any(String),
+    });
+  });
+
+  it("describes daemon and session-managed timed schedules", () => {
+    expect(
+      timedSchedule({
+        id: "timed",
+        title: "Weather",
+        loopType: "timeBased",
+        state: "idle",
+        triggerPrompt: "Check the weather",
+        heartbeatIntervalSeconds: 900,
+      }),
+    ).toEqual({
+      scheduler: "daemon",
+      cadence: "15 minutes",
+      task: "Check the weather",
+    });
+    expect(parseSessionSchedule("/every 1h Check the weather")).toEqual({
+      cadence: "1h",
+      task: "Check the weather",
+    });
+  });
+
+  it("requires one scheduling mechanism for timed loops", () => {
+    const timedNode: LoopNode = {
+      id: "timed",
+      title: "Weather",
+      loopType: "timeBased",
+      state: "idle",
+      triggerPrompt: "Check the weather",
+    };
+    expect(
+      validateEditLoop(timedNode, editLoopInitialState(timedNode)),
+    ).toMatchObject({
+      heartbeatIntervalSeconds: expect.stringContaining("heartbeat"),
     });
   });
 });

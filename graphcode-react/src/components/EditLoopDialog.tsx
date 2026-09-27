@@ -219,9 +219,15 @@ export function EditLoopDialog({
 
           {node.loopType === "timeBased" ? (
             <fieldset className="form-section">
-              <legend>Timed execution</legend>
+              <legend>Timed schedule</legend>
+              <p className="form-note">
+                Set a heartbeat to let graphcoded wake the loop on a fixed
+                interval. For a session-managed schedule, leave the heartbeat
+                blank and begin the prompt with <code>/loop 15m task</code> or{" "}
+                <code>/every 1h task</code>.
+              </p>
               <label className="form-field">
-                <span>Repeated prompt</span>
+                <span>Task or session schedule</span>
                 <textarea
                   ref={(element) => {
                     firstFieldRef.current = element;
@@ -235,7 +241,7 @@ export function EditLoopDialog({
                 <FieldError field="triggerPrompt" errors={errors} />
               </label>
               <label className="form-field">
-                <span>Daemon heartbeat seconds (blank clears)</span>
+                <span>Daemon heartbeat interval in seconds</span>
                 <input
                   inputMode="decimal"
                   value={form.heartbeatIntervalSeconds}
@@ -248,6 +254,10 @@ export function EditLoopDialog({
                   {...fieldProps("heartbeatIntervalSeconds", errors)}
                 />
                 <FieldError field="heartbeatIntervalSeconds" errors={errors} />
+                <small>
+                  Leave blank only when the prompt contains a /loop or /every
+                  schedule.
+                </small>
               </label>
             </fieldset>
           ) : null}
