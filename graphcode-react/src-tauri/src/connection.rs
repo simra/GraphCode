@@ -105,6 +105,11 @@ struct PendingRequest {
     response: oneshot::Sender<Result<Value, ConnectionError>>,
 }
 
+enum ConnectedExit {
+    Disconnected(String),
+    ReplayUnavailable(String),
+}
+
 #[derive(Debug, Error)]
 enum SessionError {
     #[error(transparent)]
@@ -175,7 +180,7 @@ async fn run_actor(
                         resume_from,
                     },
                 );
-                let disconnect_reason = run_connected(
+                let connected_exit = run_connected(
                     &app,
                     stream,
                     &state_directory,
@@ -183,16 +188,42 @@ async fn run_actor(
                     &mut receiver,
                 )
                 .await;
-                emit_status(
-                    &app,
-                    ConnectionStatus {
-                        phase: "reconnecting",
-                        endpoint: endpoint_name.clone(),
-                        attempt: 1,
-                        message: Some(disconnect_reason),
-                        resume_from,
-                    },
-                );
+                match connected_exit {
+                    ConnectedExit::ReplayUnavailable(reason) => {
+                        resume_from = None;
+                        let persistence_error = persist_replay_cursor(&state_directory, None)
+                            .err()
+                            .map(|error| {
+                                format!("; clearing the saved cursor also failed: {error}")
+                            });
+                        emit_status(
+                            &app,
+                            ConnectionStatus {
+                                phase: "resyncing",
+                                endpoint: endpoint_name.clone(),
+                                attempt,
+                                message: Some(format!(
+                                    "Saved replay cursor was unavailable ({reason}); requesting fresh snapshots{}",
+                                    persistence_error.as_deref().unwrap_or("")
+                                )),
+                                resume_from: None,
+                            },
+                        );
+                        continue;
+                    }
+                    ConnectedExit::Disconnected(disconnect_reason) => {
+                        emit_status(
+                            &app,
+                            ConnectionStatus {
+                                phase: "reconnecting",
+                                endpoint: endpoint_name.clone(),
+                                attempt: 1,
+                                message: Some(disconnect_reason),
+                                resume_from,
+                            },
+                        );
+                    }
+                }
             }
             Err(SessionError::Protocol(protocol::ProtocolError::ReplayUnavailable(reason))) => {
                 resume_from = None;
@@ -266,10 +297,10 @@ async fn run_connected(
     state_directory: &Path,
     resume_from: &mut Option<u64>,
     receiver: &mut mpsc::Receiver<ActorMessage>,
-) -> String {
+) -> ConnectedExit {
     let (mut reader, mut writer) = tokio::io::split(stream);
     if let Err(error) = send_bootstrap_requests(&mut writer).await {
-        return error.to_string();
+        return ConnectedExit::Disconnected(error.to_string());
     }
 
     let mut pending = HashMap::<Uuid, PendingRequest>::new();
@@ -279,8 +310,13 @@ async fn run_connected(
         tokio::select! {
             frame = read_frame(&mut reader) => {
                 match frame {
-                    Ok(frame) => route_frame(app, frame, &mut pending),
-                    Err(error) => break error.to_string(),
+                    Ok(frame) => {
+                        if let Some(reason) = replay_rejection(&frame) {
+                            break ConnectedExit::ReplayUnavailable(reason);
+                        }
+                        route_frame(app, frame, &mut pending);
+                    }
+                    Err(error) => break ConnectedExit::Disconnected(error.to_string()),
                 }
             }
             message = receiver.recv() => {
@@ -289,7 +325,7 @@ async fn run_connected(
                         let (request_id, frame) = request(command);
                         if let Err(error) = write_frame(&mut writer, &frame).await {
                             let _ = response.send(Err(ConnectionError::OutcomeUnknown));
-                            break error.to_string();
+                            break ConnectedExit::Disconnected(error.to_string());
                         }
                         pending.insert(request_id, PendingRequest {
                             started_at: Instant::now(),
@@ -303,7 +339,7 @@ async fn run_connected(
                             sequence,
                         ));
                     }
-                    None => break "connection owner stopped".to_owned(),
+                    None => break ConnectedExit::Disconnected("connection owner stopped".to_owned()),
                 }
             }
             _ = timeout_check.tick() => {
@@ -318,6 +354,20 @@ async fn run_connected(
             .send(Err(ConnectionError::OutcomeUnknown));
     }
     reason
+}
+
+fn replay_rejection(frame: &Value) -> Option<String> {
+    if frame.get("kind") != Some(&Value::String("error".into())) {
+        return None;
+    }
+    let code = frame.pointer("/error/code").and_then(Value::as_str)?;
+    matches!(code, "replayUnavailable" | "cursorOutsideWindow").then(|| {
+        let message = frame
+            .pointer("/error/message")
+            .and_then(Value::as_str)
+            .unwrap_or("saved replay cursor is unavailable");
+        format!("{code}: {message}")
+    })
 }
 
 async fn send_bootstrap_requests(
@@ -531,5 +581,30 @@ mod tests {
             Err(ConnectionError::Daemon { code, message })
                 if code == "invalidCommand" && message == "not allowed"
         ));
+    }
+
+    #[test]
+    fn replay_rejection_after_hello_requests_a_fresh_snapshot() {
+        assert_eq!(
+            replay_rejection(&json!({
+                "version": 2,
+                "kind": "error",
+                "error": {
+                    "code": "cursorOutsideWindow",
+                    "message": "requested cursor is beyond the retained event history"
+                }
+            }))
+            .as_deref(),
+            Some("cursorOutsideWindow: requested cursor is beyond the retained event history")
+        );
+        assert!(replay_rejection(&json!({
+            "version": 2,
+            "kind": "error",
+            "error": {
+                "code": "requestFailed",
+                "message": "invalid request"
+            }
+        }))
+        .is_none());
     }
 }
