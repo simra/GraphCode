@@ -54,7 +54,7 @@ fn home_directory() -> Result<PathBuf, EndpointError> {
         .ok_or(EndpointError::HomeDirectoryUnavailable)
 }
 
-fn configured_support_directory() -> Result<PathBuf, EndpointError> {
+pub(crate) fn configured_support_directory() -> Result<PathBuf, EndpointError> {
     let home = home_directory()?;
     let configured = env::var_os("GRAPHCODE_SUPPORT_DIR")
         .map(PathBuf::from)

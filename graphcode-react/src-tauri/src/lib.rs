@@ -1,6 +1,7 @@
 mod connection;
 mod endpoint;
 mod protocol;
+mod terminal;
 mod transport;
 mod ui_layout;
 
@@ -20,6 +21,7 @@ use thiserror::Error;
 struct BridgeState {
     connection: Mutex<Option<ConnectionHandle>>,
     native_menu_revision: Mutex<u64>,
+    terminal: terminal::TerminalManager,
     ui_layout: Mutex<()>,
 }
 
@@ -39,6 +41,8 @@ enum BridgeError {
     Menu(String),
     #[error("failed to access persistent UI layout: {0}")]
     UiLayout(String),
+    #[error(transparent)]
+    Terminal(#[from] terminal::TerminalError),
     #[error(transparent)]
     Connection(#[from] connection::ConnectionError),
 }
@@ -137,6 +141,76 @@ async fn acknowledge_daemon_sequence(
         .clone()
         .ok_or(BridgeError::NotStarted)?;
     connection.acknowledge(sequence).await.map_err(Into::into)
+}
+
+#[tauri::command]
+async fn open_terminal(
+    state: State<'_, BridgeState>,
+    node_id: String,
+    columns: u16,
+    rows: u16,
+    on_event: tauri::ipc::Channel<terminal::TerminalEvent>,
+) -> Result<terminal::TerminalOpenResult, BridgeError> {
+    state
+        .terminal
+        .open(&node_id, columns, rows, on_event)
+        .await
+        .map_err(Into::into)
+}
+
+#[tauri::command]
+async fn write_terminal(
+    state: State<'_, BridgeState>,
+    handle: String,
+    data: String,
+) -> Result<(), BridgeError> {
+    state
+        .terminal
+        .write(&handle, &data)
+        .await
+        .map_err(Into::into)
+}
+
+#[tauri::command]
+async fn resize_terminal(
+    state: State<'_, BridgeState>,
+    handle: String,
+    columns: u16,
+    rows: u16,
+) -> Result<(), BridgeError> {
+    state
+        .terminal
+        .resize(&handle, columns, rows)
+        .await
+        .map_err(Into::into)
+}
+
+#[tauri::command]
+async fn acknowledge_terminal_output(
+    state: State<'_, BridgeState>,
+    handle: String,
+    sequence: u64,
+) -> Result<(), BridgeError> {
+    state
+        .terminal
+        .acknowledge(&handle, sequence)
+        .await
+        .map_err(Into::into)
+}
+
+#[tauri::command]
+async fn close_terminal(state: State<'_, BridgeState>, handle: String) -> Result<(), BridgeError> {
+    state.terminal.close(&handle).await.map_err(Into::into)
+}
+
+#[tauri::command]
+async fn load_terminal_history(
+    node_id: String,
+    max_bytes: usize,
+) -> Result<terminal::TerminalHistory, BridgeError> {
+    terminal::history(&node_id, max_bytes)
+        .await
+        .map_err(Into::into)
 }
 
 #[tauri::command]
@@ -258,6 +332,12 @@ pub fn run() {
             start_daemon_connection,
             send_daemon_command,
             acknowledge_daemon_sequence,
+            open_terminal,
+            write_terminal,
+            resize_terminal,
+            acknowledge_terminal_output,
+            close_terminal,
+            load_terminal_history,
             set_native_menu,
             load_ui_layout,
             save_ui_viewport,
