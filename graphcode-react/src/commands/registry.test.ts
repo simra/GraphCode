@@ -7,6 +7,7 @@ import {
   createMailroomPostCommands,
   createProjectRowCommands,
   createQuickChatCommands,
+  selectHeaderCommands,
 } from "./registry";
 
 function stateWithSelectedNode(): AppState {
@@ -30,6 +31,35 @@ function stateWithSelectedNode(): AppState {
 }
 
 describe("command registry", () => {
+  it("selects only command search and the contextual primary header action", () => {
+    const commands = createCommandRegistry(stateWithSelectedNode(), {
+      openPalette: vi.fn(),
+      openProjectFolder: vi.fn(async () => undefined),
+      openNewQuickChat: vi.fn(),
+      openNewLoop: vi.fn(),
+      openMailroom: vi.fn(),
+      clearSelection: vi.fn(),
+      selectNode: vi.fn(),
+    });
+
+    expect(
+      selectHeaderCommands(commands, "overview").map((command) => command.id),
+    ).toEqual(["app.commandPalette", "project.openFolder"]);
+    expect(
+      selectHeaderCommands(commands, "project").map((command) => command.id),
+    ).toEqual(["app.commandPalette", "loop.new"]);
+    expect(
+      selectHeaderCommands(commands, "quickChats").map((command) => command.id),
+    ).toEqual(["app.commandPalette", "chat.new"]);
+    expect(
+      selectHeaderCommands(commands, "mailroom").map((command) => command.id),
+    ).toEqual(["app.commandPalette"]);
+    expect(
+      commands.find((command) => command.id === "project.openMailroom")
+        ?.surfaces,
+    ).toEqual([]);
+  });
+
   it("projects connection and selection state into command availability", () => {
     const stopNode = vi.fn(async () => undefined);
     const commands = createCommandRegistry(stateWithSelectedNode(), {

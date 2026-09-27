@@ -19,6 +19,7 @@ use thiserror::Error;
 #[derive(Default)]
 struct BridgeState {
     connection: Mutex<Option<ConnectionHandle>>,
+    native_menu_revision: Mutex<u64>,
     ui_layout: Mutex<()>,
 }
 
@@ -67,6 +68,10 @@ struct NativeMenuCommand {
     category: String,
     enabled: bool,
     accelerator: Option<String>,
+}
+
+fn should_apply_native_menu_revision(current: u64, incoming: u64) -> bool {
+    incoming > current
 }
 
 #[tauri::command]
@@ -137,8 +142,18 @@ async fn acknowledge_daemon_sequence(
 #[tauri::command]
 fn set_native_menu(
     app: tauri::AppHandle,
+    state: State<'_, BridgeState>,
+    revision: u64,
     commands: Vec<NativeMenuCommand>,
 ) -> Result<(), BridgeError> {
+    let mut current_revision = state
+        .native_menu_revision
+        .lock()
+        .expect("native menu revision mutex poisoned");
+    if !should_apply_native_menu_revision(*current_revision, revision) {
+        return Ok(());
+    }
+
     let mut menu = MenuBuilder::new(&app);
     for category in ["GraphCode", "Project", "Loop", "View", "Navigation"] {
         let category_commands: Vec<_> = commands
@@ -171,6 +186,7 @@ fn set_native_menu(
         .map_err(|error| BridgeError::Menu(error.to_string()))?;
     app.set_menu(menu)
         .map_err(|error| BridgeError::Menu(error.to_string()))?;
+    *current_revision = revision;
     Ok(())
 }
 
@@ -265,6 +281,28 @@ mod tests {
             .and_then(Value::as_str)
             .and_then(|value| Uuid::parse_str(value).ok())
             == Some(request_id)
+    }
+
+    #[test]
+    fn native_menu_revisions_reject_stale_rebuilds() {
+        assert!(!should_apply_native_menu_revision(4, 3));
+        assert!(!should_apply_native_menu_revision(4, 4));
+        assert!(should_apply_native_menu_revision(4, 5));
+    }
+
+    #[test]
+    fn native_menu_command_preserves_enabled_projection() {
+        let command: NativeMenuCommand = serde_json::from_value(json!({
+            "id": "loop.new",
+            "label": "New Loop",
+            "category": "Loop",
+            "enabled": true,
+            "accelerator": "Ctrl+N"
+        }))
+        .unwrap();
+
+        assert!(command.enabled);
+        assert_eq!(command.id, "loop.new");
     }
 
     #[test]

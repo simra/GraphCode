@@ -10,6 +10,13 @@ export interface NativeMenuCommand {
   accelerator?: string;
 }
 
+interface NativeMenuUpdate {
+  revision: number;
+  commands: NativeMenuCommand[];
+}
+
+type NativeMenuUpdater = (update: NativeMenuUpdate) => Promise<void>;
+
 function nativeAccelerator(
   shortcut: CommandShortcut | undefined,
 ): string | undefined {
@@ -38,11 +45,47 @@ export function nativeMenuProjection(
   }));
 }
 
+export function createNativeMenuSynchronizer(
+  update: NativeMenuUpdater,
+  initialRevision = 0,
+) {
+  let revision = initialRevision;
+  let tail = Promise.resolve();
+
+  return (commands: AppCommand[]): Promise<void> => {
+    const next = {
+      revision: ++revision,
+      commands: nativeMenuProjection(commands),
+    };
+    const synchronization = tail
+      .catch(() => undefined)
+      .then(() => update(next));
+    tail = synchronization;
+    return synchronization;
+  };
+}
+
+export function routeNativeMenuCommand(
+  commands: AppCommand[],
+  id: CommandId,
+  execute: (command: AppCommand) => void,
+): boolean {
+  const command = commands.find((candidate) => candidate.id === id);
+  if (!command) return false;
+  execute(command);
+  return true;
+}
+
+const synchronizeNativeMenu = createNativeMenuSynchronizer(
+  async ({ revision, commands }) => {
+    await invoke("set_native_menu", { revision, commands });
+  },
+  Date.now() * 1_000,
+);
+
 export async function syncNativeMenu(commands: AppCommand[]): Promise<void> {
   if (!("__TAURI_INTERNALS__" in window)) return;
-  await invoke("set_native_menu", {
-    commands: nativeMenuProjection(commands),
-  });
+  await synchronizeNativeMenu(commands);
 }
 
 export async function listenForNativeMenuCommands(

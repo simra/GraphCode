@@ -26,11 +26,14 @@ import {
   createProjectRowCommands,
   createQuickChatCommands,
   isEditableTarget,
+  selectHeaderCommands,
   type AppCommand,
   type CommandId,
+  type HeaderCommandContext,
 } from "./commands/registry";
 import {
   listenForNativeMenuCommands,
+  routeNativeMenuCommand,
   syncNativeMenu,
 } from "./commands/nativeMenu";
 import { CommandPalette } from "./components/CommandPalette";
@@ -887,10 +890,11 @@ export default function App() {
     let active = true;
     let unlisten: (() => void) | undefined;
     listenForNativeMenuCommands((id) => {
-      const command = commandsRef.current.find(
-        (candidate) => candidate.id === id,
+      routeNativeMenuCommand(
+        commandsRef.current,
+        id,
+        (command) => void executeCommand(command),
       );
-      if (command) void executeCommand(command);
     })
       .then((stopListening) => {
         if (active) {
@@ -933,9 +937,15 @@ export default function App() {
     return () => window.removeEventListener("keydown", handleShortcut);
   }, [commands, executeCommand, paletteOpen]);
 
-  const headerCommands = commands.filter((command) =>
-    command.surfaces.includes("header"),
-  );
+  const headerContext: HeaderCommandContext = state.quickChatsSelected
+    ? "quickChats"
+    : state.mailroomSelected
+      ? "mailroom"
+      : selectedGraph?.project.path &&
+          selectedGraph.project.path !== "graphcode://global"
+        ? "project"
+        : "overview";
+  const headerCommands = selectHeaderCommands(commands, headerContext);
   const nodeCommands = commands.filter((command) =>
     command.surfaces.includes("node"),
   );

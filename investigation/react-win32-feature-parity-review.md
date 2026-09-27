@@ -153,7 +153,7 @@ reference, onboarding, and richer metrics visualization.
 | Global overview | Pinned Graph destination and cross-project lanes | Existing `openGlobalGraph`, ordinary `graphChanged` | **Partial**: persistent Overview destination is separated above project groups and selects the daemon-owned global graph; lane-specific visualization remains | Add cross-project lane layout and destination search | P1 | M | Global graph joins on reconnect and shows cross-project lanes |
 | Quick Chats | List, create, open, rename, delete, activity, dedicated empty state | Existing Quick Chat commands/events | **Implemented**: the sidebar group and workspace list authoritative chats, preserve activity ordering, support create/open/rename/delete through typed commands, and expose explicit empty, pending and error states | Add terminal/session content only after the zmx bridge exists | P1 | M | Stable chat identity and activity ordering; delete confirmation |
 | Sidebar hierarchy | Local/remote groups, project disclosure, edge-derived nested loop tree, attention/activity | Graph snapshots; some layout state is client-local | **Partial**: semantic nested root/composite hierarchy, stable selection synchronization, per-project presence-corrected attention rollups and explicit failed/stalled/awaiting/stranded counts are implemented. Current `ProjectRef` has no location kind, so local/remote grouping remains blocked on DT-010 | Add grouping only after DT-010; a cross-project Review Needs You queue is separately scoped | P1 | L; cycles and focus restoration | Snapshot reorder does not lose selection/expansion/focus |
-| Command surfaces | Native File/Loop/Terminal/Workspace/View/Help menus, context menus and jump palette | Client state plus existing commands | **Partial**: one typed registry now drives header actions, `Ctrl+P` search, selected-node overflow, lifecycle commands, shortcuts and native Tauri GraphCode/Project/Loop/Navigation menus with synchronized availability; project-row/edge/chat contexts remain | Continue projecting the same registry rather than adding parallel handlers | P0 | M | Header, palette, shortcuts, contextual menus and native menu invoke one command ID/path |
+| Command surfaces | Native File/Loop/Terminal/Workspace/View/Help menus, context menus and jump palette | Client state plus existing commands | **Partial**: one typed registry now drives a context-sensitive primary header action, `Ctrl+P` search, selected-node overflow, lifecycle commands, shortcuts and native Tauri GraphCode/Project/Loop/View/Navigation menus with revisioned availability synchronization; project-row/edge/chat contexts remain | Continue projecting the same registry rather than adding parallel handlers | P0 | M | Header, palette, shortcuts, contextual menus and native menu invoke one command ID/path |
 | Graph snapshot rendering | Cards, connectors, lanes, grid, state styling | Existing `graphChanged`, `nodesChanged` | **Partial**: SVG cards and fired/unfired edges use a dependency-layered multi-row layout with cycle fallback; richer lane/state/presence visuals remain | Continue the focused SVG implementation through edge and composite interactions | P0 | M | Real graph topology, state, presence and fired edges render correctly |
 | Graph selection | Stable node/edge selection synchronized with sidebar/workspace | Client state only | **Partial**: node selection is keyed by project/composite path/node ID, survives snapshots, clears on removal, and stays synchronized across sidebar, canvas, breadcrumbs and inspector with click, spatial arrows, Home/End, Enter and Space; edges are keyboard selectable, while workspace synchronization remains | Extend the same selection model to future workspace tabs | P0 | M | Click, keyboard and sidebar select the same identity across refreshes |
 | Graph pan/zoom/fit | Pointer pan, wheel/pinch anchored zoom, zoom controls, persisted canvas layout | Client-local persistence | **Implemented**: pointer background pan, pointer-anchored wheel zoom, midpoint-aware two-touch pinch zoom, visible controls, registry/native-menu shortcuts for zoom in/out, 100% and fit, and per-project/root-or-composite viewport restore share one SVG coordinate model | Keep performance and WebView touch behavior in release gates | P1 | M | 60 fps target; focus and hit testing remain aligned at all zooms |
@@ -782,7 +782,7 @@ K. zmx streaming spike
    - Roving focus and textual graph outline.
 3. **P0 command architecture — implemented for current command set**
    - Typed command registry.
-   - Visible New Loop/header actions.
+   - Contextual primary header action plus command search.
    - Native Tauri menu projection and unified palette shell.
 4. **P0 New Loop create slice**
    - All five loop types.
@@ -811,11 +811,12 @@ The following milestone is implemented on `simra/tauri`:
 1. persistent daemon connection with a typed `sendCommand`;
 2. node selection by click and keyboard;
 3. right-side read-only inspector for all snapshot-backed fields;
-4. visible New Loop button;
+4. visible New Loop button while a project graph is active;
 5. New Loop dialog for all five domain loop types;
 6. correlated `createNode` submission;
 7. authoritative snapshot selects and displays the new node;
-8. header, Ctrl+N and command-palette entry all invoke the same registry command.
+8. contextual header, Ctrl+N and command-palette entry all invoke the same registry
+   command.
 
 Current acceptance:
 
@@ -829,8 +830,10 @@ Current acceptance:
   explicit resubmission rather than guessing whether creation succeeded.
 
 Native Tauri menus are projected from the same registry into focused
-GraphCode/Loop/Navigation groups. The React client intentionally does not recreate
-the full Win32 menu bar.
+GraphCode/Project/Loop/View/Navigation groups. Rebuilds are revisioned and serialized
+so stale connection or selection snapshots cannot overwrite newer enabled state. The
+React header intentionally keeps only command search and one context-sensitive primary
+action instead of recreating the full Win32 menu bar.
 
 ## Protocol changes and blockers
 

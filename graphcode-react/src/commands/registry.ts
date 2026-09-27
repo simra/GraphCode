@@ -49,6 +49,8 @@ export type CommandId =
 export type CommandCategory =
   "Application" | "Project" | "Loop" | "View" | "Navigation";
 export type CommandSurface = "header" | "node" | "canvas" | "mailroom";
+export type HeaderCommandContext =
+  "overview" | "project" | "quickChats" | "mailroom";
 
 export interface CommandShortcut {
   key: string;
@@ -70,6 +72,28 @@ export interface AppCommand {
   disabledReason?: string;
   danger?: boolean;
   execute(): void | Promise<void>;
+}
+
+const headerPrimaryCommandByContext: Partial<
+  Record<HeaderCommandContext, CommandId>
+> = {
+  overview: "project.openFolder",
+  project: "loop.new",
+  quickChats: "chat.new",
+};
+
+export function selectHeaderCommands(
+  commands: AppCommand[],
+  context: HeaderCommandContext,
+): AppCommand[] {
+  const commandIds = [
+    "app.commandPalette",
+    headerPrimaryCommandByContext[context],
+  ].filter((id): id is CommandId => id !== undefined);
+  return commandIds.flatMap((id) => {
+    const command = commands.find((candidate) => candidate.id === id);
+    return command ? [command] : [];
+  });
 }
 
 export interface CommandActions {
@@ -215,7 +239,7 @@ export function createCommandRegistry(
       label: "Open Mailroom",
       description: "Open the selected project's top-level Mailroom",
       category: "Project",
-      surfaces: ["header"],
+      surfaces: [],
       ...(projectMailroomAvailable && actions.openMailroom
         ? { enabled: true, execute: actions.openMailroom }
         : {
