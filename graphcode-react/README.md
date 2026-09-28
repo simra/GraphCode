@@ -20,12 +20,19 @@ npm install
 npm run format
 npm run check
 npm test
+npx playwright install chromium
+npm run test:e2e
 npm run build
 cargo fmt --manifest-path src-tauri\Cargo.toml --check
 cargo test --manifest-path src-tauri\Cargo.toml
 cargo check --manifest-path src-tauri\Cargo.toml
 npm run tauri dev
 ```
+
+The Playwright suite runs the complete React application against a deterministic
+in-browser Tauri IPC mock. Its fixture graph can exercise integrated navigation,
+attended terminal preparation, workspace summary/board presentation, and Mailroom
+state without reading or mutating local GraphCode workspaces.
 
 To include the opt-in live named-pipe protocol test against an already-running
 local daemon:

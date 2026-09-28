@@ -49,6 +49,8 @@ node_modules/
 dist/
 graphcode-react/src-tauri/target/
 graphcode-react/src-tauri/gen/schemas/
+graphcode-react/playwright-report/
+graphcode-react/test-results/
 
 # Signing material must never land in the repo. The Developer ID private key
 # lives in ~/Developer/certificates and in the login keychain, nowhere else.

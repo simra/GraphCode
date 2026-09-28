@@ -7,7 +7,8 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "check": "tsc -b",
-    "test": "vitest run",
+    "test": "vitest run src",
+    "test:e2e": "playwright test",
     "test:a11y": "vitest run src/accessibility.test.tsx",
     "format": "prettier --check .",
     "format:write": "prettier --write .",
@@ -23,6 +24,7 @@
     "zod": "^4.6.5"
   },
   "devDependencies": {
+    "@playwright/test": "^1.63.0",
     "@tauri-apps/cli": "^2.8.0",
     "@types/react": "^19.2.0",
     "@types/react-dom": "^19.2.0",
