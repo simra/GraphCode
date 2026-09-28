@@ -1,9 +1,10 @@
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useRef, useState, type RefObject } from "react";
 import type { AppCommand, CommandId } from "../commands/registry";
 import type { LoopGraph, LoopNode, Mailbox } from "../protocol/domain";
 import { displayState } from "../state/attention";
 import { boardIsDrawable, presentLoopSummary } from "../state/workspaceRail";
 import { CommandMenu } from "./CommandMenu";
+import { useDialogFocus } from "./dialogFocus";
 import { SummaryBoardView } from "./SummaryBoardView";
 
 const mailroomCommandIds = new Set<CommandId>([
@@ -153,9 +154,11 @@ function AttentionSection({ node }: { node: LoopNode }) {
 
 function BoardSection({
   node,
+  expandButtonRef,
   onExpand,
 }: {
   node: LoopNode;
+  expandButtonRef: RefObject<HTMLButtonElement | null>;
   onExpand(): void;
 }) {
   if (!boardIsDrawable(node) || !node.board) return null;
@@ -171,6 +174,7 @@ function BoardSection({
       </summary>
       <SummaryBoardView board={node.board} />
       <button
+        ref={expandButtonRef}
         className="workspace-secondary-action"
         type="button"
         onClick={onExpand}
@@ -186,6 +190,7 @@ function MailroomSection({
   node,
   mailbox,
   owned,
+  seenPostId,
   commands,
   pendingCommandId,
   onExecute,
@@ -194,6 +199,7 @@ function MailroomSection({
   node: LoopNode;
   mailbox?: Mailbox;
   owned: boolean;
+  seenPostId?: number;
   commands: AppCommand[];
   pendingCommandId?: string;
   onExecute(command: AppCommand): void;
@@ -201,10 +207,8 @@ function MailroomSection({
   const notices = owned
     ? (mailbox?.posts.filter((post) => post.kind === "notice") ?? [])
     : [];
-  const unread = notices.filter(
-    (post) => post.id > (node.lastMailroomRead ?? 0),
-  );
-  const unreadIds = new Set(unread.map((post) => post.id));
+  const newNotices = notices.filter((post) => post.id > (seenPostId ?? 0));
+  const newNoticeIds = new Set(newNotices.map((post) => post.id));
   const refresh = commandById(commands, "loop.mailroomRefresh");
   const loadUnread = commandById(commands, "loop.mailroomUnread");
   const markRead = commandById(commands, "loop.mailroomMarkRead");
@@ -215,8 +219,8 @@ function MailroomSection({
     <details className="workspace-rail-section" open>
       <summary>
         <span>Mailroom for {graph.project.name}</span>
-        {owned && unread.length ? (
-          <span className="workspace-rail-count">{unread.length} unread</span>
+        {owned && newNotices.length ? (
+          <span className="workspace-rail-count">{newNotices.length} new</span>
         ) : null}
       </summary>
       {!owned ? (
@@ -230,7 +234,7 @@ function MailroomSection({
             {notices.map((notice) => (
               <li
                 key={notice.id}
-                className={unreadIds.has(notice.id) ? "unread" : ""}
+                className={newNoticeIds.has(notice.id) ? "unread" : ""}
               >
                 <header>
                   <strong>{notice.topic ?? "Notice"}</strong>
@@ -281,7 +285,11 @@ function MailroomSection({
       {owned ? (
         <div className="workspace-mail-status">
           <span>
-            Loop cursor:{" "}
+            Human view:{" "}
+            {seenPostId === undefined ? "not seen" : `through #${seenPostId}`}
+          </span>
+          <span>
+            Loop inbox cursor:{" "}
             {node.lastMailroomRead === undefined
               ? "not advanced"
               : `#${node.lastMailroomRead}`}
@@ -300,26 +308,79 @@ function MailroomSection({
   );
 }
 
+function ExpandedBoardDialog({
+  node,
+  onClose,
+}: {
+  node: LoopNode;
+  onClose(): void;
+}) {
+  const closeButtonRef = useRef<HTMLButtonElement>(null);
+  const { dialogRef, handleDialogKeyDown } = useDialogFocus({
+    initialFocusRef: closeButtonRef,
+    onClose,
+  });
+
+  if (!node.board) return null;
+  return (
+    <div className="workspace-board-overlay" role="presentation">
+      <section
+        ref={dialogRef}
+        className="workspace-board-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="workspace-board-title"
+        tabIndex={-1}
+        onKeyDown={handleDialogKeyDown}
+      >
+        <header>
+          <div>
+            <p className="eyebrow">Pass {node.board.pass}</p>
+            <h2 id="workspace-board-title">
+              {node.board.title || `${node.title} board`}
+            </h2>
+          </div>
+          <button
+            ref={closeButtonRef}
+            type="button"
+            aria-label="Close expanded board"
+            onClick={onClose}
+          >
+            ×
+          </button>
+        </header>
+        <SummaryBoardView board={node.board} />
+      </section>
+    </div>
+  );
+}
+
 export function LoopWorkspaceRail({
   graph,
   node,
   mailbox,
   mailroomOwned,
+  seenBeatId,
+  seenMailroomPostId,
   commands,
   pendingCommandId,
+  onSummarySeen,
   onExecuteCommand,
 }: {
   graph: LoopGraph;
   node: LoopNode;
   mailbox?: Mailbox;
   mailroomOwned: boolean;
+  seenBeatId?: string;
+  seenMailroomPostId?: number;
   commands: AppCommand[];
   pendingCommandId?: string;
+  onSummarySeen(beatId: string): void;
   onExecuteCommand(command: AppCommand): void;
 }) {
   const latestBeatId = node.summary?.beats.at(-1)?.id;
-  const [seenBeatId, setSeenBeatId] = useState(latestBeatId);
   const [expandedBoard, setExpandedBoard] = useState(false);
+  const expandButtonRef = useRef<HTMLButtonElement>(null);
   const loopCommands = useMemo(
     () =>
       commands.filter(
@@ -331,19 +392,6 @@ export function LoopWorkspaceRail({
     [commands],
   );
 
-  useEffect(() => {
-    setSeenBeatId(node.summary?.beats.at(-1)?.id);
-  }, [node.id]);
-
-  useEffect(() => {
-    if (!expandedBoard) return;
-    const close = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setExpandedBoard(false);
-    };
-    document.addEventListener("keydown", close);
-    return () => document.removeEventListener("keydown", close);
-  }, [expandedBoard]);
-
   return (
     <>
       <aside className="loop-workspace-rail" aria-label="Loop workspace rail">
@@ -351,14 +399,21 @@ export function LoopWorkspaceRail({
         <SummarySection
           node={node}
           seenBeatId={seenBeatId}
-          onMarkSeen={() => setSeenBeatId(latestBeatId)}
+          onMarkSeen={() => {
+            if (latestBeatId) onSummarySeen(latestBeatId);
+          }}
         />
-        <BoardSection node={node} onExpand={() => setExpandedBoard(true)} />
+        <BoardSection
+          node={node}
+          expandButtonRef={expandButtonRef}
+          onExpand={() => setExpandedBoard(true)}
+        />
         <MailroomSection
           graph={graph}
           node={node}
           mailbox={mailbox}
           owned={mailroomOwned}
+          seenPostId={seenMailroomPostId}
           commands={commands}
           pendingCommandId={pendingCommandId}
           onExecute={onExecuteCommand}
@@ -374,33 +429,11 @@ export function LoopWorkspaceRail({
           </section>
         ) : null}
       </aside>
-      {expandedBoard && node.board ? (
-        <div className="workspace-board-overlay" role="presentation">
-          <section
-            className="workspace-board-dialog"
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="workspace-board-title"
-          >
-            <header>
-              <div>
-                <p className="eyebrow">Pass {node.board.pass}</p>
-                <h2 id="workspace-board-title">
-                  {node.board.title || `${node.title} board`}
-                </h2>
-              </div>
-              <button
-                type="button"
-                aria-label="Close expanded board"
-                autoFocus
-                onClick={() => setExpandedBoard(false)}
-              >
-                ×
-              </button>
-            </header>
-            <SummaryBoardView board={node.board} />
-          </section>
-        </div>
+      {expandedBoard ? (
+        <ExpandedBoardDialog
+          node={node}
+          onClose={() => setExpandedBoard(false)}
+        />
       ) : null}
     </>
   );

@@ -141,6 +141,12 @@ export default function App() {
   const [terminalNodeId, setTerminalNodeId] = useState<string>();
   const [navigationHistory, setNavigationHistory] =
     useState<NavigationHistory>();
+  const [seenSummaryBeatByNode, setSeenSummaryBeatByNode] = useState<
+    Record<string, string>
+  >({});
+  const [seenMailroomPostByProject, setSeenMailroomPostByProject] = useState<
+    Record<string, number>
+  >({});
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [workspacesOpen, setWorkspacesOpen] = useState(false);
   const [selectedEdgeKey, setSelectedEdgeKey] = useState<string>();
@@ -398,11 +404,52 @@ export default function App() {
     terminalNodeId && inspectedNode?.id === terminalNodeId
       ? inspectedNode
       : undefined;
+  const terminalViewRef = useRef<
+    | {
+        nodeId: string;
+        latestBeatId?: string;
+        projectPath?: string;
+        latestMailroomPostId?: number;
+      }
+    | undefined
+  >(undefined);
+  if (terminalNode) {
+    terminalViewRef.current = {
+      nodeId: terminalNode.id,
+      latestBeatId: terminalNode.summary?.beats.at(-1)?.id,
+      projectPath: selectedProjectPath,
+      latestMailroomPostId:
+        state.compositePath.length === 0 && selectedProjectPath
+          ? state.mailboxes[selectedProjectPath]?.posts
+              .filter((post) => post.kind === "notice")
+              .at(-1)?.id
+          : undefined,
+    };
+  }
+  const leaveTerminalWorkspace = useCallback(() => {
+    const viewed = terminalViewRef.current;
+    if (viewed?.latestBeatId) {
+      const { latestBeatId, nodeId } = viewed;
+      setSeenSummaryBeatByNode((current) => ({
+        ...current,
+        [nodeId]: latestBeatId,
+      }));
+    }
+    if (viewed?.projectPath && viewed.latestMailroomPostId !== undefined) {
+      const { latestMailroomPostId, projectPath } = viewed;
+      setSeenMailroomPostByProject((current) => ({
+        ...current,
+        [projectPath]: latestMailroomPostId,
+      }));
+    }
+    terminalViewRef.current = undefined;
+    setTerminalNodeId(undefined);
+  }, []);
   useEffect(() => {
     if (terminalNodeId && inspectedNode?.id !== terminalNodeId) {
-      setTerminalNodeId(undefined);
+      leaveTerminalWorkspace();
     }
-  }, [inspectedNode?.id, terminalNodeId]);
+  }, [inspectedNode?.id, leaveTerminalWorkspace, terminalNodeId]);
   const selectionKey = inspectedEdge
     ? `edge:${selectedProjectPath}:${selectedViewKey}:${selectedEdgeKey}`
     : inspectedNode
@@ -1609,9 +1656,16 @@ export default function App() {
                 : undefined
             }
             mailroomOwned={state.compositePath.length === 0}
+            seenBeatId={seenSummaryBeatByNode[terminalNode.id]}
+            seenMailroomPostId={
+              selectedProjectPath
+                ? seenMailroomPostByProject[selectedProjectPath]
+                : undefined
+            }
             commands={nodeCommands}
             pendingCommandId={pendingCommandId}
             onBack={() => {
+              leaveTerminalWorkspace();
               if (!selectedProjectPath) return;
               visitNavigationRoute({
                 kind: "project",
@@ -1620,6 +1674,12 @@ export default function App() {
                 nodeId: terminalNode.id,
               });
             }}
+            onSummarySeen={(beatId) =>
+              setSeenSummaryBeatByNode((current) => ({
+                ...current,
+                [terminalNode.id]: beatId,
+              }))
+            }
             onExecuteCommand={(command) => void executeCommand(command)}
             onSessionExit={async (succeeded) => {
               const command = attendedSketchExitCommand(

@@ -139,6 +139,7 @@ describe("LoopWorkspace", () => {
           mailroomOwned
           commands={[]}
           onBack={() => undefined}
+          onSummarySeen={() => undefined}
           onExecuteCommand={() => undefined}
           onSessionExit={onSessionExit}
         />,

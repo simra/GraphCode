@@ -154,6 +154,7 @@ describe("automated accessibility checks", () => {
           }}
           mailroomOwned
           commands={[refreshCommand]}
+          onSummarySeen={() => undefined}
           onExecuteCommand={() => undefined}
         />,
       ),

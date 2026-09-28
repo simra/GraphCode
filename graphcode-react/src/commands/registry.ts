@@ -598,7 +598,7 @@ export function createCommandRegistry(
     },
     {
       id: "loop.mailroomMarkRead",
-      label: "Read and Mark Mail",
+      label: "Read and Advance Loop Cursor",
       description:
         "Atomically load unread posts and advance this loop's cursor through the delivered slice",
       category: "Loop",

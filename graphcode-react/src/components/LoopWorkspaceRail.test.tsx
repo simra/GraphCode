@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { act } from "react";
+import { act, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AppCommand, CommandId } from "../commands/registry";
@@ -96,10 +96,37 @@ function command(id: CommandId, label: string): AppCommand {
 const commands = [
   command("loop.mailroomRefresh", "Refresh Mailroom"),
   command("loop.mailroomUnread", "Load Unread Mail"),
-  command("loop.mailroomMarkRead", "Read and Mark Mail"),
+  command("loop.mailroomMarkRead", "Read and Advance Loop Cursor"),
   command("loop.mailroomWatch", "Change Mailroom Watch"),
   command("loop.mailroomPost", "Post to Mailroom"),
 ];
+
+function RailHarness({
+  node,
+  visible = true,
+  initialSeenBeatId = "beat-2",
+}: {
+  node: LoopNode;
+  visible?: boolean;
+  initialSeenBeatId?: string;
+}) {
+  const [seenByNode, setSeenByNode] = useState<Record<string, string>>({
+    [node.id]: initialSeenBeatId,
+  });
+  return visible ? (
+    <LoopWorkspaceRail
+      graph={graph}
+      node={node}
+      mailroomOwned
+      seenBeatId={seenByNode[node.id]}
+      commands={commands}
+      onSummarySeen={(beatId) =>
+        setSeenByNode((current) => ({ ...current, [node.id]: beatId }))
+      }
+      onExecuteCommand={() => undefined}
+    />
+  ) : null;
+}
 
 afterEach(() => {
   document.body.innerHTML = "";
@@ -119,6 +146,7 @@ describe("LoopWorkspaceRail", () => {
           mailbox={mailbox}
           mailroomOwned
           commands={commands}
+          onSummarySeen={() => undefined}
           onExecuteCommand={() => undefined}
         />,
       );
@@ -127,29 +155,21 @@ describe("LoopWorkspaceRail", () => {
     expect(container.textContent).toContain("Built the rail");
     expect(container.textContent).toContain("Mapped the UI");
     expect(container.textContent).toContain("Parity");
-    expect(container.textContent).toContain("1 unread");
-    expect(container.textContent).toContain("Loop cursor: #4");
+    expect(container.textContent).toContain("1 new");
+    expect(container.textContent).toContain("Loop inbox cursor: #4");
     expect(container.textContent).toContain("topic “release”");
     expect(container.querySelector("table")?.textContent).toContain("Summary");
 
     await act(async () => root.unmount());
   });
 
-  it("tracks live beat updates and marks them read", async () => {
+  it("reports beats received while unmounted as new when reopened", async () => {
     const container = document.createElement("div");
     document.body.append(container);
     const root = createRoot(container);
 
     await act(async () => {
-      root.render(
-        <LoopWorkspaceRail
-          graph={graph}
-          node={populatedNode}
-          mailroomOwned
-          commands={commands}
-          onExecuteCommand={() => undefined}
-        />,
-      );
+      root.render(<RailHarness node={populatedNode} />);
     });
     const updatedNode = {
       ...populatedNode,
@@ -169,15 +189,11 @@ describe("LoopWorkspaceRail", () => {
       },
     };
     await act(async () => {
-      root.render(
-        <LoopWorkspaceRail
-          graph={graph}
-          node={updatedNode}
-          mailroomOwned
-          commands={commands}
-          onExecuteCommand={() => undefined}
-        />,
-      );
+      root.render(<RailHarness node={updatedNode} visible={false} />);
+    });
+    expect(container.textContent).toBe("");
+    await act(async () => {
+      root.render(<RailHarness node={updatedNode} />);
     });
     expect(container.textContent).toContain("1 new");
     const markRead = [...container.querySelectorAll("button")].find(
@@ -202,7 +218,9 @@ describe("LoopWorkspaceRail", () => {
           node={populatedNode}
           mailbox={mailbox}
           mailroomOwned
+          seenMailroomPostId={4}
           commands={commands}
+          onSummarySeen={() => undefined}
           onExecuteCommand={onExecute}
         />,
       );
@@ -222,12 +240,14 @@ describe("LoopWorkspaceRail", () => {
           node={populatedNode}
           mailbox={mailbox}
           mailroomOwned={false}
+          seenMailroomPostId={4}
           commands={commands.map((item) => ({
             ...item,
             enabled: false,
             disabledReason:
               "Nested Mailroom ownership is not established; return to the project graph",
           }))}
+          onSummarySeen={() => undefined}
           onExecuteCommand={onExecute}
         />,
       );
@@ -257,6 +277,7 @@ describe("LoopWorkspaceRail", () => {
           node={{ id: "empty", title: "Empty", state: "running" }}
           mailroomOwned
           commands={commands}
+          onSummarySeen={() => undefined}
           onExecuteCommand={() => undefined}
         />,
       );
@@ -266,6 +287,85 @@ describe("LoopWorkspaceRail", () => {
       "Load the project Mailroom to see notices",
     );
     expect(container.textContent).not.toContain("Expand board");
+
+    await act(async () => root.unmount());
+  });
+
+  it("keeps human Mailroom seen state separate from the loop inbox cursor", async () => {
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    const onExecute = vi.fn();
+
+    await act(async () => {
+      root.render(
+        <LoopWorkspaceRail
+          graph={graph}
+          node={{ ...populatedNode, lastMailroomRead: 5 }}
+          mailbox={mailbox}
+          mailroomOwned
+          seenMailroomPostId={4}
+          commands={commands}
+          onSummarySeen={() => undefined}
+          onExecuteCommand={onExecute}
+        />,
+      );
+    });
+    expect(container.textContent).toContain("1 new");
+    expect(container.textContent).toContain("Human view: through #4");
+    expect(container.textContent).toContain("Loop inbox cursor: #5");
+
+    const advanceCursor = [...container.querySelectorAll("button")].find(
+      (button) => button.textContent === "Read and Advance Loop Cursor",
+    );
+    await act(async () => advanceCursor?.click());
+    expect(onExecute).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "loop.mailroomMarkRead" }),
+    );
+    expect(container.textContent).toContain("Human view: through #4");
+
+    await act(async () => root.unmount());
+  });
+
+  it("traps expanded-board focus, closes on Escape, and restores the trigger", async () => {
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+
+    await act(async () => {
+      root.render(
+        <LoopWorkspaceRail
+          graph={graph}
+          node={populatedNode}
+          mailroomOwned
+          commands={commands}
+          onSummarySeen={() => undefined}
+          onExecuteCommand={() => undefined}
+        />,
+      );
+    });
+    const expand = [...container.querySelectorAll("button")].find(
+      (button) => button.textContent === "Expand board",
+    )!;
+    expand.focus();
+    await act(async () => expand.click());
+
+    const close = container.querySelector<HTMLButtonElement>(
+      '[aria-label="Close expanded board"]',
+    )!;
+    expect(document.activeElement).toBe(close);
+    close.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Tab", bubbles: true }),
+    );
+    expect(document.activeElement).toBe(close);
+
+    await act(async () => {
+      close.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
+      );
+    });
+    expect(container.querySelector('[role="dialog"]')).toBeNull();
+    expect(document.activeElement).toBe(expand);
 
     await act(async () => root.unmount());
   });

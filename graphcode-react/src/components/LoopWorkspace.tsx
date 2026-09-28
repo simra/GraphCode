@@ -15,9 +15,12 @@ export function LoopWorkspace({
   node,
   mailbox,
   mailroomOwned,
+  seenBeatId,
+  seenMailroomPostId,
   commands,
   pendingCommandId,
   onBack,
+  onSummarySeen,
   onExecuteCommand,
   onSessionExit,
 }: {
@@ -25,9 +28,12 @@ export function LoopWorkspace({
   node: LoopNode;
   mailbox?: Mailbox;
   mailroomOwned: boolean;
+  seenBeatId?: string;
+  seenMailroomPostId?: number;
   commands: AppCommand[];
   pendingCommandId?: string;
   onBack(): void;
+  onSummarySeen(beatId: string): void;
   onExecuteCommand(command: AppCommand): void;
   onSessionExit(succeeded: boolean): Promise<void>;
 }) {
@@ -202,8 +208,11 @@ export function LoopWorkspace({
           node={node}
           mailbox={mailbox}
           mailroomOwned={mailroomOwned}
+          seenBeatId={seenBeatId}
+          seenMailroomPostId={seenMailroomPostId}
           commands={nodeCommands}
           pendingCommandId={pendingCommandId}
+          onSummarySeen={onSummarySeen}
           onExecuteCommand={onExecuteCommand}
         />
       </div>
