@@ -196,8 +196,10 @@ describe("LoopWorkspace", () => {
         <LoopWorkspace
           graph={graph}
           node={node}
+          mailroomOwned
           commands={[]}
           onBack={() => undefined}
+          onSummarySeen={() => undefined}
           onExecuteCommand={() => undefined}
           onSessionExit={onSessionExit}
         />,
