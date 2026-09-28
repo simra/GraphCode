@@ -2,6 +2,17 @@ import { expect, test, type Page } from "@playwright/test";
 
 const projectPath = "C:\\fixtures\\GraphCode E2E";
 const sketchId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+const quickChat = {
+  id: "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+  title: "Quick terminal",
+  backend: "copilotCLI",
+  createdAt: "2026-09-28T18:03:00Z",
+  activity: {
+    sequence: 1,
+    text: "Ready for a focused question",
+    presence: { presence: "idle", confidence: "reported" },
+  },
+};
 
 const envelopes = [
   {
@@ -17,7 +28,7 @@ const envelopes = [
     kind: "event",
     sequence: 2,
     event: {
-      quickChatsListed: [],
+      quickChatsListed: [quickChat],
     },
   },
   {
@@ -135,7 +146,7 @@ const envelopes = [
 
 async function installTauriMock(page: Page) {
   await page.addInitScript(
-    ({ daemonEnvelopes }) => {
+    ({ daemonEnvelopes, quickChatFixture }) => {
       type Callback = (payload: unknown) => void;
       type TauriMockWindow = Window & {
         __TAURI_INTERNALS__: {
@@ -151,6 +162,10 @@ async function installTauriMock(page: Page) {
           unregisterListener(event: string, id: number): void;
         };
         __GRAPHCODE_E2E_COMMANDS__: unknown[];
+        __GRAPHCODE_E2E_NATIVE_COMMANDS__: {
+          command: string;
+          args: Record<string, unknown>;
+        }[];
       };
 
       const target = window as TauriMockWindow;
@@ -161,6 +176,7 @@ async function installTauriMock(page: Page) {
       const listeners = new Map<string, number[]>();
       let nextCallbackId = 1;
       target.__GRAPHCODE_E2E_COMMANDS__ = [];
+      target.__GRAPHCODE_E2E_NATIVE_COMMANDS__ = [];
 
       function runCallback(id: number, payload: unknown) {
         const registered = callbacks.get(id);
@@ -177,6 +193,7 @@ async function installTauriMock(page: Page) {
 
       target.__TAURI_INTERNALS__ = {
         async invoke(command, args = {}) {
+          target.__GRAPHCODE_E2E_NATIVE_COMMANDS__.push({ command, args });
           if (command === "plugin:event|listen") {
             const event = String(args.event);
             const id = Number(args.handler);
@@ -218,6 +235,17 @@ async function installTauriMock(page: Page) {
           }
           if (command === "send_daemon_command") {
             target.__GRAPHCODE_E2E_COMMANDS__.push(args.command);
+            const daemonCommand = args.command as {
+              openQuickChat?: { id: string };
+            };
+            if (daemonCommand.openQuickChat?.id === quickChatFixture.id) {
+              return {
+                version: 2,
+                kind: "response",
+                requestID: crypto.randomUUID(),
+                event: { quickChatChanged: quickChatFixture },
+              };
+            }
             return {
               version: 2,
               kind: "response",
@@ -254,7 +282,7 @@ async function installTauriMock(page: Page) {
         },
       };
     },
-    { daemonEnvelopes: envelopes },
+    { daemonEnvelopes: envelopes, quickChatFixture: quickChat },
   );
 }
 
@@ -369,4 +397,66 @@ test("retypes a timed loop to a goal loop in place", async ({ page }) => {
         },
       },
     });
+});
+
+test("opens a Quick Chat as an interactive terminal workspace", async ({
+  page,
+}) => {
+  await page
+    .getByRole("button", { name: /Quick terminal/ })
+    .first()
+    .click();
+
+  await expect(
+    page.getByRole("heading", { name: "Quick terminal", level: 2 }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("region", { name: "Quick terminal terminal" }),
+  ).toBeVisible();
+  await expect(page.getByText("Live", { exact: true })).toBeVisible();
+
+  await expect
+    .poll(async () =>
+      page.evaluate(() => {
+        const target = window as Window & {
+          __GRAPHCODE_E2E_COMMANDS__: unknown[];
+        };
+        return target.__GRAPHCODE_E2E_COMMANDS__;
+      }),
+    )
+    .toContainEqual({ openQuickChat: { id: quickChat.id } });
+
+  await expect
+    .poll(() =>
+      page.evaluate((id) => {
+        const target = window as Window & {
+          __GRAPHCODE_E2E_NATIVE_COMMANDS__: {
+            command: string;
+            args: Record<string, unknown>;
+          }[];
+        };
+        return target.__GRAPHCODE_E2E_NATIVE_COMMANDS__
+          .filter(({ command }) => command === "open_terminal")
+          .map(({ args }) => args.nodeId);
+      }, quickChat.id),
+    )
+    .toContain(quickChat.id);
+
+  await page
+    .getByRole("button", { name: "← All Quick Chats", exact: true })
+    .click();
+  await expect
+    .poll(() =>
+      page.evaluate(() => {
+        const target = window as Window & {
+          __GRAPHCODE_E2E_NATIVE_COMMANDS__: {
+            command: string;
+          }[];
+        };
+        return target.__GRAPHCODE_E2E_NATIVE_COMMANDS__.map(
+          ({ command }) => command,
+        );
+      }),
+    )
+    .toContain("close_terminal");
 });

@@ -60,7 +60,7 @@ describe("QuickChatsView", () => {
     expect(markup).toContain("Delete Chat");
   });
 
-  it("renders the confirmed workspace without inventing terminal support", () => {
+  it("renders the confirmed workspace with a live terminal target", () => {
     const markup = renderToStaticMarkup(
       <QuickChatsView
         chats={[chat]}
@@ -73,7 +73,8 @@ describe("QuickChatsView", () => {
     );
 
     expect(markup).toContain("Quick Chat workspace");
-    expect(markup).toContain("graphcoded confirmed");
-    expect(markup).toContain("zmx bridge");
+    expect(markup).toContain("Scratch terminal");
+    expect(markup).toContain("Attaching");
+    expect(markup).not.toContain("attachment remains unavailable");
   });
 });

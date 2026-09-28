@@ -1539,8 +1539,7 @@ kbd {
   opacity: 0.55;
 }
 
-.quick-chat-empty,
-.quick-chat-workspace-body {
+.quick-chat-empty {
   display: grid;
   min-height: 490px;
   place-content: center;
@@ -1548,6 +1547,14 @@ kbd {
   gap: 12px;
   padding: 48px;
   text-align: center;
+}
+
+.quick-chat-workspace-body {
+  display: grid;
+  min-height: 490px;
+  align-content: start;
+  gap: 16px;
+  padding: 28px;
 }
 
 .quick-chat-empty h3,
@@ -1572,6 +1579,16 @@ kbd {
   background: rgba(19, 21, 18, 0.9);
 }
 
+.quick-chat-workspace > header > div:first-child {
+  display: grid;
+  gap: 4px;
+}
+
+.quick-chat-workspace > header h2,
+.quick-chat-workspace > header p {
+  margin: 0;
+}
+
 .back-button,
 .quick-chat-actions button {
   padding: 8px 11px;
@@ -1584,6 +1601,8 @@ kbd {
 
 .quick-chat-actions {
   display: flex;
+  align-items: center;
+  flex-wrap: wrap;
   gap: 8px;
 }
 
@@ -1601,6 +1620,12 @@ kbd {
   border: 1px solid #353c33;
   border-radius: 10px;
   background: #30352e;
+  text-align: left;
+}
+
+.quick-chat-terminal {
+  width: 100%;
+  height: max(520px, calc(100vh - 330px));
   text-align: left;
 }
 

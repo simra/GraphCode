@@ -51,8 +51,8 @@ The client negotiates protocol v2, announces `nodesChanged`, restores open proje
 loads recents and Quick Chats, opens the global graph, and maintains a persistent
 reconnecting event stream with replay acknowledgement. React mutations use the typed
 command registry and wait for correlated daemon outcomes. Quick Chat list, create,
-open, rename, delete, activity, and navigation are implemented; the opened workspace
-explicitly remains non-interactive until the local zmx terminal bridge is available.
+open, rename, delete, activity, navigation, and interactive zmx terminal attachment
+share the same hardened input, output, resize, and detach lifecycle as loop terminals.
 Composite snapshots can be drilled into through breadcrumbs, and graph mutations in
 that view are wrapped through the authoritative `subGraphCommand` parent chain.
 Pointer users can drag between loop connection handles to prefill the typed edge
