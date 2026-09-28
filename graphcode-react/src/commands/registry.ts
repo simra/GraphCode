@@ -140,8 +140,8 @@ export interface CommandActions {
   fitGraph?(): void;
   resetLayout?(): void;
   openNewEdge?(): void;
-  navigateBack?(): void;
-  navigateForward?(): void;
+  navigateBack?(): void | Promise<void>;
+  navigateForward?(): void | Promise<void>;
   canNavigateBack?: boolean;
   canNavigateForward?: boolean;
 }

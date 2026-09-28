@@ -87,7 +87,6 @@ import {
   mailroomWatchCommand,
   memoNodeCommand,
   messageNodeCommand,
-  openQuickChatCommand,
   openNodeSessionCommand,
   openProjectCommand,
   pilotCompositeCommand,
@@ -120,14 +119,18 @@ import {
   canNavigateBack,
   canNavigateForward,
   createNavigationHistory,
-  navigateBack,
-  navigateForward,
   navigationAnnouncement,
+  navigationRouteForNodeSelection,
   recordNavigation,
   resolveNavigationRoute,
+  traverseNavigation,
   type NavigationHistory,
   type NavigationRoute,
 } from "./state/navigationHistory";
+import {
+  activateQuickChat,
+  pendingCreatedQuickChatRoute,
+} from "./state/quickChatNavigation";
 
 export default function App() {
   const [state, dispatch] = useReducer(appReducer, initialAppState);
@@ -208,6 +211,7 @@ export default function App() {
   const stateRef = useRef(state);
   const navigationHistoryRef = useRef(navigationHistory);
   const pendingNavigationRoutesRef = useRef<NavigationRoute[]>([]);
+  const navigationTraversalPendingRef = useRef(false);
   stateRef.current = state;
   navigationHistoryRef.current = navigationHistory;
 
@@ -517,16 +521,38 @@ export default function App() {
     [],
   );
   const traverseNavigationHistory = useCallback(
-    (direction: "back" | "forward") => {
+    async (direction: "back" | "forward") => {
+      if (navigationTraversalPendingRef.current) return;
       const history = navigationHistoryRef.current;
       if (!history) return;
-      const step =
-        direction === "back"
-          ? navigateBack(history, historyRouteIsResolvable)
-          : navigateForward(history, historyRouteIsResolvable);
-      if (!step.route) return;
-      if (!applyNavigationRoute(step.route, direction)) return;
-      commitNavigationHistory(step.history);
+      navigationTraversalPendingRef.current = true;
+      try {
+        const step = await traverseNavigation(
+          history,
+          direction,
+          historyRouteIsResolvable,
+          async (route) => {
+            if (route.kind === "quickChat") {
+              const activation = await activateQuickChat(
+                stateRef.current,
+                route.id,
+                sendDaemonCommand,
+              );
+              if (activation.envelope) {
+                dispatch({
+                  type: "envelopeReceived",
+                  envelope: activation.envelope,
+                });
+              }
+            }
+            return applyNavigationRoute(route, direction);
+          },
+        );
+        if (!step.route) return;
+        commitNavigationHistory(step.history);
+      } finally {
+        navigationTraversalPendingRef.current = false;
+      }
     },
     [applyNavigationRoute, commitNavigationHistory, historyRouteIsResolvable],
   );
@@ -951,18 +977,14 @@ export default function App() {
   }, [openingProjectPath, state.graphs, visitNavigationRoute]);
 
   useEffect(() => {
-    if (
-      !pendingCreatedQuickChatId ||
-      !state.quickChats.some((chat) => chat.id === pendingCreatedQuickChatId)
-    ) {
-      return;
-    }
-    visitNavigationRoute({
-      kind: "quickChat",
-      id: pendingCreatedQuickChatId,
-    });
+    const route = pendingCreatedQuickChatRoute(
+      state,
+      pendingCreatedQuickChatId,
+    );
+    if (!route) return;
+    visitNavigationRoute(route);
     setPendingCreatedQuickChatId(undefined);
-  }, [pendingCreatedQuickChatId, state.quickChats, visitNavigationRoute]);
+  }, [pendingCreatedQuickChatId, state, visitNavigationRoute]);
 
   const executeCommand = useCallback(
     async (command: AppCommand) => {
@@ -1053,14 +1075,18 @@ export default function App() {
   function quickChatCommands(chat: (typeof state.quickChats)[number]) {
     return createQuickChatCommands(state.connection.phase === "connected", {
       openQuickChat: async () => {
-        const response = await sendDaemonCommand(openQuickChatCommand(chat.id));
-        if (
-          response.kind === "response" &&
-          response.event?.type === "quickChatChanged"
-        ) {
-          dispatch({ type: "envelopeReceived", envelope: response });
-          setPendingCreatedQuickChatId(response.event.chat.id);
+        const activation = await activateQuickChat(
+          stateRef.current,
+          chat.id,
+          sendDaemonCommand,
+        );
+        if (activation.envelope) {
+          dispatch({
+            type: "envelopeReceived",
+            envelope: activation.envelope,
+          });
         }
+        visitNavigationRoute({ kind: "quickChat", id: chat.id });
       },
       renameQuickChat: () =>
         setRenamingQuickChat({ id: chat.id, title: chat.title }),
@@ -1778,11 +1804,13 @@ export default function App() {
               }}
               onSelectNode={(nodeId) => {
                 if (!state.selectedProjectPath) return;
-                dispatch({
-                  type: "selectNode",
-                  projectPath: state.selectedProjectPath,
-                  nodeId,
-                });
+                visitNavigationRoute(
+                  navigationRouteForNodeSelection(
+                    state.selectedProjectPath,
+                    state.compositePath,
+                    nodeId,
+                  ),
+                );
               }}
             />
             <InspectorPane
@@ -1883,10 +1911,7 @@ export default function App() {
               response.event?.type === "quickChatChanged"
             ) {
               dispatch({ type: "envelopeReceived", envelope: response });
-              visitNavigationRoute({
-                kind: "quickChat",
-                id: response.event.chat.id,
-              });
+              setPendingCreatedQuickChatId(response.event.chat.id);
               announce(`Created Quick Chat ${response.event.chat.title}.`);
             }
           }}

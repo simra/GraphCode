@@ -149,6 +149,33 @@ export function navigateForward(
   return step(history, 1, isResolvable);
 }
 
+export async function traverseNavigation(
+  history: NavigationHistory,
+  direction: "back" | "forward",
+  isResolvable: (route: NavigationRoute) => boolean,
+  activate: (route: NavigationRoute) => Promise<boolean>,
+): Promise<NavigationStep> {
+  const found = findRoute(history, direction === "back" ? -1 : 1, isResolvable);
+  if (!found || !(await activate(found.route))) return { history };
+  return {
+    history: { ...history, cursor: found.index },
+    route: found.route,
+  };
+}
+
+export function navigationRouteForNodeSelection(
+  projectPath: string,
+  compositePath: readonly string[],
+  nodeId: string,
+): NavigationRoute {
+  return {
+    kind: "project",
+    projectPath,
+    compositePath: [...compositePath],
+    nodeId,
+  };
+}
+
 function graphAtPath(
   root: LoopGraph,
   compositePath: readonly string[],

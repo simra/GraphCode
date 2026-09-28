@@ -8,8 +8,10 @@ import {
   navigateBack,
   navigateForward,
   navigationAnnouncement,
+  navigationRouteForNodeSelection,
   recordNavigation,
   resolveNavigationRoute,
+  traverseNavigation,
   type NavigationRoute,
 } from "./navigationHistory";
 
@@ -201,5 +203,73 @@ describe("navigation history", () => {
     expect(navigationAnnouncement("forward", "Quick Chats")).toBe(
       "Forward to Quick Chats.",
     );
+  });
+
+  it("records nested canvas node selections and truncates the forward branch", () => {
+    const project = {
+      kind: "project",
+      projectPath: "C:\\work\\graph",
+      compositePath: [],
+    } satisfies NavigationRoute;
+    const abandonedForward = {
+      kind: "quickChats",
+    } satisfies NavigationRoute;
+    const clicked = navigationRouteForNodeSelection(
+      "C:\\work\\graph",
+      ["parent"],
+      "child-node",
+    );
+    const history = createNavigationHistory([project, abandonedForward], 0);
+
+    expect(recordNavigation(history, clicked)).toEqual({
+      version: 1,
+      entries: [project, clicked],
+      cursor: 1,
+    });
+  });
+
+  it("commits traversal only after activation succeeds", async () => {
+    const project = {
+      kind: "project",
+      projectPath: "C:\\work\\graph",
+      compositePath: [],
+    } satisfies NavigationRoute;
+    const chat = {
+      kind: "quickChat",
+      id: "chat-a",
+    } satisfies NavigationRoute;
+    const history = createNavigationHistory([project, chat], 0);
+
+    const failed = await traverseNavigation(
+      history,
+      "forward",
+      () => true,
+      async () => false,
+    );
+    expect(failed).toEqual({ history });
+
+    const activated = await traverseNavigation(
+      history,
+      "forward",
+      () => true,
+      async () => true,
+    );
+    expect(activated).toEqual({
+      history: { ...history, cursor: 1 },
+      route: chat,
+    });
+    expect(history.cursor).toBe(0);
+
+    await expect(
+      traverseNavigation(
+        history,
+        "forward",
+        () => true,
+        async () => {
+          throw new Error("activation refused");
+        },
+      ),
+    ).rejects.toThrow("activation refused");
+    expect(history.cursor).toBe(0);
   });
 });
