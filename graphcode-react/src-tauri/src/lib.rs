@@ -7,7 +7,10 @@ mod transport;
 mod ui_layout;
 mod workspace;
 
-use std::sync::Mutex;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc, Mutex,
+};
 
 use connection::ConnectionHandle;
 use endpoint::discover;
@@ -15,7 +18,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tauri::{
     menu::{MenuBuilder, MenuItemBuilder, SubmenuBuilder},
-    Emitter, Manager, State,
+    Emitter, Manager, RunEvent, State,
 };
 use thiserror::Error;
 
@@ -396,7 +399,7 @@ fn save_ui_node_positions(
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let state = BridgeState::new().expect("failed to initialize GraphCode workspace state");
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(state)
         .on_menu_event(|app, event| {
@@ -423,8 +426,22 @@ pub fn run() {
             save_ui_viewport,
             save_ui_node_positions
         ])
-        .run(tauri::generate_context!())
-        .expect("failed to run GraphCode React");
+        .build(tauri::generate_context!())
+        .expect("failed to build GraphCode React");
+    let exiting = Arc::new(AtomicBool::new(false));
+    app.run(move |app_handle, event| {
+        if let RunEvent::ExitRequested { api, code, .. } = event {
+            if !exiting.swap(true, Ordering::SeqCst) {
+                api.prevent_exit();
+                let app_handle = app_handle.clone();
+                tauri::async_runtime::spawn(async move {
+                    app_handle.state::<BridgeState>().terminal.close_all();
+                    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                    app_handle.exit(code.unwrap_or(0));
+                });
+            }
+        }
+    });
 }
 
 #[cfg(test)]

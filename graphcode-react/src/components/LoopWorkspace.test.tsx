@@ -8,7 +8,6 @@ import type { LoopGraph, LoopNode } from "../protocol/domain";
 const bridge = vi.hoisted(() => ({
   acknowledge: vi.fn(async () => undefined),
   close: vi.fn(async () => undefined),
-  loadTerminalHistory: vi.fn(),
   openTerminal: vi.fn(),
   resize: vi.fn(async () => undefined),
   write: vi.fn(async () => undefined),
@@ -17,25 +16,21 @@ const bridge = vi.hoisted(() => ({
 const xterm = vi.hoisted(() => ({
   dataHandler: undefined as ((data: string) => void) | undefined,
   dispose: vi.fn(),
-  fitCalls: 0,
   focus: vi.fn(),
   instance: undefined as { cols: number; rows: number } | undefined,
+  proposedRows: 24,
+  resize: vi.fn(),
   writes: [] as Uint8Array[],
 }));
 
 vi.mock("../bridge/terminal", () => ({
-  loadTerminalHistory: bridge.loadTerminalHistory,
   openTerminal: bridge.openTerminal,
 }));
 
 vi.mock("@xterm/addon-fit", () => ({
   FitAddon: class {
-    fit() {
-      xterm.fitCalls += 1;
-      if (xterm.fitCalls > 1 && xterm.instance) {
-        xterm.instance.cols = 112;
-        xterm.instance.rows = 31;
-      }
+    proposeDimensions() {
+      return { cols: 112, rows: xterm.proposedRows };
     }
   },
 }));
@@ -51,6 +46,11 @@ vi.mock("@xterm/xterm", () => ({
     open() {}
     focus = xterm.focus;
     dispose = xterm.dispose;
+    resize(columns: number, rows: number) {
+      this.cols = columns;
+      this.rows = rows;
+      xterm.resize(columns, rows);
+    }
     write(data: Uint8Array, callback?: () => void) {
       xterm.writes.push(data);
       callback?.();
@@ -91,13 +91,9 @@ beforeEach(() => {
   vi.stubGlobal("ResizeObserver", ResizeObserverStub);
   xterm.writes = [];
   xterm.dataHandler = undefined;
-  xterm.fitCalls = 0;
   xterm.instance = undefined;
-  bridge.loadTerminalHistory.mockReset();
-  bridge.loadTerminalHistory.mockResolvedValue({
-    bytes: new TextEncoder().encode("history"),
-    truncated: false,
-  });
+  xterm.proposedRows = 24;
+  xterm.resize.mockClear();
   bridge.openTerminal.mockReset();
   bridge.openTerminal.mockResolvedValue({
     handle: "terminal-1",
@@ -118,7 +114,7 @@ afterEach(() => {
 });
 
 describe("LoopWorkspace", () => {
-  it("loads retained history, attaches, forwards input, and detaches", async () => {
+  it("attaches, forwards input, resizes, and detaches", async () => {
     const container = document.createElement("div");
     document.body.append(container);
     const root = createRoot(container);
@@ -135,16 +131,20 @@ describe("LoopWorkspace", () => {
       );
     });
 
-    expect(bridge.loadTerminalHistory).toHaveBeenCalledWith(node.id);
     expect(bridge.openTerminal).toHaveBeenCalledWith(
       node.id,
       80,
       24,
       expect.any(Object),
     );
-    expect(new TextDecoder().decode(xterm.writes[0])).toBe("history");
     expect(container.textContent).toContain("Live");
-    expect(bridge.resize).toHaveBeenCalledWith(112, 31);
+    xterm.proposedRows = 31;
+    window.dispatchEvent(new Event("resize"));
+    await act(async () => {
+      await new Promise((resolve) => window.setTimeout(resolve, 110));
+    });
+    expect(xterm.resize).toHaveBeenLastCalledWith(80, 31);
+    expect(bridge.resize).toHaveBeenCalledWith(80, 31);
 
     await act(async () => {
       xterm.dataHandler?.("echo test\r");

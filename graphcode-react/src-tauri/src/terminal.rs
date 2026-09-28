@@ -226,6 +226,19 @@ impl TerminalManager {
         Ok(())
     }
 
+    pub fn close_all(&self) {
+        let senders: Vec<_> = self
+            .sessions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .drain()
+            .map(|(_, terminal)| terminal.sender)
+            .collect();
+        for sender in senders {
+            let _ = sender.try_send(TerminalCommand::Close);
+        }
+    }
+
     async fn send(&self, handle: &str, command: TerminalCommand) -> Result<(), TerminalError> {
         let handle = Uuid::parse_str(handle).map_err(|_| TerminalError::NotOpen)?;
         let sender = self
@@ -352,6 +365,7 @@ async fn prepare_attach(
         .stderr
         .take()
         .ok_or_else(|| TerminalError::Launch("zmx attach did not expose stderr".into()))?;
+    resize_session(&zmx, session_name, columns, rows, 1).await?;
     Ok((zmx, child, stdin, stdout, stderr))
 }
 

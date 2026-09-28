@@ -2,16 +2,13 @@ import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
 import { useEffect, useRef, useState } from "react";
-import {
-  loadTerminalHistory,
-  openTerminal,
-  type TerminalConnection,
-} from "../bridge/terminal";
+import { openTerminal, type TerminalConnection } from "../bridge/terminal";
 import type { AppCommand } from "../commands/registry";
 import type { LoopGraph, LoopNode } from "../protocol/domain";
 import { NodeInspector } from "./NodeInspector";
 
 type TerminalPhase = "connecting" | "connected" | "exited" | "failed";
+const WINDOWS_ZMX_COLUMNS = 80;
 
 export function LoopWorkspace({
   graph,
@@ -32,7 +29,6 @@ export function LoopWorkspace({
   const connectionRef = useRef<TerminalConnection | undefined>(undefined);
   const [phase, setPhase] = useState<TerminalPhase>("connecting");
   const [error, setError] = useState<string>();
-  const [historyTruncated, setHistoryTruncated] = useState(false);
   const nodeCommands = commands.filter(
     (command) => command.id !== "loop.openTerminal",
   );
@@ -63,7 +59,16 @@ export function LoopWorkspace({
     const fit = new FitAddon();
     terminal.loadAddon(fit);
     terminal.open(container);
-    fit.fit();
+
+    const fitRows = () => {
+      const proposed = fit.proposeDimensions();
+      terminal.resize(
+        WINDOWS_ZMX_COLUMNS,
+        Math.max(1, proposed?.rows ?? terminal.rows),
+      );
+    };
+
+    fitRows();
     terminal.focus();
 
     const reportError = (value: unknown) => {
@@ -74,7 +79,7 @@ export function LoopWorkspace({
 
     const fitAndResize = () => {
       if (!active) return;
-      fit.fit();
+      fitRows();
       const connection = connectionRef.current;
       if (
         !connection ||
@@ -94,15 +99,6 @@ export function LoopWorkspace({
 
     void (async () => {
       try {
-        const history = await loadTerminalHistory(node.id);
-        if (!active) return;
-        setHistoryTruncated(history.truncated);
-        if (history.bytes.length) {
-          await new Promise<void>((resolve) =>
-            terminal.write(history.bytes, resolve),
-          );
-        }
-        if (!active) return;
         const openedColumns = terminal.cols;
         const openedRows = terminal.rows;
         const connection = await openTerminal(
@@ -181,11 +177,6 @@ export function LoopWorkspace({
                 : "Unavailable"}
         </div>
       </header>
-      {historyTruncated ? (
-        <p className="terminal-notice" role="status">
-          Showing the newest 1 MiB of retained terminal history.
-        </p>
-      ) : null}
       {error ? (
         <div className="terminal-error" role="alert">
           {error}
