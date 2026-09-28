@@ -579,6 +579,11 @@ export default function App() {
           direction,
           historyRouteIsResolvable,
           async (route) => {
+            if (route.kind === "project" && route.terminal && route.nodeId) {
+              await sendDaemonCommand(
+                openNodeSessionCommand(route.projectPath, route.nodeId),
+              );
+            }
             if (route.kind === "quickChat") {
               const activation = await activateQuickChat(
                 stateRef.current,

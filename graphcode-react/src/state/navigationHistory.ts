@@ -219,9 +219,7 @@ export function resolveNavigationRoute(
       if (route.nodeId && !node) return undefined;
       if (
         route.terminal &&
-        (!node ||
-          node.loopType === "sketch" ||
-          (node.loopType === "proactive" && Boolean(node.subGraph)))
+        (!node || (node.loopType === "proactive" && Boolean(node.subGraph)))
       ) {
         return undefined;
       }

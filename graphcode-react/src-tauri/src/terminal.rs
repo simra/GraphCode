@@ -490,10 +490,8 @@ async fn run_terminal(
                     Some(TerminalCommand::Close) | None => {
                         child.kill().await
                             .map_err(|error| TerminalError::Stream(error.to_string()))?;
-                        let status = child.wait().await
+                        child.wait().await
                             .map_err(|error| TerminalError::Stream(error.to_string()))?;
-                        on_event.send(TerminalEvent::Exit { code: status.code() })
-                            .map_err(|_| TerminalError::ChannelClosed)?;
                         return Ok(());
                     }
                 }

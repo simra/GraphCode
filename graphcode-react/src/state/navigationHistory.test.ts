@@ -55,6 +55,12 @@ function stateWithRoutes(): AppState {
             loopType: "turnBased",
             state: "running",
           },
+          {
+            id: "sketch-node",
+            title: "Sketch",
+            loopType: "sketch",
+            state: "idle",
+          },
         ],
         edges: [],
       },
@@ -154,6 +160,13 @@ describe("navigation history", () => {
         projectPath: "C:\\work\\graph",
         compositePath: [],
         nodeId: "terminal-node",
+        terminal: true,
+      },
+      {
+        kind: "project",
+        projectPath: "C:\\work\\graph",
+        compositePath: [],
+        nodeId: "sketch-node",
         terminal: true,
       },
       {
