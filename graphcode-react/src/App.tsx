@@ -64,6 +64,7 @@ import { edgeSpecFromSnapshot } from "./forms/edgeSpec";
 import {
   addressGraphCommand,
   armCompositeCommand,
+  attendedSketchExitCommand,
   closeProjectCommand,
   completeNodeCommand,
   createEdgeCommand,
@@ -1355,6 +1356,15 @@ export default function App() {
             pendingCommandId={pendingCommandId}
             onBack={() => setTerminalNodeId(undefined)}
             onExecuteCommand={(command) => void executeCommand(command)}
+            onSessionExit={async (succeeded) => {
+              const command = attendedSketchExitCommand(
+                selectedGraph.project.path,
+                terminalNode.id,
+                terminalNode.loopType,
+                succeeded,
+              );
+              if (command) await sendDaemonCommand(command);
+            }}
           />
         ) : state.quickChatsSelected ? (
           <QuickChatsView

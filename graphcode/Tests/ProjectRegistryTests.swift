@@ -271,6 +271,43 @@ struct ProjectRegistryTests {
   }
 
   @Test
+  func openingRemoteTerminalFailsBeforeLaunchingAnySession() async {
+    let directory = FileManager.default.temporaryDirectory
+      .appendingPathComponent("graphcode-tests-\(UUID().uuidString)", isDirectory: true)
+    let starts = LockIsolated(0)
+    let registry = ProjectRegistry(
+      persistenceDirectory: directory,
+      persistsSynchronously: true,
+      startNodeSession: { _, _ in
+        starts.withValue { $0 += 1 }
+        return .success(.started)
+      },
+      nodeSessionExists: { _, _ in false },
+      findMissingProvider: { _, _ in nil })
+    let connectionID = UUID()
+    let projectPath = "ssh://dev@build-box/workspaces/project"
+    await registry.addConnection(id: connectionID, fileDescriptor: -1)
+    await registry.handle(.openProject(path: projectPath), connectionID: connectionID)
+    let sketchID = UUID()
+    await registry.handle(
+      .graphCommand(
+        projectPath: projectPath,
+        command: .createNode(NodeDraft(id: sketchID, title: "Main", loopType: .sketch))),
+      connectionID: connectionID)
+
+    let result = await registry.apply(
+      .openNodeSession(projectPath: projectPath, nodeID: sketchID),
+      connectionID: connectionID)
+
+    #expect(starts.value == 0)
+    #expect(result?.response == nil)
+    #expect(
+      result?.error
+        == "remote terminal streaming is not supported in this app yet; "
+        + "no remote session was started")
+  }
+
+  @Test
   func v2RejectsAnOversizedResultBeforePersistingTheMutation() async {
     let (registry, persistence) = makeRegistryAndPersistence()
     let transport = RecordingConnection()

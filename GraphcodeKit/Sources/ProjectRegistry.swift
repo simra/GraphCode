@@ -678,6 +678,12 @@ public actor ProjectRegistry {
           error = "loop session unavailable: no loop \(nodeID) in this graph"
           break
         }
+        if let compatibilityError = Self.terminalCompatibilityError(
+          projectPath: canonicalPath)
+        {
+          error = compatibilityError
+          break
+        }
         if stored.runsUnattended {
           response = .graphChanged(await store.graph)
           break
@@ -821,6 +827,12 @@ public actor ProjectRegistry {
     case .unavailable(let message), .failed(let message): return message
     case .notFound: return "session not found"
     }
+  }
+
+  static func terminalCompatibilityError(projectPath: String) -> String? {
+    guard RemoteProjectLocation.parse(projectPath: projectPath) != nil else { return nil }
+    return
+      "remote terminal streaming is not supported in this app yet; no remote session was started"
   }
 
   private func open(

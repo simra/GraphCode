@@ -81,6 +81,10 @@ final class GraphCommandInteropTests: XCTestCase {
       ("daemon-v2-forget-project.json", .forgetProject(path: "C:\\work\\graph")),
       ("daemon-v2-delete-project-graph.json", .deleteProjectGraph(path: "C:\\work\\graph")),
       ("daemon-v2-delete-node.json", .graphCommand(projectPath: "C:\\work\\graph", command: .deleteNode(node))),
+      ("daemon-v2-node-check-approved.json", .graphCommand(
+        projectPath: "C:\\work\\graph", command: .nodeCheckApproved(node))),
+      ("daemon-v2-node-check-rejected.json", .graphCommand(
+        projectPath: "C:\\work\\graph", command: .nodeCheckRejected(node))),
       ("daemon-v2-update-node.json", .graphCommand(
         projectPath: "C:\\work\\graph",
         command: .updateNode(node, update: NodeUpdate(

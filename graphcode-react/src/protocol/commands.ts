@@ -121,6 +121,10 @@ export type CompleteNodeCommand = GraphCommandEnvelope<{
   };
 }>;
 
+export type NodeCheckCommand = GraphCommandEnvelope<
+  { nodeCheckApproved: { _0: string } } | { nodeCheckRejected: { _0: string } }
+>;
+
 export type RefreshUsageCommand = GraphCommandEnvelope<{
   refreshUsage: Record<string, never>;
 }>;
@@ -321,6 +325,23 @@ export function openNodeSessionCommand(
   nodeId: string,
 ): OpenNodeSessionCommand {
   return { openNodeSession: { projectPath, nodeID: nodeId } };
+}
+
+export function attendedSketchExitCommand(
+  projectPath: string,
+  nodeId: string,
+  loopType: string | undefined,
+  succeeded: boolean,
+): NodeCheckCommand | undefined {
+  if (loopType !== "sketch") return undefined;
+  return {
+    graphCommand: {
+      projectPath,
+      command: succeeded
+        ? { nodeCheckApproved: { _0: nodeId } }
+        : { nodeCheckRejected: { _0: nodeId } },
+    },
+  };
 }
 
 export function renameQuickChatCommand(

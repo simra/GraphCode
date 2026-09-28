@@ -17,6 +17,7 @@ export function LoopWorkspace({
   pendingCommandId,
   onBack,
   onExecuteCommand,
+  onSessionExit,
 }: {
   graph: LoopGraph;
   node: LoopNode;
@@ -24,6 +25,7 @@ export function LoopWorkspace({
   pendingCommandId?: string;
   onBack(): void;
   onExecuteCommand(command: AppCommand): void;
+  onSessionExit(succeeded: boolean): Promise<void>;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const connectionRef = useRef<TerminalConnection | undefined>(undefined);
@@ -113,8 +115,10 @@ export function LoopWorkspace({
               });
             },
             onError: reportError,
-            onExit() {
-              if (active) setPhase("exited");
+            onExit(code) {
+              if (!active) return;
+              setPhase("exited");
+              void onSessionExit(code === 0).catch(reportError);
             },
           },
         );

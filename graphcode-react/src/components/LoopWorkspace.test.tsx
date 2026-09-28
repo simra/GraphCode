@@ -11,6 +11,11 @@ const bridge = vi.hoisted(() => ({
   openTerminal: vi.fn(),
   resize: vi.fn(async () => undefined),
   write: vi.fn(async () => undefined),
+  handlers: undefined as
+    | {
+        onExit(code: number | null): void;
+      }
+    | undefined,
 }));
 
 const xterm = vi.hoisted(() => ({
@@ -95,14 +100,20 @@ beforeEach(() => {
   xterm.proposedRows = 24;
   xterm.resize.mockClear();
   bridge.openTerminal.mockReset();
-  bridge.openTerminal.mockResolvedValue({
-    handle: "terminal-1",
-    sessionName: "graphcode-LOOP",
-    write: bridge.write,
-    resize: bridge.resize,
-    acknowledge: bridge.acknowledge,
-    close: bridge.close,
-  });
+  bridge.handlers = undefined;
+  bridge.openTerminal.mockImplementation(
+    async (_id, _columns, _rows, handlers) => {
+      bridge.handlers = handlers;
+      return {
+        handle: "terminal-1",
+        sessionName: "graphcode-LOOP",
+        write: bridge.write,
+        resize: bridge.resize,
+        acknowledge: bridge.acknowledge,
+        close: bridge.close,
+      };
+    },
+  );
   bridge.write.mockClear();
   bridge.resize.mockClear();
   bridge.close.mockClear();
@@ -118,6 +129,7 @@ describe("LoopWorkspace", () => {
     const container = document.createElement("div");
     document.body.append(container);
     const root = createRoot(container);
+    const onSessionExit = vi.fn(async () => undefined);
 
     await act(async () => {
       root.render(
@@ -127,6 +139,7 @@ describe("LoopWorkspace", () => {
           commands={[]}
           onBack={() => undefined}
           onExecuteCommand={() => undefined}
+          onSessionExit={onSessionExit}
         />,
       );
     });
@@ -152,8 +165,42 @@ describe("LoopWorkspace", () => {
     expect(bridge.write).toHaveBeenCalledWith("echo test\r");
 
     await act(async () => {
+      bridge.handlers?.onExit(0);
+    });
+    expect(onSessionExit).toHaveBeenCalledWith(true);
+    expect(container.textContent).toContain("Session ended");
+
+    await act(async () => {
       root.unmount();
     });
     expect(bridge.close).toHaveBeenCalledOnce();
+  });
+
+  it("reports a nonzero or signal exit as rejected", async () => {
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    const onSessionExit = vi.fn(async () => undefined);
+
+    await act(async () => {
+      root.render(
+        <LoopWorkspace
+          graph={graph}
+          node={node}
+          commands={[]}
+          onBack={() => undefined}
+          onExecuteCommand={() => undefined}
+          onSessionExit={onSessionExit}
+        />,
+      );
+    });
+
+    await act(async () => {
+      bridge.handlers?.onExit(null);
+    });
+    expect(onSessionExit).toHaveBeenCalledWith(false);
+    await act(async () => {
+      root.unmount();
+    });
   });
 });

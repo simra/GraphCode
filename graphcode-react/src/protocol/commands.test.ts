@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   addressGraphCommand,
   armCompositeCommand,
+  attendedSketchExitCommand,
   closeProjectCommand,
   completeNodeCommand,
   createEdgeCommand,
@@ -92,6 +93,30 @@ describe("daemon commands", () => {
         nodeID: "11111111-1111-4111-8111-111111111111",
       },
     });
+  });
+
+  it("maps attended sketch exits to the approved and rejected lifecycle commands", () => {
+    const project = "C:\\work\\graph";
+    const node = "11111111-1111-4111-8111-111111111111";
+
+    expect(attendedSketchExitCommand(project, node, "sketch", true)).toEqual({
+      graphCommand: {
+        projectPath: project,
+        command: { nodeCheckApproved: { _0: node } },
+      },
+    });
+    expect(attendedSketchExitCommand(project, node, "sketch", false)).toEqual({
+      graphCommand: {
+        projectPath: project,
+        command: { nodeCheckRejected: { _0: node } },
+      },
+    });
+    expect(
+      attendedSketchExitCommand(project, node, "goalBased", true),
+    ).toBeUndefined();
+    expect(
+      attendedSketchExitCommand(project, node, "timeBased", false),
+    ).toBeUndefined();
   });
 
   it("encodes createNode through graphCommand with the NodeDraft wrapper", () => {
