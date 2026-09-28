@@ -576,6 +576,16 @@ public actor GraphStore {
     await broadcast()
   }
 
+  /// Returns the daemon-owned node configuration an attended terminal should launch.
+  /// Template followers are resolved at the same run boundary as unattended ensures,
+  /// and any refreshed snapshot is persisted and broadcast before the session starts.
+  public func nodeForSessionLaunch(_ nodeID: UUID) async -> LoopNode? {
+    guard let node = graph.nodesAtAnyDepth.first(where: { $0.id == nodeID }) else { return nil }
+    let resolved = resolvedForLaunch(node)
+    await broadcastIfTemplatesRefreshed()
+    return resolved
+  }
+
   /// The node a template's current contents would launch — or the unchanged node
   /// when the resolve declines (refusals above). The recomposition preserves what
   /// the old prompt already knew: the cadence, unless the template now carries one

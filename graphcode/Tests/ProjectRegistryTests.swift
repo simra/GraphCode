@@ -141,6 +141,136 @@ struct ProjectRegistryTests {
   }
 
   @Test
+  func openingNodeSessionUsesStoredAttendedConfigurationOnly() async {
+    let directory = FileManager.default.temporaryDirectory
+      .appendingPathComponent("graphcode-tests-\(UUID().uuidString)", isDirectory: true)
+    let starts = LockIsolated<[(LoopNode, String?)]>([])
+    let registry = ProjectRegistry(
+      persistenceDirectory: directory,
+      persistsSynchronously: true,
+      startNodeSession: { node, path in
+        starts.withValue { $0.append((node, path)) }
+        return .success(starts.value.count == 1 ? .started : .attached)
+      },
+      nodeSessionExists: { _, _ in !starts.value.isEmpty },
+      findMissingProvider: { node, _ in
+        starts.value.isEmpty
+          ? nil : LaunchFailure(executable: "copilot", backend: node.backend)
+      })
+    let connectionID = UUID()
+    await registry.addConnection(id: connectionID, fileDescriptor: -1)
+    await registry.handle(.openProject(path: "/tmp/project-a"), connectionID: connectionID)
+    let sketchID = UUID()
+    await registry.handle(
+      .graphCommand(
+        projectPath: "/tmp/project-a",
+        command: .createNode(
+          NodeDraft(
+            id: sketchID, title: "Main", loopType: .sketch,
+            firstInstruction: "Use the stored brief", backend: .copilotCLI,
+            modelTier: .capable))),
+      connectionID: connectionID)
+
+    let result = await registry.apply(
+      .openNodeSession(projectPath: "/tmp/project-a", nodeID: sketchID),
+      connectionID: connectionID)
+
+    #expect(result?.error == nil)
+    #expect(starts.value.count == 1)
+    #expect(starts.value.first?.0.id == sketchID)
+    #expect(starts.value.first?.0.backend == .copilotCLI)
+    #expect(starts.value.first?.0.modelTier == .capable)
+    #expect(starts.value.first?.0.firstInstruction == "Use the stored brief")
+    #expect(starts.value.first?.1 == "/tmp/project-a")
+
+    let reopened = await registry.apply(
+      .openNodeSession(projectPath: "/tmp/project-a", nodeID: sketchID),
+      connectionID: connectionID)
+    #expect(reopened?.error == nil)
+    #expect(starts.value.count == 2)
+
+    let goalID = UUID()
+    await registry.handle(
+      .graphCommand(
+        projectPath: "/tmp/project-a",
+        command: .createNode(
+          NodeDraft(
+            id: goalID, title: "Goal", loopType: .goalBased,
+            goal: GoalSpec(summary: "Finish")))),
+      connectionID: connectionID)
+    let unattended = await registry.apply(
+      .openNodeSession(projectPath: "/tmp/project-a", nodeID: goalID),
+      connectionID: connectionID)
+    #expect(unattended?.error == nil)
+    #expect(starts.value.count == 2)
+  }
+
+  @Test
+  func openingAttendedSessionSurfacesLauncherFailure() async {
+    let directory = FileManager.default.temporaryDirectory
+      .appendingPathComponent("graphcode-tests-\(UUID().uuidString)", isDirectory: true)
+    let registry = ProjectRegistry(
+      persistenceDirectory: directory,
+      persistsSynchronously: true,
+      startNodeSession: { _, _ in .failure(.unavailable("session startup failed")) },
+      nodeSessionExists: { _, _ in false },
+      findMissingProvider: { _, _ in nil })
+    let connectionID = UUID()
+    await registry.addConnection(id: connectionID, fileDescriptor: -1)
+    await registry.handle(.openProject(path: "/tmp/project-a"), connectionID: connectionID)
+    let sketchID = UUID()
+    await registry.handle(
+      .graphCommand(
+        projectPath: "/tmp/project-a",
+        command: .createNode(NodeDraft(id: sketchID, title: "Main", loopType: .sketch))),
+      connectionID: connectionID)
+
+    let result = await registry.apply(
+      .openNodeSession(projectPath: "/tmp/project-a", nodeID: sketchID),
+      connectionID: connectionID)
+
+    #expect(result?.response == nil)
+    #expect(result?.error == "loop session unavailable: session startup failed")
+  }
+
+  @Test
+  func openingAttendedSessionRefusesMissingProviderBeforeLaunch() async {
+    let directory = FileManager.default.temporaryDirectory
+      .appendingPathComponent("graphcode-tests-\(UUID().uuidString)", isDirectory: true)
+    let starts = LockIsolated(0)
+    let registry = ProjectRegistry(
+      persistenceDirectory: directory,
+      persistsSynchronously: true,
+      startNodeSession: { _, _ in
+        starts.withValue { $0 += 1 }
+        return .success(.started)
+      },
+      nodeSessionExists: { _, _ in false },
+      findMissingProvider: { node, _ in
+        LaunchFailure(executable: "copilot", backend: node.backend)
+      })
+    let connectionID = UUID()
+    await registry.addConnection(id: connectionID, fileDescriptor: -1)
+    await registry.handle(.openProject(path: "/tmp/project-a"), connectionID: connectionID)
+    let sketchID = UUID()
+    await registry.handle(
+      .graphCommand(
+        projectPath: "/tmp/project-a",
+        command: .createNode(
+          NodeDraft(
+            id: sketchID, title: "Main", loopType: .sketch, backend: .copilotCLI))),
+      connectionID: connectionID)
+
+    let result = await registry.apply(
+      .openNodeSession(projectPath: "/tmp/project-a", nodeID: sketchID),
+      connectionID: connectionID)
+
+    #expect(starts.value == 0)
+    #expect(result?.response == nil)
+    #expect(result?.error == "loop session unavailable: copilot is not on your PATH")
+  }
+
+  @Test
   func v2RejectsAnOversizedResultBeforePersistingTheMutation() async {
     let (registry, persistence) = makeRegistryAndPersistence()
     let transport = RecordingConnection()

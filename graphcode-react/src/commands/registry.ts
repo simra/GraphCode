@@ -127,7 +127,7 @@ export interface CommandActions {
   searchMailroom?(): void;
   configureMailroomWatch?(): void;
   postMailroom?(): void;
-  openTerminal?(): void;
+  openTerminal?(): Promise<void>;
   restartSession?(): Promise<void>;
   completeNode?(): void;
   deleteNode?(): Promise<void>;
@@ -739,22 +739,17 @@ export function createCommandRegistry(
     {
       id: "loop.openTerminal",
       label: "Open Terminal",
-      description: "Attach to the selected loop's zmx session",
+      description: "Open or attach to the selected loop's zmx session",
       category: "Loop",
       surfaces: ["node"],
-      ...(node &&
-      node.loopType !== "sketch" &&
-      !isComposite &&
-      actions.openTerminal
+      ...(node && !isComposite && actions.openTerminal
         ? { enabled: true, execute: actions.openTerminal }
         : {
             ...unavailable(
               node
                 ? isComposite
                   ? "Composite loops open their child graph"
-                  : node.loopType === "sketch"
-                    ? "Promote this sketch before opening a terminal"
-                    : "Terminal streaming requires the desktop app"
+                  : "Terminal streaming requires the desktop app"
                 : "Select a loop first",
             ),
             execute: () => undefined,

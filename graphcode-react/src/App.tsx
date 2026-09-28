@@ -83,6 +83,7 @@ import {
   memoNodeCommand,
   messageNodeCommand,
   openQuickChatCommand,
+  openNodeSessionCommand,
   openProjectCommand,
   pilotCompositeCommand,
   promoteNodeCommand,
@@ -396,8 +397,15 @@ export default function App() {
         openNewQuickChat: () => setNewQuickChatOpen(true),
         openMailroom: () => dispatch({ type: "selectMailroom" }),
         openTerminal:
-          "__TAURI_INTERNALS__" in window && inspectedNode
-            ? () => setTerminalNodeId(inspectedNode.id)
+          "__TAURI_INTERNALS__" in window &&
+          inspectedNode &&
+          selectedProjectPath
+            ? async () => {
+                await sendDaemonCommand(
+                  openNodeSessionCommand(selectedProjectPath, inspectedNode.id),
+                );
+                setTerminalNodeId(inspectedNode.id);
+              }
             : undefined,
         openNewEdge: () => {
           setNewEdgeEndpoints({ from: inspectedNode?.id });

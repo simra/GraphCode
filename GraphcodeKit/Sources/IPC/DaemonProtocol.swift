@@ -43,6 +43,10 @@ public enum DaemonCommand: Codable, Sendable, Equatable {
   case openQuickChat(id: UUID)
   case renameQuickChat(id: UUID, title: String)
   case deleteQuickChat(id: UUID)
+  /// Prepare a node's attended terminal session from the daemon's stored configuration.
+  /// Sketches and turn-based loops are launched or reattached here; unattended loops are
+  /// left alone because their lifecycle belongs to the daemon's ensure sweeps.
+  case openNodeSession(projectPath: String, nodeID: UUID)
   case graphCommand(projectPath: String, command: GraphCommand)
   /// Read the project's Mailroom — the whole room, one loop's unread slice of it, or
   /// one post — answered on this connection alone with a `.mailbox`. This is the read

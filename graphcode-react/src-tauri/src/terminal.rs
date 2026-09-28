@@ -43,6 +43,10 @@ pub enum TerminalError {
     ZmxUnavailable(String),
     #[error("the loop session is not running")]
     SessionUnavailable,
+    #[error(
+        "the loop session exists without a running command; reopen it to relaunch from graphcoded"
+    )]
+    SessionCommandMissing,
     #[error("a terminal is already open for this loop")]
     AlreadyOpen,
     #[error("the loop session is attached in another client")]
@@ -328,9 +332,7 @@ async fn prepare_attach(
 ) -> Result<PreparedAttach, TerminalError> {
     let zmx = zmx_binary()?;
     let before = session_info(&zmx, session_name).await?;
-    if before.clients != 0 {
-        return Err(TerminalError::AlreadyAttached);
-    }
+    validate_attachable_session(&before)?;
     resize_session(&zmx, session_name, columns, rows, 0).await?;
 
     let mut child = zmx_command(&zmx)
@@ -367,6 +369,16 @@ async fn prepare_attach(
         .ok_or_else(|| TerminalError::Launch("zmx attach did not expose stderr".into()))?;
     resize_session(&zmx, session_name, columns, rows, 1).await?;
     Ok((zmx, child, stdin, stdout, stderr))
+}
+
+fn validate_attachable_session(info: &SessionInfo) -> Result<(), TerminalError> {
+    if !info.has_command {
+        return Err(TerminalError::SessionCommandMissing);
+    }
+    if info.clients != 0 {
+        return Err(TerminalError::AlreadyAttached);
+    }
+    Ok(())
 }
 
 async fn wait_for_attach(
@@ -731,6 +743,19 @@ mod tests {
             })
         );
         assert!(parse_session_info("graphcode-ABC\tclients=1").is_none());
+    }
+
+    #[test]
+    fn commandless_sessions_are_not_attachable() {
+        let info = SessionInfo {
+            pid: 42,
+            clients: 0,
+            has_command: false,
+        };
+        assert!(matches!(
+            validate_attachable_session(&info),
+            Err(TerminalError::SessionCommandMissing)
+        ));
     }
 
     #[test]

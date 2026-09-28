@@ -77,7 +77,7 @@ describe("command registry", () => {
     ).toContain("next frontend task");
   });
 
-  it("opens terminals for executable loops but not sketches", () => {
+  it("opens terminals for executable loops including sketches", () => {
     const state = stateWithSelectedNode();
     const openTerminal = vi.fn();
     let commands = createCommandRegistry(state, {
@@ -101,10 +101,12 @@ describe("command registry", () => {
       selectNode: vi.fn(),
       openTerminal,
     });
-    expect(
-      commands.find((candidate) => candidate.id === "loop.openTerminal")
-        ?.disabledReason,
-    ).toContain("Promote this sketch");
+    const sketchCommand = commands.find(
+      (candidate) => candidate.id === "loop.openTerminal",
+    );
+    expect(sketchCommand?.enabled).toBe(true);
+    sketchCommand?.execute();
+    expect(openTerminal).toHaveBeenCalledTimes(2);
   });
 
   it("uses the same registry execution for relative navigation", () => {

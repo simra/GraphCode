@@ -61,6 +61,10 @@ public actor ProjectRegistry {
   private let ensureSession: (@Sendable (LoopNode, String?) -> Void)?
   private let terminateSession: (@Sendable (LoopNode, String?) -> Void)?
   private let restartSession: (@Sendable (LoopNode, String?) async -> Bool)?
+  private let startNodeSession:
+    (@Sendable (LoopNode, String?) async -> Result<CLISessionStartOutcome, CLISessionError>)?
+  private let nodeSessionExists: (@Sendable (LoopNode, String?) async -> Bool)?
+  private let findMissingProvider: (@Sendable (LoopNode, String?) async -> LaunchFailure?)?
   private let startQuickChat:
     (@Sendable (LoopNode, String?) async -> Result<CLISessionStartOutcome, CLISessionError>)?
   private let terminateQuickChat:
@@ -125,6 +129,11 @@ public actor ProjectRegistry {
       CLISessionBackend.terminateSession,
     restartSession: (@Sendable (LoopNode, String?) async -> Bool)? =
       CLISessionBackend.restartSession,
+    startNodeSession: (
+      @Sendable (LoopNode, String?) async -> Result<CLISessionStartOutcome, CLISessionError>
+    )? = nil,
+    nodeSessionExists: (@Sendable (LoopNode, String?) async -> Bool)? = nil,
+    findMissingProvider: (@Sendable (LoopNode, String?) async -> LaunchFailure?)? = nil,
     evaluatePredicate: (@Sendable (ShellPredicate) async -> Bool)? = ShellPredicateEvaluator
       .evaluate,
     checkPredicate: (@Sendable (ShellPredicate) async -> PredicateOutcome?)? =
@@ -165,6 +174,18 @@ public actor ProjectRegistry {
     self.ensureSession = ensureSession
     self.terminateSession = terminateSession
     self.restartSession = restartSession
+    self.startNodeSession =
+      startNodeSession ?? { node, path in
+        await CLISessionBackend.backend(for: node).startResult(node, path)
+      }
+    self.nodeSessionExists =
+      nodeSessionExists ?? { node, path in
+        await CLISessionBackend.backend(for: node).exists(node, path)
+      }
+    self.findMissingProvider =
+      findMissingProvider ?? { node, path in
+        await ProviderPath.missingProvider(for: node, projectPath: path)
+      }
     self.evaluatePredicate = evaluatePredicate
     self.checkPredicate = checkPredicate
     self.deliverMessage = deliverMessage
@@ -646,6 +667,42 @@ public actor ProjectRegistry {
       response = .quickChatDeleted(id)
       await broadcast(response!)
 
+    case .openNodeSession(let path, let nodeID):
+      switch routing(for: path, isSidebar: sidebarConnections.contains(connectionID)) {
+      case .project(let canonicalPath):
+        guard let store = stores[canonicalPath] else {
+          return ProjectRegistryCommandResult(error: "\(path) isn't open — open it first.")
+        }
+        let graph = await store.graph
+        guard let stored = graph.nodesAtAnyDepth.first(where: { $0.id == nodeID }) else {
+          error = "loop session unavailable: no loop \(nodeID) in this graph"
+          break
+        }
+        if stored.runsUnattended {
+          response = .graphChanged(await store.graph)
+          break
+        }
+        guard let node = await store.nodeForSessionLaunch(nodeID), let startNodeSession else {
+          error = "loop session unavailable: session launcher unavailable"
+          break
+        }
+        if await nodeSessionExists?(node, canonicalPath) != true,
+          let failure = await findMissingProvider?(node, canonicalPath),
+          await nodeSessionExists?(node, canonicalPath) != true
+        {
+          error = "loop session unavailable: \(failure.title)"
+          break
+        }
+        switch await startNodeSession(node, canonicalPath) {
+        case .success:
+          response = .graphChanged(await store.graph)
+        case .failure(let failure):
+          error = "loop session unavailable: \(Self.sessionErrorMessage(failure))"
+        }
+      case .refused(let reason):
+        error = reason
+      }
+
     case .graphCommand(let path, let inner):
       // Routed the same way the open was, so a client that had its path redirected to the
       // project containing it addresses that project here too. Without the second half,
@@ -741,6 +798,11 @@ public actor ProjectRegistry {
       return nil
     case .deleteQuickChat(let id):
       return .quickChatDeleted(id)
+    case .openNodeSession(let path, _):
+      guard let store = stores[Self.canonicalize(path, platformPaths: platformPaths)] else {
+        return nil
+      }
+      return .graphChanged(await store.graph)
     case .openGlobalGraph:
       guard let store = stores[LoopGraphScope.globalPath] else { return nil }
       return .graphChanged(await store.graph)
@@ -751,6 +813,13 @@ public actor ProjectRegistry {
       return .graphChanged(await store.graph)
     case .announce, .mailbox:
       return nil
+    }
+  }
+
+  private static func sessionErrorMessage(_ error: CLISessionError) -> String {
+    switch error {
+    case .unavailable(let message), .failed(let message): return message
+    case .notFound: return "session not found"
     }
   }
 
@@ -1011,9 +1080,7 @@ public actor ProjectRegistry {
       },
       onConnectionFailure: onConnectionFailure,
       onEnsureSession: ensureSession,
-      onFindMissingProvider: { node, path in
-        await ProviderPath.missingProvider(for: node, projectPath: path)
-      },
+      onFindMissingProvider: findMissingProvider,
       onTerminateSession: terminateSession,
       onRestartSession: restartSession,
       onEvaluatePredicate: evaluatePredicate,

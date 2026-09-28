@@ -34,6 +34,13 @@ export interface OpenQuickChatCommand {
   };
 }
 
+export interface OpenNodeSessionCommand {
+  openNodeSession: {
+    projectPath: string;
+    nodeID: string;
+  };
+}
+
 export interface RenameQuickChatCommand {
   renameQuickChat: {
     id: string;
@@ -307,6 +314,13 @@ export function createQuickChatCommand(
 
 export function openQuickChatCommand(id: string): OpenQuickChatCommand {
   return { openQuickChat: { id } };
+}
+
+export function openNodeSessionCommand(
+  projectPath: string,
+  nodeId: string,
+): OpenNodeSessionCommand {
+  return { openNodeSession: { projectPath, nodeID: nodeId } };
 }
 
 export function renameQuickChatCommand(

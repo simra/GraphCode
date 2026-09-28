@@ -63,6 +63,16 @@ final class GraphCommandInteropTests: XCTestCase {
         command: .deleteEdge(UUID(uuidString: "33333333-3333-4333-8333-333333333333")!)))
   }
 
+  func testOpenNodeSessionRoundTripsWithLabeledConfiguration() throws {
+    let command = DaemonCommand.openNodeSession(
+      projectPath: "C:\\work\\graph",
+      nodeID: UUID(uuidString: "11111111-1111-4111-8111-111111111111")!)
+
+    let data = try JSONEncoder().encode(command)
+
+    XCTAssertEqual(try JSONDecoder().decode(DaemonCommand.self, from: data), command)
+  }
+
   func testLifecycleAndExtendedGraphFixturesDecodeToSwiftCommands() throws {
     let node = UUID(uuidString: "11111111-1111-4111-8111-111111111111")!
     let child = UUID(uuidString: "22222222-2222-4222-8222-222222222222")!

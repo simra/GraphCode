@@ -20,6 +20,7 @@ import {
   mailroomPostCommand,
   mailroomWatchCommand,
   openQuickChatCommand,
+  openNodeSessionCommand,
   openProjectCommand,
   memoNodeCommand,
   messageNodeCommand,
@@ -75,6 +76,20 @@ describe("daemon commands", () => {
         command: {
           stopNode: { _0: "11111111-1111-4111-8111-111111111111" },
         },
+      },
+    });
+  });
+
+  it("encodes the daemon-owned node session launch request", () => {
+    expect(
+      openNodeSessionCommand(
+        "C:\\work\\graph",
+        "11111111-1111-4111-8111-111111111111",
+      ),
+    ).toEqual({
+      openNodeSession: {
+        projectPath: "C:\\work\\graph",
+        nodeID: "11111111-1111-4111-8111-111111111111",
       },
     });
   });

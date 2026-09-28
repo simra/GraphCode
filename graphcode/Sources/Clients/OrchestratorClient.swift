@@ -296,8 +296,8 @@ private actor AppDaemonConnection {
         // Quick chats hang off no project, so they need no rejoin — the raw path is the
         // same one `listRecentProjects` takes.
         try await sendRaw(command, on: connection)
-      case .openProject, .closeProject, .forgetProject, .deleteProjectGraph, .graphCommand,
-        .mailbox:
+      case .openProject, .closeProject, .forgetProject, .deleteProjectGraph, .openNodeSession,
+        .graphCommand, .mailbox:
         do {
           try await ensureRejoined(connection)
         } catch {
