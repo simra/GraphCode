@@ -65,9 +65,9 @@ lifetime control. It does not prove zmx attach/detach parity:
 
 ## GraphCode fork risk
 
-GraphCode pins `scgopi/zmx` commit `a8739f4f64f7b716f24cc51c4883938f4daaf284`.
-Its mouse-input patch is still relevant but is 26 commits behind current upstream and
-conflicts when cherry-picked. Rebase/upstream it before beginning Windows work.
+GraphCode pins the `simra/zmx` `graphcode-windows` branch. The fork tracks
+`scgopi/zmx` main and carries the Windows platform implementation, including
+ConPTY resize and GraphCode's non-leader mouse-input behavior.
 
 ## Decision
 

@@ -4,9 +4,7 @@
 	shallow = true
 [submodule "ThirdParty/zmx"]
 	path = ThirdParty/zmx
-	# A fork of neurosnap/zmx, not the upstream, because graphcode pins a commit that
-	# only exists on the fork's `graphcode-patches` branch: non-leader mouse input is
-	# forwarded to the session instead of dropped. Upstream is still the source of
-	# truth — the branch is rebased onto it, not a divergence to maintain.
-	url = https://github.com/scgopi/zmx.git
+	# GraphCode's fork tracks scgopi/zmx main and carries the Windows platform port.
+	# The graphcode-windows branch must stay rebased onto upstream main.
+	url = https://github.com/simra/zmx.git
 	shallow = true

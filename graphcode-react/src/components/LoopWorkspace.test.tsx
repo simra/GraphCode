@@ -148,7 +148,7 @@ describe("LoopWorkspace", () => {
 
     expect(bridge.openTerminal).toHaveBeenCalledWith(
       node.id,
-      80,
+      112,
       24,
       expect.any(Object),
     );
@@ -165,8 +165,8 @@ describe("LoopWorkspace", () => {
     await act(async () => {
       await new Promise((resolve) => window.setTimeout(resolve, 110));
     });
-    expect(xterm.resize).toHaveBeenLastCalledWith(80, 31);
-    expect(bridge.resize).toHaveBeenCalledWith(80, 31);
+    expect(xterm.resize).toHaveBeenLastCalledWith(112, 31);
+    expect(bridge.resize).toHaveBeenCalledWith(112, 31);
 
     await act(async () => {
       xterm.dataHandler?.("echo test\r");

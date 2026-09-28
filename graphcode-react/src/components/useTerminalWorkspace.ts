@@ -6,8 +6,6 @@ import { openTerminal, type TerminalConnection } from "../bridge/terminal";
 
 export type TerminalPhase = "connecting" | "connected" | "exited" | "failed";
 
-const WINDOWS_ZMX_COLUMNS = 80;
-
 export function useTerminalWorkspace(
   targetId: string,
   onSessionExit?: (succeeded: boolean) => Promise<void>,
@@ -49,15 +47,15 @@ export function useTerminalWorkspace(
     terminal.loadAddon(fit);
     terminal.open(container);
 
-    const fitRows = () => {
+    const fitTerminal = () => {
       const proposed = fit.proposeDimensions();
       terminal.resize(
-        WINDOWS_ZMX_COLUMNS,
-        Math.max(1, proposed?.rows ?? terminal.rows),
+        Math.max(2, proposed?.cols ?? terminal.cols),
+        Math.max(2, proposed?.rows ?? terminal.rows),
       );
     };
 
-    fitRows();
+    fitTerminal();
     terminal.focus();
 
     const reportError = (value: unknown) => {
@@ -68,7 +66,7 @@ export function useTerminalWorkspace(
 
     const fitAndResize = () => {
       if (!active) return;
-      fitRows();
+      fitTerminal();
       const connection = connectionRef.current;
       if (
         !connection ||
