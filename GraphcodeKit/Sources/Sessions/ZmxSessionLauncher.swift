@@ -867,6 +867,18 @@ public enum ZmxSessionLauncher {
   public static func startResult(
     _ node: LoopNode, projectPath: String? = nil
   ) async -> Result<CLISessionStartOutcome, CLISessionError> {
+    await startResult(node, projectPath: projectPath, attendedNode: false)
+  }
+
+  public static func startAttendedResult(
+    _ node: LoopNode, projectPath: String? = nil
+  ) async -> Result<CLISessionStartOutcome, CLISessionError> {
+    await startResult(node, projectPath: projectPath, attendedNode: true)
+  }
+
+  private static func startResult(
+    _ node: LoopNode, projectPath: String?, attendedNode: Bool
+  ) async -> Result<CLISessionStartOutcome, CLISessionError> {
     guard ZmxLocator.isInstalled else {
       return .failure(.unavailable("zmx is not installed"))
     }
@@ -874,7 +886,7 @@ public enum ZmxSessionLauncher {
       return .success(.attached)
     }
     var spawnedProcess: Process?
-    if node.sessionPrompt == nil || node.sessionPrompt?.isEmpty == true {
+    if !attendedNode && (node.sessionPrompt == nil || node.sessionPrompt?.isEmpty == true) {
       guard let executable = node.backend.executableName else {
         return .failure(.unavailable("backend has no executable"))
       }
@@ -900,7 +912,7 @@ public enum ZmxSessionLauncher {
           workingDirectory: workingDirectory(forNode: node, projectPath: projectPath))
       #endif
     } else {
-      await start(node, projectPath: projectPath)
+      await start(node, projectPath: projectPath, allowsEmptyPrompt: attendedNode)
     }
     for delay in [100, 200, 400, 800, 1200] {
       try? await Task.sleep(for: .milliseconds(delay))
@@ -1196,9 +1208,10 @@ public enum ZmxSessionLauncher {
   static func arguments(
     forNode node: LoopNode, projectPath: String? = nil,
     settings: GraphcodeSettings = GraphcodeSettingsStore.load(),
-    shedPrompt: ShedPromptReport? = nil
+    shedPrompt: ShedPromptReport? = nil, allowsEmptyPrompt: Bool = false
   ) -> [String]? {
-    guard let prompt = node.sessionPrompt(forProjectPath: projectPath), !prompt.isEmpty else {
+    let prompt = node.sessionPrompt(forProjectPath: projectPath)
+    guard allowsEmptyPrompt || prompt?.isEmpty == false else {
       return nil
     }
     // A backend graphcode can't launch has no argv. `canHost` already refuses to create
@@ -1209,7 +1222,7 @@ public enum ZmxSessionLauncher {
     // types with `\r`, and the PTY's line discipline would accept the line early at an
     // embedded one, truncating the prompt. Prompts come from a single-line text field, so
     // this only ever fires on a paste.
-    let singleLine = Self.flattened(prompt)
+    let singleLine = Self.flattened(prompt ?? "")
     // What the session is told about the graph it belongs to, so a loop can fan work out
     // into more loops when the work genuinely calls for it (`SessionBriefing`). Written to
     // a file and passed by *path*: the prose itself is far longer than a typed command
@@ -1348,10 +1361,12 @@ public enum ZmxSessionLauncher {
 
       // The file carries the *unflattened* prompt — a file has no newline hazard, so a
       // pasted multi-line goal survives verbatim where the typed line had to collapse it.
+      if singleLine.isEmpty { return unbriefedCommand }
       let filePrompt =
         wakePath.map {
-          SessionPrompt.composed(preamble: NodeMemory.wakePointer(toDigestAt: $0), prompt: prompt)
-        } ?? prompt
+          SessionPrompt.composed(
+            preamble: NodeMemory.wakePointer(toDigestAt: $0), prompt: prompt ?? "")
+        } ?? (prompt ?? "")
       guard let projectPath,
         let promptFile = NodeMemory.writePrompt(
           filePrompt, projectPath: projectPath, nodeID: node.id)
@@ -1635,13 +1650,13 @@ public enum ZmxSessionLauncher {
   static func remoteEnsureInvocation(
     forNode node: LoopNode, at location: RemoteProjectLocation,
     settings: GraphcodeSettings = GraphcodeSettingsStore.load(),
-    bridgeState: RemoteBridgeWireState? = nil
+    bridgeState: RemoteBridgeWireState? = nil, allowsEmptyPrompt: Bool = false
   ) -> [String]? {
     let shedPrompt = ShedPromptReport()
     guard
       let zmxArguments = arguments(
         forNode: node, projectPath: location.projectPath, settings: settings,
-        shedPrompt: shedPrompt)
+        shedPrompt: shedPrompt, allowsEmptyPrompt: allowsEmptyPrompt)
     else { return nil }
     // The remote twin of the local alive check: raw existence (`zmx get`) answers for a
     // husk too — the wrapper shell stays at its prompt after the command inside exits —
@@ -2236,7 +2251,9 @@ public enum ZmxSessionLauncher {
     _ = await runRemoteRetrying(remoteKillInvocation(forNode: node, at: location))
   }
 
-  private static func startRemote(_ node: LoopNode, at location: RemoteProjectLocation) async {
+  private static func startRemote(
+    _ node: LoopNode, at location: RemoteProjectLocation, allowsEmptyPrompt: Bool = false
+  ) async {
     // A codespace that is down is redialed on the shared schedule, not on every sweep.
     guard await CodespaceDialBreaker.shared.permits(location) else { return }
     // A dial already in flight for this node is doing this job; a second one racing it
@@ -2294,7 +2311,8 @@ public enum ZmxSessionLauncher {
     // as the local path: no UI here, the node's state stays honest, opening the loop
     // retries.
     if let ensure = remoteEnsureInvocation(
-      forNode: node, at: location, bridgeState: bridgeState
+      forNode: node, at: location, bridgeState: bridgeState,
+      allowsEmptyPrompt: allowsEmptyPrompt
     ) {
       if await runRemoteRetrying(ensure) {
         await CodespaceDialBreaker.shared.record(location, reached: true)
@@ -2304,9 +2322,11 @@ public enum ZmxSessionLauncher {
     await RemoteEnsureGate.shared.end(node.id, token: lease)
   }
 
-  static func start(_ node: LoopNode, projectPath: String? = nil) async {
+  static func start(
+    _ node: LoopNode, projectPath: String? = nil, allowsEmptyPrompt: Bool = false
+  ) async {
     if let projectPath, let remote = RemoteProjectLocation.parse(projectPath: projectPath) {
-      await startRemote(node, at: remote)
+      await startRemote(node, at: remote, allowsEmptyPrompt: allowsEmptyPrompt)
       return
     }
     guard ZmxLocator.isInstalled else { return }
@@ -2340,7 +2360,10 @@ public enum ZmxSessionLauncher {
     let sessionID =
       node.backend == .codex
       ? CodexThreadResolver.threadID(forNodeID: node.id, banked: bankedID) : bankedID
-    guard let runArgs = arguments(forNode: node, projectPath: projectPath) else { return }
+    guard
+      let runArgs = arguments(
+        forNode: node, projectPath: projectPath, allowsEmptyPrompt: allowsEmptyPrompt)
+    else { return }
     let name = SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName
     if let sessionID,
       let resumeArgs = resumeArguments(

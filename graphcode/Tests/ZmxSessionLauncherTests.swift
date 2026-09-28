@@ -67,6 +67,30 @@ struct ZmxSessionLauncherTests {
   }
 
   @Test
+  func aBlankAttendedSketchUsesTheConfiguredBackendLaunchPlan() {
+    let node = LoopNode(
+      title: "Main", loopType: .sketch, backend: .claudeCode, modelTier: .capable)
+    let arguments =
+      ZmxSessionLauncher.arguments(
+        forNode: node,
+        settings: GraphcodeSettings(autoSelectsModel: true),
+        allowsEmptyPrompt: true) ?? []
+
+    let name = SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName
+    #expect(Array(arguments.prefix(3)) == ["run", name, "-d"])
+    #expect(arguments.contains(#"exec claude "$@""#))
+    #expect(arguments.contains("--model"))
+    #expect(arguments.contains("opus"))
+    #expect(!arguments.contains("--interactive"))
+  }
+
+  @Test
+  func aBlankUnattendedLaunchStillRefusesToInventWork() {
+    let node = LoopNode(title: "No goal", loopType: .sketch, backend: .copilotCLI)
+    #expect(ZmxSessionLauncher.arguments(forNode: node) == nil)
+  }
+
+  @Test
   func passesAHostilePromptThroughUntouched() {
     // Quotes, a subshell, and command separators all survive verbatim as one argument —
     // zmx quotes them on the way into the shell, so escaping them here would corrupt the

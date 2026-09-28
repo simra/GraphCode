@@ -376,6 +376,22 @@ struct SessionBriefingTests {
     #expect(arguments.last?.contains("AGENTS.md") == true)
   }
 
+  @Test
+  func aBlankAttendedSessionStillReceivesItsBriefingConfiguration() {
+    let briefing = "/tmp/briefings/x/AGENTS.md"
+    let claude = CLISessionBackendKind.claudeCode.launchArguments(
+      prompt: nil, tier: .standard, briefingPath: briefing)
+    let copilot = CLISessionBackendKind.copilotCLI.launchArguments(
+      prompt: nil, tier: .standard, briefingPath: briefing,
+      settings: GraphcodeSettings(
+        copilotPermissions: .allowTools))
+
+    #expect(claude.suffix(2) == ["--append-system-prompt-file", briefing])
+    #expect(copilot.contains("--add-dir"))
+    #expect(copilot.contains("/tmp/briefings/x"))
+    #expect(!copilot.contains("--interactive"))
+  }
+
   /// The pointer travels through more layers than any other prose graphcode emits —
   /// argv, zmx's typed command line, a canonical-mode tty, sometimes ssh — and an em
   /// dash right after the path came out the far end as `AGENTS. it explains`, the

@@ -105,11 +105,11 @@ extension CLISessionBackendKind {
       + presenceArguments(
         hooksFile: hooksFile, sessionName: sessionName, zmxPath: zmxPath,
         sessionsDirectory: sessionsDirectory)
-    guard let prompt, !prompt.isEmpty else { return model }
     let briefingDirectory = (briefingPath as NSString?)?.deletingLastPathComponent
     switch self {
     case .claudeCode:
       let system = briefingPath.map { ["--append-system-prompt-file", $0] } ?? []
+      guard let prompt, !prompt.isEmpty else { return model + system }
       return model + system + [prompt]
     case .copilotCLI:
       // Copilot gates tools, paths and URLs separately, so `--allow-all-tools` alone
@@ -119,6 +119,7 @@ extension CLISessionBackendKind {
       // why the directories are granted explicitly rather than trusted to the tool flag.
       let access = settings.copilotPermissions.readableDirectories(
         workspacePaths + [briefingDirectory].compactMap { $0 })
+      guard let prompt, !prompt.isEmpty else { return model + access }
       // `/loop` — an alias of `/every` — is behind Copilot's experimental flag, so
       // without this the directive a time-based node opens with is not a command at all
       // and the session reads it as prose: no schedule, one pass, then idle. Passed only
@@ -131,6 +132,9 @@ extension CLISessionBackendKind {
       // so the briefing rides the same way Copilot's does: `--add-dir` for access, a
       // preamble to point at it. Codex has no `--append-system-prompt` equivalent.
       let access = settings.codexApprovals.writableDirectories(workspacePaths)
+      guard let prompt, !prompt.isEmpty else {
+        return model + access + (briefingDirectory.map { ["--add-dir", $0] } ?? [])
+      }
       guard let briefingPath, let briefingDirectory else { return model + access + [prompt] }
       return model + access + ["--add-dir", briefingDirectory]
         + [
@@ -138,6 +142,7 @@ extension CLISessionBackendKind {
             preamble: SessionBriefing.pointer(toBriefingAt: briefingPath), prompt: prompt)
         ]
     case .openCode:
+      guard let prompt, !prompt.isEmpty else { return model }
       // The prompt is the value of `--prompt`, the briefing a pointer inside it. No
       // directory grant: OpenCode's `read` permission defaults to allow, and `--auto`
       // approves everything not explicitly denied, so the briefing is readable as is.
@@ -149,6 +154,7 @@ extension CLISessionBackendKind {
             preamble: SessionBriefing.pointer(toBriefingAt: briefingPath), prompt: prompt),
         ]
     case .pi:
+      guard let prompt, !prompt.isEmpty else { return model }
       // Positional, like Claude Code's. The briefing rides as a pointer inside the prompt:
       // pi's `read` has no path gate, so it needs no directory grant either.
       guard let briefingPath else { return model + [Self.piMessage(prompt)] }

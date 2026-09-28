@@ -49,6 +49,24 @@ struct RemoteSessionLaunchTests {
   }
 
   @Test
+  func aBlankRemoteSketchUsesTheAttendedBackendLaunchPlan() throws {
+    let node = LoopNode(
+      title: "Main", loopType: .sketch, backend: .claudeCode, modelTier: .capable)
+    let invocation = try #require(
+      ZmxSessionLauncher.remoteEnsureInvocation(
+        forNode: node, at: location,
+        settings: GraphcodeSettings(autoSelectsModel: true),
+        allowsEmptyPrompt: true))
+    let remoteCommand = try #require(invocation.last)
+
+    #expect(remoteCommand.contains("'run'"))
+    #expect(remoteCommand.contains("claude"))
+    #expect(remoteCommand.contains("--model"))
+    #expect(remoteCommand.contains("opus"))
+    #expect(remoteCommand.contains("/home/dev/widget"))
+  }
+
+  @Test
   func aRemoteCopilotLaunchSeedsFolderTrustFirst() throws {
     // An unattended Copilot queues its --interactive goal behind a per-session
     // folder-trust dialog nobody answers — the goal parked forever on a fresh remote

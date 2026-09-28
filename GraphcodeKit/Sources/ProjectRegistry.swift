@@ -176,7 +176,7 @@ public actor ProjectRegistry {
     self.restartSession = restartSession
     self.startNodeSession =
       startNodeSession ?? { node, path in
-        await CLISessionBackend.backend(for: node).startResult(node, path)
+        await ZmxSessionLauncher.startAttendedResult(node, projectPath: path)
       }
     self.nodeSessionExists =
       nodeSessionExists ?? { node, path in
