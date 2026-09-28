@@ -26,4 +26,31 @@ describe("SketchPromotionDialog", () => {
     expect(markup).toContain("does not create a replacement loop");
     expect(markup).toContain('disabled=""');
   });
+
+  it("asks a goal loop only for the timed-loop decisions", () => {
+    const markup = renderToStaticMarkup(
+      <SketchPromotionDialog
+        node={{
+          id: "goal",
+          title: "Keep CI green",
+          loopType: "goalBased",
+          state: "running",
+          goal: {
+            summary: "CI passes",
+            pollIntervalSeconds: 60,
+            metricDirection: "maximize",
+            skipsUnchangedWorkspace: false,
+          },
+        }}
+        onClose={() => undefined}
+        onPromote={async () => undefined}
+      />,
+    );
+
+    expect(markup).toContain("Change Keep CI green to Timed");
+    expect(markup).toContain("What should each pass do?");
+    expect(markup).toContain("Cadence");
+    expect(markup).not.toContain("Choose a loop shape");
+    expect(markup).not.toContain("Where should it pause?");
+  });
 });

@@ -1,7 +1,8 @@
 import { useRef, useState } from "react";
 import {
   buildSketchPromotion,
-  initialSketchPromotionForm,
+  promotionTargetForNode,
+  sketchPromotionInitialState,
   validateSketchPromotion,
   type PromotionTarget,
   type SketchPromotionFormState,
@@ -41,15 +42,15 @@ export function SketchPromotionDialog({
   onClose(): void;
   onPromote(promotion: SketchPromotionPayload): Promise<void>;
 }) {
-  const [form, setForm] = useState<SketchPromotionFormState>(
-    initialSketchPromotionForm,
+  const [form, setForm] = useState<SketchPromotionFormState>(() =>
+    sketchPromotionInitialState(node),
   );
   const [errors, setErrors] = useState<
     ReturnType<typeof validateSketchPromotion>
   >({});
   const [error, setError] = useState<string>();
   const [submitting, setSubmitting] = useState(false);
-  const firstRef = useRef<HTMLInputElement>(null);
+  const firstRef = useRef<HTMLElement>(null);
   const { dialogRef, handleDialogKeyDown } = useDialogFocus({
     canClose: !submitting,
     initialFocusRef: firstRef,
@@ -70,7 +71,7 @@ export function SketchPromotionDialog({
     setSubmitting(true);
     setError(undefined);
     try {
-      await onPromote(buildSketchPromotion(form, node));
+      await onPromote(buildSketchPromotion(form));
       onClose();
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));
@@ -79,9 +80,11 @@ export function SketchPromotionDialog({
     }
   }
 
-  const timedTask =
-    node.firstInstruction?.trim() ||
-    "Carry on with what this session has been doing.";
+  const retypeTarget = promotionTargetForNode(node);
+  const retyping = retypeTarget !== undefined;
+  const targetLabel =
+    targetOptions.find((option) => option.value === form.target)?.label ??
+    "Loop";
   const valid = Object.keys(validateSketchPromotion(form)).length === 0;
 
   return (
@@ -103,7 +106,11 @@ export function SketchPromotionDialog({
         <header>
           <div>
             <p className="eyebrow">Keep its identity, session, and edges</p>
-            <h2 id="promotion-dialog-title">Promote {node.title}</h2>
+            <h2 id="promotion-dialog-title">
+              {retyping
+                ? `Change ${node.title} to ${targetLabel}`
+                : `Promote ${node.title}`}
+            </h2>
           </div>
           <button
             className="icon-button"
@@ -117,36 +124,46 @@ export function SketchPromotionDialog({
         </header>
         <div className="edit-loop-scroll">
           <fieldset className="form-section promotion-targets">
-            <legend>Choose a loop shape</legend>
+            <legend>
+              {retyping ? `Change to ${targetLabel}` : "Choose a loop shape"}
+            </legend>
             <p className="form-help">
-              Promotion changes this sketch in place; it does not create a
-              replacement loop.
+              {retyping
+                ? "This keeps the loop's identity, session, transcript, and edges."
+                : "Promotion changes this sketch in place; it does not create a replacement loop."}
             </p>
-            <div className="loop-type-grid">
-              {targetOptions.map((option, index) => (
-                <label
-                  key={option.value}
-                  className={
-                    form.target === option.value ? "type-selected" : undefined
-                  }
-                >
-                  <input
-                    ref={index === 0 ? firstRef : undefined}
-                    type="radio"
-                    name="promotion-target"
-                    value={option.value}
-                    checked={form.target === option.value}
-                    onChange={() => update({ target: option.value })}
-                  />
-                  <strong>{option.label}</strong>
-                  <span>{option.description}</span>
-                </label>
-              ))}
-            </div>
+            {!retyping ? (
+              <div className="loop-type-grid">
+                {targetOptions.map((option, index) => (
+                  <label
+                    key={option.value}
+                    className={
+                      form.target === option.value ? "type-selected" : undefined
+                    }
+                  >
+                    <input
+                      ref={(element) => {
+                        if (index === 0) firstRef.current = element;
+                      }}
+                      type="radio"
+                      name="promotion-target"
+                      value={option.value}
+                      checked={form.target === option.value}
+                      onChange={() => update({ target: option.value })}
+                    />
+                    <strong>{option.label}</strong>
+                    <span>{option.description}</span>
+                  </label>
+                ))}
+              </div>
+            ) : null}
             {form.target === "goalBased" ? (
               <label className="form-field">
                 <span>What does done look like?</span>
                 <textarea
+                  ref={(element) => {
+                    if (retyping) firstRef.current = element;
+                  }}
                   value={form.goalSummary}
                   aria-invalid={Boolean(errors.goalSummary)}
                   aria-describedby={
@@ -192,6 +209,35 @@ export function SketchPromotionDialog({
             ) : null}
             {form.target === "timeBased" ? (
               <div className="form-subsection">
+                {node.loopType === "goalBased" ? (
+                  <label className="form-field">
+                    <span>What should each pass do?</span>
+                    <textarea
+                      ref={(element) => {
+                        firstRef.current = element;
+                      }}
+                      value={form.timedTask}
+                      aria-invalid={Boolean(errors.timedTask)}
+                      aria-describedby={
+                        errors.timedTask
+                          ? "promotion-timed-task-error"
+                          : undefined
+                      }
+                      onChange={(event) =>
+                        update({ timedTask: event.currentTarget.value })
+                      }
+                    />
+                    {errors.timedTask ? (
+                      <span
+                        id="promotion-timed-task-error"
+                        className="field-error"
+                        role="alert"
+                      >
+                        {errors.timedTask}
+                      </span>
+                    ) : null}
+                  </label>
+                ) : null}
                 <label className="form-field">
                   <span>Cadence</span>
                   <input
@@ -218,7 +264,8 @@ export function SketchPromotionDialog({
                 <p className="form-help">
                   GraphCode will send:{" "}
                   <code>
-                    /loop {form.cadence.trim() || "…"} {timedTask}
+                    /loop {form.cadence.trim() || "…"}{" "}
+                    {form.timedTask.trim() || "…"}
                   </code>
                 </p>
               </div>
@@ -231,7 +278,7 @@ export function SketchPromotionDialog({
           </fieldset>
         </div>
         <footer>
-          <span>Ctrl+Enter promotes this loop.</span>
+          <span>Ctrl+Enter {retyping ? "changes" : "promotes"} this loop.</span>
           <div>
             <button type="button" disabled={submitting} onClick={onClose}>
               Cancel
@@ -242,7 +289,13 @@ export function SketchPromotionDialog({
               disabled={submitting || !valid}
               onClick={() => void submit()}
             >
-              {submitting ? "Promoting…" : "Promote"}
+              {submitting
+                ? retyping
+                  ? "Changing…"
+                  : "Promoting…"
+                : retyping
+                  ? "Change"
+                  : "Promote"}
             </button>
           </div>
         </footer>

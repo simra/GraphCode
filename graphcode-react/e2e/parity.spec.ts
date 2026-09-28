@@ -260,7 +260,7 @@ async function installTauriMock(page: Page) {
 
 test.beforeEach(async ({ page }) => {
   await installTauriMock(page);
-  await page.goto("/");
+  await page.goto("/", { waitUntil: "domcontentloaded" });
   await expect(
     page.getByText("Connected to graphcoded", { exact: true }),
   ).toBeVisible();
@@ -317,6 +317,56 @@ test("prepares the attended sketch before opening its terminal", async ({
       openNodeSession: {
         projectPath,
         nodeID: sketchId,
+      },
+    });
+});
+
+test("retypes a timed loop to a goal loop in place", async ({ page }) => {
+  await page.getByText("Timed worker", { exact: true }).first().click();
+  await page.getByRole("button", { name: "More loop actions" }).click();
+  await page.getByRole("menuitem", { name: "Change to Goal Loop" }).click();
+
+  const dialog = page.getByRole("dialog", {
+    name: "Change Timed worker to Goal",
+  });
+  await expect(dialog).toBeVisible();
+  await dialog
+    .getByRole("textbox", { name: "What does done look like?" })
+    .fill("The status check passes");
+  await dialog.getByRole("button", { name: "Change", exact: true }).click();
+
+  await expect
+    .poll(async () =>
+      page.evaluate(() => {
+        const target = window as Window & {
+          __GRAPHCODE_E2E_COMMANDS__: unknown[];
+        };
+        return target.__GRAPHCODE_E2E_COMMANDS__;
+      }),
+    )
+    .toContainEqual({
+      graphCommand: {
+        projectPath,
+        command: {
+          promoteNode: {
+            _0: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+            promotion: {
+              goal: {
+                _0: {
+                  summary: "The status check passes",
+                  predicate: null,
+                  pollIntervalSeconds: 60,
+                  stallAfterSeconds: null,
+                  metricCommand: null,
+                  metricDirection: "maximize",
+                  tokenBudget: null,
+                  skipsUnchangedWorkspace: false,
+                },
+              },
+            },
+            promotedBy: null,
+          },
+        },
       },
     });
 });

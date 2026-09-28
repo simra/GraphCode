@@ -1,4 +1,5 @@
 import type { AppState } from "../state/graphState";
+import { promotionTargetForNode } from "../forms/sketchPromotion";
 import { currentGraph, selectedNode } from "../state/graphState";
 
 export type CommandId =
@@ -389,11 +390,19 @@ export function createCommandRegistry(
     },
     {
       id: "loop.promote",
-      label: "Promote Main Loop",
-      description: "Give this sketch a goal, turn boundary, or cadence",
+      label:
+        node?.loopType === "goalBased"
+          ? "Change to Timed Loop"
+          : node?.loopType === "timeBased"
+            ? "Change to Goal Loop"
+            : "Promote Main Loop",
+      description:
+        node?.loopType === "goalBased" || node?.loopType === "timeBased"
+          ? "Change this loop's shape while keeping its session and graph identity"
+          : "Give this sketch a goal, turn boundary, or cadence",
       category: "Loop",
       surfaces: ["node"],
-      ...(node?.loopType === "sketch"
+      ...(node?.loopType === "sketch" || (node && promotionTargetForNode(node))
         ? connected && actions.promoteNode
           ? { enabled: true, execute: actions.promoteNode }
           : {
@@ -403,7 +412,11 @@ export function createCommandRegistry(
               execute: () => undefined,
             }
         : {
-            ...unavailable("Only Main sketch loops can be promoted"),
+            ...unavailable(
+              node?.loopType === "goalBased" || node?.loopType === "timeBased"
+                ? "Stopped loops cannot change type"
+                : "Only Main, Goal, and Timed loops can change type",
+            ),
             execute: () => undefined,
           }),
     },

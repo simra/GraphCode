@@ -443,6 +443,47 @@ describe("command registry", () => {
     expect(editEdge).toHaveBeenCalledOnce();
   });
 
+  it("offers the opposite unattended type for live goal and timed loops", () => {
+    const state = stateWithSelectedNode();
+    const promoteNode = vi.fn();
+    state.graphs["C:\\work\\graph"].nodes[0].loopType = "goalBased";
+
+    const goalCommand = createCommandRegistry(state, {
+      openPalette: vi.fn(),
+      clearSelection: vi.fn(),
+      selectNode: vi.fn(),
+      promoteNode,
+    }).find((command) => command.id === "loop.promote");
+    expect(goalCommand).toMatchObject({
+      label: "Change to Timed Loop",
+      enabled: true,
+    });
+
+    state.graphs["C:\\work\\graph"].nodes[0].loopType = "timeBased";
+    const timedCommand = createCommandRegistry(state, {
+      openPalette: vi.fn(),
+      clearSelection: vi.fn(),
+      selectNode: vi.fn(),
+      promoteNode,
+    }).find((command) => command.id === "loop.promote");
+    expect(timedCommand).toMatchObject({
+      label: "Change to Goal Loop",
+      enabled: true,
+    });
+
+    state.graphs["C:\\work\\graph"].nodes[0].state = { stopped: {} };
+    const stoppedCommand = createCommandRegistry(state, {
+      openPalette: vi.fn(),
+      clearSelection: vi.fn(),
+      selectNode: vi.fn(),
+      promoteNode,
+    }).find((command) => command.id === "loop.promote");
+    expect(stoppedCommand).toMatchObject({
+      enabled: false,
+      disabledReason: "Stopped loops cannot change type",
+    });
+  });
+
   it("exposes client-owned automatic layout reset", () => {
     const resetLayout = vi.fn();
     const commands = createCommandRegistry(stateWithSelectedNode(), {

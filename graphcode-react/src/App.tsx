@@ -127,6 +127,7 @@ import {
   type NavigationHistory,
   type NavigationRoute,
 } from "./state/navigationHistory";
+import { promotionTargetForNode } from "./forms/sketchPromotion";
 import {
   activateQuickChat,
   pendingCreatedQuickChatRoute,
@@ -720,7 +721,10 @@ export default function App() {
                 })
             : undefined,
         promoteNode:
-          selectedProjectPath && inspectedNode?.loopType === "sketch"
+          selectedProjectPath &&
+          inspectedNode &&
+          (inspectedNode.loopType === "sketch" ||
+            promotionTargetForNode(inspectedNode))
             ? () =>
                 setPromotingNode({
                   projectPath: selectedProjectPath,

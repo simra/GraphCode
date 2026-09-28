@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import {
   buildSketchPromotion,
   initialSketchPromotionForm,
+  promotionTargetForNode,
+  sketchPromotionInitialState,
   validateSketchPromotion,
 } from "./sketchPromotion";
 
@@ -15,14 +17,11 @@ describe("sketch promotion form", () => {
     ).toHaveProperty("goalSummary");
 
     expect(
-      buildSketchPromotion(
-        {
-          ...initialSketchPromotionForm,
-          target: "goalBased",
-          goalSummary: "  Tests pass  ",
-        },
-        {},
-      ),
+      buildSketchPromotion({
+        ...initialSketchPromotionForm,
+        target: "goalBased",
+        goalSummary: "  Tests pass  ",
+      }),
     ).toEqual({
       goal: {
         _0: {
@@ -41,37 +40,29 @@ describe("sketch promotion form", () => {
 
   it("emits turn and timed promotions without re-briefing the sketch", () => {
     expect(
-      buildSketchPromotion(
-        {
-          ...initialSketchPromotionForm,
-          target: "turnBased",
-          pausesBeforeWritesOnly: true,
-        },
-        {},
-      ),
+      buildSketchPromotion({
+        ...initialSketchPromotionForm,
+        target: "turnBased",
+        pausesBeforeWritesOnly: true,
+      }),
     ).toEqual({ turn: { pausesBeforeWritesOnly: true } });
 
     expect(
-      buildSketchPromotion(
-        {
-          ...initialSketchPromotionForm,
-          target: "timeBased",
-          cadence: "30m",
-        },
-        { firstInstruction: "  Watch the build  " },
-      ),
+      buildSketchPromotion({
+        ...initialSketchPromotionForm,
+        target: "timeBased",
+        cadence: "30m",
+        timedTask: "Watch the build",
+      }),
     ).toEqual({
       timed: { triggerPrompt: "/loop 30m Watch the build" },
     });
     expect(
-      buildSketchPromotion(
-        {
-          ...initialSketchPromotionForm,
-          target: "timeBased",
-          cadence: "1h",
-        },
-        {},
-      ),
+      buildSketchPromotion({
+        ...initialSketchPromotionForm,
+        target: "timeBased",
+        cadence: "1h",
+      }),
     ).toEqual({
       timed: {
         triggerPrompt:
@@ -88,5 +79,48 @@ describe("sketch promotion form", () => {
         cadence: "whenever",
       }),
     ).toHaveProperty("cadence");
+  });
+
+  it("offers only the opposite unattended type for live goal and timed loops", () => {
+    expect(
+      promotionTargetForNode({
+        loopType: "goalBased",
+        state: { running: {} },
+      }),
+    ).toBe("timeBased");
+    expect(
+      promotionTargetForNode({
+        loopType: "timeBased",
+        state: { idle: {} },
+      }),
+    ).toBe("goalBased");
+    expect(
+      promotionTargetForNode({
+        loopType: "goalBased",
+        state: { stopped: {} },
+      }),
+    ).toBeUndefined();
+
+    expect(
+      sketchPromotionInitialState({
+        loopType: "goalBased",
+        state: { running: {} },
+      }),
+    ).toMatchObject({ target: "timeBased", timedTask: "" });
+
+    expect(
+      buildSketchPromotion({
+        ...sketchPromotionInitialState({
+          loopType: "goalBased",
+          state: { running: {} },
+        }),
+        cadence: "2h",
+        timedTask: "Check that CI remains green",
+      }),
+    ).toEqual({
+      timed: {
+        triggerPrompt: "/loop 2h Check that CI remains green",
+      },
+    });
   });
 });
