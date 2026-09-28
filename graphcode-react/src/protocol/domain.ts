@@ -98,19 +98,61 @@ export interface MailroomWatch {
   topic?: string;
 }
 
+export type BeatKind =
+  "reading" | "editing" | "running" | "thinking" | "found" | "asking" | "done";
+
+export interface SummaryBeat {
+  id: string;
+  at: string | number;
+  pass: number;
+  kind: BeatKind;
+  text: string;
+  evidence?: string;
+  endsTurn: boolean;
+}
+
+export interface PassSummary {
+  pass: number;
+  text: string;
+  delta?: string;
+}
+
 export interface LoopSummary {
-  beats: unknown[];
-  passes: unknown[];
+  beats: SummaryBeat[];
+  passes: PassSummary[];
   currentPass: number;
   lastTurnAt?: string | number;
 }
 
+export interface BoardNode {
+  id: string;
+  text: string;
+  shape: "box" | "rounded" | "decision" | "terminal";
+}
+
+export interface BoardEdge {
+  from: string;
+  to: string;
+  label?: string;
+  style: "solid" | "dashed" | "thick";
+}
+
+export interface BoardTable {
+  headers: string[];
+  rows: string[][];
+  alignments: ("unspecified" | "leading" | "center" | "trailing")[];
+}
+
 export interface SummaryBoard {
-  form: EncodedEnum;
+  form: "flow" | "table";
   title?: string;
+  direction: "topDown" | "leftRight";
+  nodes: BoardNode[];
+  edges: BoardEdge[];
+  table?: BoardTable;
   pass: number;
   composedAt?: string | number;
-  source?: string;
+  source: string;
 }
 
 export interface LoopNode {

@@ -136,6 +136,7 @@ describe("LoopWorkspace", () => {
         <LoopWorkspace
           graph={graph}
           node={node}
+          mailroomOwned
           commands={[]}
           onBack={() => undefined}
           onExecuteCommand={() => undefined}
@@ -151,6 +152,13 @@ describe("LoopWorkspace", () => {
       expect.any(Object),
     );
     expect(container.textContent).toContain("Live");
+    const workspaceContent = container.querySelector(".loop-workspace-content");
+    expect(
+      workspaceContent?.children[0].classList.contains("terminal-host"),
+    ).toBe(true);
+    expect(
+      workspaceContent?.children[1].classList.contains("loop-workspace-rail"),
+    ).toBe(true);
     xterm.proposedRows = 31;
     window.dispatchEvent(new Event("resize"));
     await act(async () => {

@@ -112,6 +112,42 @@ describe("decodeEnvelope", () => {
                 costUSD: 0.02,
               },
               metricHistory: [{ value: 4, recordedAt: "2026-09-25T00:00:00Z" }],
+              summary: {
+                beats: [
+                  {
+                    id: "beat-1",
+                    at: "2026-09-25T00:01:00Z",
+                    pass: 2,
+                    kind: "editing",
+                    text: "Built the workspace rail",
+                    evidence: "LoopWorkspaceRail.tsx",
+                    endsTurn: false,
+                  },
+                ],
+                passes: [
+                  {
+                    pass: 1,
+                    text: "Mapped the reference",
+                    delta: "+3 files",
+                  },
+                ],
+                currentPass: 2,
+              },
+              board: {
+                form: "table",
+                title: "Parity",
+                direction: "topDown",
+                nodes: [],
+                edges: [],
+                table: {
+                  headers: ["Surface", "State"],
+                  rows: [["Summary", "Ready"]],
+                  alignments: ["leading", "center"],
+                },
+                source: "| Surface | State |",
+                pass: 2,
+                composedAt: "2026-09-25T00:02:00Z",
+              },
               mailroomWatch: { topic: "build" },
               worktreeBinding: {
                 id: "worktree",
@@ -133,6 +169,9 @@ describe("decodeEnvelope", () => {
     expect(node.usage?.inputTokens).toBe(100);
     expect(node.worktreeBinding?.branch).toBe("feature");
     expect(node.mailroomWatch?.topic).toBe("build");
+    expect(node.summary?.beats[0].kind).toBe("editing");
+    expect(node.summary?.passes[0].delta).toBe("+3 files");
+    expect(node.board?.table?.rows[0]).toEqual(["Summary", "Ready"]);
   });
 
   it("decodes bounded Mailroom responses", () => {

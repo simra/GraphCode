@@ -105,22 +105,71 @@ const templateFollowSchema = z
   })
   .passthrough();
 
+const summaryBeatSchema = z.object({
+  id: z.string().min(1),
+  at: z.union([z.string(), z.number()]),
+  pass: z.number().int().nonnegative(),
+  kind: z.enum([
+    "reading",
+    "editing",
+    "running",
+    "thinking",
+    "found",
+    "asking",
+    "done",
+  ]),
+  text: z.string(),
+  evidence: optional(z.string()),
+  endsTurn: z.boolean().default(false),
+});
+
+const passSummarySchema = z.object({
+  pass: z.number().int().nonnegative(),
+  text: z.string(),
+  delta: optional(z.string()),
+});
+
 const loopSummarySchema = z
   .object({
-    beats: z.array(z.unknown()).default([]),
-    passes: z.array(z.unknown()).default([]),
+    beats: z.array(summaryBeatSchema).default([]),
+    passes: z.array(passSummarySchema).default([]),
     currentPass: z.number().int().nonnegative().default(0),
     lastTurnAt: optional(z.union([z.string(), z.number()])),
   })
   .passthrough();
 
+const boardNodeSchema = z.object({
+  id: z.string().min(1),
+  text: z.string(),
+  shape: z.enum(["box", "rounded", "decision", "terminal"]).default("box"),
+});
+
+const boardEdgeSchema = z.object({
+  from: z.string().min(1),
+  to: z.string().min(1),
+  label: optional(z.string()),
+  style: z.enum(["solid", "dashed", "thick"]).default("solid"),
+});
+
+const boardTableSchema = z.object({
+  headers: z.array(z.string()).default([]),
+  rows: z.array(z.array(z.string())).default([]),
+  alignments: z
+    .array(z.enum(["unspecified", "leading", "center", "trailing"]))
+    .default([]),
+});
+
 const summaryBoardSchema = z
   .object({
-    form: encodedEnum,
+    form: z.enum(["flow", "table"]).default("flow"),
     title: optional(z.string()),
+    direction: z.enum(["topDown", "leftRight"]).default("topDown"),
+    nodes: z.array(boardNodeSchema).default([]),
+    edges: z.array(boardEdgeSchema).default([]),
+    table: optional(boardTableSchema),
     pass: z.number().int().nonnegative(),
     composedAt: optional(z.union([z.string(), z.number()])),
-    source: optional(z.string()),
+    source: z.string().default(""),
   })
   .passthrough();
 

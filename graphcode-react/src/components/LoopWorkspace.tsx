@@ -4,8 +4,8 @@ import "@xterm/xterm/css/xterm.css";
 import { useEffect, useRef, useState } from "react";
 import { openTerminal, type TerminalConnection } from "../bridge/terminal";
 import type { AppCommand } from "../commands/registry";
-import type { LoopGraph, LoopNode } from "../protocol/domain";
-import { NodeInspector } from "./NodeInspector";
+import type { LoopGraph, LoopNode, Mailbox } from "../protocol/domain";
+import { LoopWorkspaceRail } from "./LoopWorkspaceRail";
 
 type TerminalPhase = "connecting" | "connected" | "exited" | "failed";
 const WINDOWS_ZMX_COLUMNS = 80;
@@ -13,6 +13,8 @@ const WINDOWS_ZMX_COLUMNS = 80;
 export function LoopWorkspace({
   graph,
   node,
+  mailbox,
+  mailroomOwned,
   commands,
   pendingCommandId,
   onBack,
@@ -21,6 +23,8 @@ export function LoopWorkspace({
 }: {
   graph: LoopGraph;
   node: LoopNode;
+  mailbox?: Mailbox;
+  mailroomOwned: boolean;
   commands: AppCommand[];
   pendingCommandId?: string;
   onBack(): void;
@@ -193,12 +197,13 @@ export function LoopWorkspace({
           role="region"
           aria-label={`${node.title} terminal`}
         />
-        <NodeInspector
+        <LoopWorkspaceRail
           graph={graph}
           node={node}
+          mailbox={mailbox}
+          mailroomOwned={mailroomOwned}
           commands={nodeCommands}
           pendingCommandId={pendingCommandId}
-          onClose={onBack}
           onExecuteCommand={onExecuteCommand}
         />
       </div>

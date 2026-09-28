@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import { GraphCanvas } from "./components/GraphCanvas";
 import { EdgeInspector } from "./components/EdgeInspector";
+import { LoopWorkspaceRail } from "./components/LoopWorkspaceRail";
 import { MailroomView } from "./components/MailroomView";
 import { NewEdgeDialog } from "./components/NewEdgeDialog";
 import { ProjectGraphTree } from "./components/ProjectGraphTree";
@@ -123,6 +124,37 @@ describe("automated accessibility checks", () => {
           ]}
           onBack={() => undefined}
           onExecute={() => undefined}
+        />,
+      ),
+    );
+  });
+
+  it("checks loop workspace rail landmarks and controls", async () => {
+    await expectNoAxeViolations(
+      renderToStaticMarkup(
+        <LoopWorkspaceRail
+          graph={graph}
+          node={{
+            ...graph.nodes[1],
+            presence: { presence: "awaitingInput" },
+            summary: {
+              beats: [
+                {
+                  id: "beat",
+                  at: "2026-09-28T10:00:00Z",
+                  pass: 1,
+                  kind: "asking",
+                  text: "Choose the release target",
+                  endsTurn: false,
+                },
+              ],
+              passes: [],
+              currentPass: 1,
+            },
+          }}
+          mailroomOwned
+          commands={[refreshCommand]}
+          onExecuteCommand={() => undefined}
         />,
       ),
     );

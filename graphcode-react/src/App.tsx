@@ -1603,6 +1603,12 @@ export default function App() {
           <LoopWorkspace
             graph={selectedGraph}
             node={terminalNode}
+            mailbox={
+              selectedProjectPath
+                ? state.mailboxes[selectedProjectPath]
+                : undefined
+            }
+            mailroomOwned={state.compositePath.length === 0}
             commands={nodeCommands}
             pendingCommandId={pendingCommandId}
             onBack={() => {
