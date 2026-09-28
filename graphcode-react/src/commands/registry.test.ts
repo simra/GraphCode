@@ -121,6 +121,37 @@ describe("command registry", () => {
     expect(selectNode).toHaveBeenCalledWith("node-b");
   });
 
+  it("exposes persistent Back and Forward navigation with desktop shortcuts", () => {
+    const navigateBack = vi.fn();
+    const navigateForward = vi.fn();
+    const commands = createCommandRegistry(stateWithSelectedNode(), {
+      openPalette: vi.fn(),
+      clearSelection: vi.fn(),
+      selectNode: vi.fn(),
+      navigateBack,
+      navigateForward,
+      canNavigateBack: true,
+      canNavigateForward: false,
+    });
+
+    const back = commands.find((command) => command.id === "navigation.back");
+    const forward = commands.find(
+      (command) => command.id === "navigation.forward",
+    );
+    expect(back).toMatchObject({
+      enabled: true,
+      shortcut: {
+        key: "ArrowLeft",
+        ctrl: true,
+        alt: true,
+        label: "Ctrl+Alt+←",
+      },
+    });
+    expect(forward?.enabled).toBe(false);
+    back?.execute();
+    expect(navigateBack).toHaveBeenCalledOnce();
+  });
+
   it("enables supported lifecycle actions and gates goal completion", () => {
     const actions = {
       openPalette: vi.fn(),

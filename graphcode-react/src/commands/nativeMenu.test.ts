@@ -30,6 +30,21 @@ describe("native menu projection", () => {
         disabledReason: "Bridge required",
         execute: () => undefined,
       },
+      {
+        id: "navigation.back",
+        label: "Back",
+        description: "Go back",
+        category: "Navigation",
+        shortcut: {
+          key: "ArrowLeft",
+          ctrl: true,
+          alt: true,
+          label: "Ctrl+Alt+←",
+        },
+        surfaces: [],
+        enabled: true,
+        execute: () => undefined,
+      },
     ];
 
     expect(nativeMenuProjection(commands)).toEqual([
@@ -46,6 +61,13 @@ describe("native menu projection", () => {
         category: "Loop",
         enabled: false,
         accelerator: undefined,
+      },
+      {
+        id: "navigation.back",
+        label: "Back",
+        category: "Navigation",
+        enabled: true,
+        accelerator: "Ctrl+Alt+Left",
       },
     ]);
   });

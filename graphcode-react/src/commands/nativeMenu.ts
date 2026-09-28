@@ -27,7 +27,14 @@ function nativeAccelerator(
     shortcut.alt ? "Alt" : undefined,
   ].filter(Boolean);
   const key =
-    shortcut.key.length === 1 ? shortcut.key.toUpperCase() : shortcut.key;
+    shortcut.key.length === 1
+      ? shortcut.key.toUpperCase()
+      : ({
+          ArrowLeft: "Left",
+          ArrowRight: "Right",
+          ArrowUp: "Up",
+          ArrowDown: "Down",
+        }[shortcut.key] ?? shortcut.key);
   if (!modifiers.length && !/^F\d{1,2}$/i.test(key)) return undefined;
   return [...modifiers, key].join("+");
 }

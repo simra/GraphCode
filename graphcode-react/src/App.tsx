@@ -13,6 +13,10 @@ import {
 } from "./bridge/daemon";
 import { pickProjectFolder } from "./bridge/projects";
 import {
+  loadNavigationHistory,
+  saveNavigationHistory,
+} from "./bridge/navigationHistory";
+import {
   loadUiLayout,
   saveUiNodePositions,
   saveUiViewport,
@@ -112,6 +116,18 @@ import {
 } from "./state/graphState";
 import { attentionItems, attentionSummary } from "./state/attention";
 import { deriveProjectNavigation } from "./state/projectNavigation";
+import {
+  canNavigateBack,
+  canNavigateForward,
+  createNavigationHistory,
+  navigateBack,
+  navigateForward,
+  navigationAnnouncement,
+  recordNavigation,
+  resolveNavigationRoute,
+  type NavigationHistory,
+  type NavigationRoute,
+} from "./state/navigationHistory";
 
 export default function App() {
   const [state, dispatch] = useReducer(appReducer, initialAppState);
@@ -120,6 +136,8 @@ export default function App() {
   const [newQuickChatOpen, setNewQuickChatOpen] = useState(false);
   const [newEdgeOpen, setNewEdgeOpen] = useState(false);
   const [terminalNodeId, setTerminalNodeId] = useState<string>();
+  const [navigationHistory, setNavigationHistory] =
+    useState<NavigationHistory>();
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [workspacesOpen, setWorkspacesOpen] = useState(false);
   const [selectedEdgeKey, setSelectedEdgeKey] = useState<string>();
@@ -160,6 +178,8 @@ export default function App() {
     projectPath: string;
     nodeId: string;
   }>();
+  const [pendingCreatedQuickChatId, setPendingCreatedQuickChatId] =
+    useState<string>();
   const [pendingCommandId, setPendingCommandId] = useState<CommandId>();
   const [commandError, setCommandError] = useState<string>();
   const [liveAnnouncement, setLiveAnnouncement] = useState("");
@@ -185,6 +205,11 @@ export default function App() {
     (typeof state.connection)["phase"] | undefined
   >(undefined);
   const previousSelectionKeyRef = useRef<string | undefined>(undefined);
+  const stateRef = useRef(state);
+  const navigationHistoryRef = useRef(navigationHistory);
+  const pendingNavigationRoutesRef = useRef<NavigationRoute[]>([]);
+  stateRef.current = state;
+  navigationHistoryRef.current = navigationHistory;
 
   const announce = useCallback((message: string) => {
     if (announcementTimerRef.current !== undefined) {
@@ -242,6 +267,63 @@ export default function App() {
     return () => {
       active = false;
       void connection?.dispose();
+    };
+  }, []);
+
+  const commitNavigationHistory = useCallback((history: NavigationHistory) => {
+    navigationHistoryRef.current = history;
+    setNavigationHistory(history);
+    void saveNavigationHistory(history).catch((error: unknown) => {
+      setCommandError(
+        `Navigation history save failed: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    });
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+    void loadNavigationHistory()
+      .then((loaded) => {
+        if (!active) return;
+        let history = loaded;
+        for (const route of pendingNavigationRoutesRef.current) {
+          history = recordNavigation(history, route);
+        }
+        pendingNavigationRoutesRef.current = [];
+        navigationHistoryRef.current = history;
+        setNavigationHistory(history);
+        if (history !== loaded) {
+          void saveNavigationHistory(history).catch((error: unknown) => {
+            if (active) {
+              setCommandError(
+                `Navigation history save failed: ${
+                  error instanceof Error ? error.message : String(error)
+                }`,
+              );
+            }
+          });
+        }
+      })
+      .catch((error: unknown) => {
+        if (active) {
+          let history = createNavigationHistory();
+          for (const route of pendingNavigationRoutesRef.current) {
+            history = recordNavigation(history, route);
+          }
+          pendingNavigationRoutesRef.current = [];
+          navigationHistoryRef.current = history;
+          setNavigationHistory(history);
+          setCommandError(
+            `Navigation history load failed: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          );
+        }
+      });
+    return () => {
+      active = false;
     };
   }, []);
 
@@ -375,6 +457,89 @@ export default function App() {
     },
     [announce],
   );
+  const applyNavigationRoute = useCallback(
+    (route: NavigationRoute, historyDirection?: "back" | "forward") => {
+      const resolved = resolveNavigationRoute(stateRef.current, route);
+      if (!resolved) return false;
+      setSelectedEdgeKey(undefined);
+      switch (route.kind) {
+        case "project":
+          dispatch({
+            type: "selectGraphLocation",
+            projectPath: route.projectPath,
+            compositePath: route.compositePath,
+            nodeId: route.nodeId,
+          });
+          setTerminalNodeId(route.terminal ? route.nodeId : undefined);
+          break;
+        case "mailroom":
+          dispatch({
+            type: "selectGraphLocation",
+            projectPath: route.projectPath,
+            compositePath: [],
+          });
+          dispatch({ type: "selectMailroom" });
+          setTerminalNodeId(undefined);
+          break;
+        case "quickChats":
+          dispatch({ type: "selectQuickChats" });
+          setTerminalNodeId(undefined);
+          break;
+        case "quickChat":
+          dispatch({ type: "selectQuickChat", id: route.id });
+          setTerminalNodeId(undefined);
+          break;
+      }
+      if (historyDirection) {
+        announce(navigationAnnouncement(historyDirection, resolved.label));
+      }
+      return true;
+    },
+    [announce],
+  );
+  const visitNavigationRoute = useCallback(
+    (route: NavigationRoute) => {
+      if (!applyNavigationRoute(route)) return false;
+      const history = navigationHistoryRef.current;
+      if (!history) {
+        pendingNavigationRoutesRef.current.push(route);
+        return true;
+      }
+      const next = recordNavigation(history, route);
+      if (next !== history) commitNavigationHistory(next);
+      return true;
+    },
+    [applyNavigationRoute, commitNavigationHistory],
+  );
+  const historyRouteIsResolvable = useCallback(
+    (route: NavigationRoute) =>
+      resolveNavigationRoute(stateRef.current, route) !== undefined,
+    [],
+  );
+  const traverseNavigationHistory = useCallback(
+    (direction: "back" | "forward") => {
+      const history = navigationHistoryRef.current;
+      if (!history) return;
+      const step =
+        direction === "back"
+          ? navigateBack(history, historyRouteIsResolvable)
+          : navigateForward(history, historyRouteIsResolvable);
+      if (!step.route) return;
+      if (!applyNavigationRoute(step.route, direction)) return;
+      commitNavigationHistory(step.history);
+    },
+    [applyNavigationRoute, commitNavigationHistory, historyRouteIsResolvable],
+  );
+  const canGoBack = navigationHistory
+    ? canNavigateBack(navigationHistory, (route) =>
+        Boolean(resolveNavigationRoute(state, route)),
+      )
+    : false;
+  const canGoForward = navigationHistory
+    ? canNavigateForward(navigationHistory, (route) =>
+        Boolean(resolveNavigationRoute(state, route)),
+      )
+    : false;
   const commands = useMemo(
     () =>
       createCommandRegistry(state, {
@@ -396,7 +561,13 @@ export default function App() {
             : undefined,
         openNewLoop: () => setNewLoopOpen(true),
         openNewQuickChat: () => setNewQuickChatOpen(true),
-        openMailroom: () => dispatch({ type: "selectMailroom" }),
+        openMailroom: selectedProjectPath
+          ? () =>
+              visitNavigationRoute({
+                kind: "mailroom",
+                projectPath: selectedProjectPath,
+              })
+          : undefined,
         openTerminal:
           "__TAURI_INTERNALS__" in window &&
           inspectedNode &&
@@ -405,19 +576,33 @@ export default function App() {
                 await sendDaemonCommand(
                   openNodeSessionCommand(selectedProjectPath, inspectedNode.id),
                 );
-                setTerminalNodeId(inspectedNode.id);
+                visitNavigationRoute({
+                  kind: "project",
+                  projectPath: selectedProjectPath,
+                  compositePath: state.compositePath,
+                  nodeId: inspectedNode.id,
+                  terminal: true,
+                });
               }
             : undefined,
         openNewEdge: () => {
           setNewEdgeEndpoints({ from: inspectedNode?.id });
           setNewEdgeOpen(true);
         },
-        clearSelection: () => dispatch({ type: "clearNodeSelection" }),
+        clearSelection: () => {
+          if (!selectedProjectPath) return;
+          visitNavigationRoute({
+            kind: "project",
+            projectPath: selectedProjectPath,
+            compositePath: state.compositePath,
+          });
+        },
         selectNode: (nodeId) => {
           if (!state.selectedProjectPath) return;
-          dispatch({
-            type: "selectNode",
+          visitNavigationRoute({
+            kind: "project",
             projectPath: state.selectedProjectPath,
+            compositePath: state.compositePath,
             nodeId,
           });
         },
@@ -514,11 +699,14 @@ export default function App() {
               }
             : undefined,
         openComposite: inspectedNode?.subGraph
-          ? () =>
-              dispatch({
-                type: "enterComposite",
-                nodeId: inspectedNode.id,
-              })
+          ? () => {
+              if (!selectedProjectPath) return;
+              visitNavigationRoute({
+                kind: "project",
+                projectPath: selectedProjectPath,
+                compositePath: [...state.compositePath, inspectedNode.id],
+              });
+            }
           : undefined,
         pilotComposite:
           selectedProjectPath && inspectedNode
@@ -687,6 +875,10 @@ export default function App() {
         resetZoom: () => graphCanvasRef.current?.resetZoom(),
         fitGraph: () => graphCanvasRef.current?.fitGraph(),
         resetLayout: () => graphCanvasRef.current?.resetLayout(),
+        navigateBack: () => traverseNavigationHistory("back"),
+        navigateForward: () => traverseNavigationHistory("forward"),
+        canNavigateBack: canGoBack,
+        canNavigateForward: canGoForward,
       }),
     [
       inspectedNode,
@@ -696,6 +888,10 @@ export default function App() {
       selectedProjectPath,
       selectedGraph,
       state,
+      canGoBack,
+      canGoForward,
+      traverseNavigationHistory,
+      visitNavigationRoute,
     ],
   );
   const commandsRef = useRef(commands);
@@ -731,13 +927,14 @@ export default function App() {
     if (!graph?.nodes.some((node) => node.id === pendingCreatedNode.nodeId)) {
       return;
     }
-    dispatch({
-      type: "selectNode",
+    visitNavigationRoute({
+      kind: "project",
       projectPath: pendingCreatedNode.projectPath,
+      compositePath: [],
       nodeId: pendingCreatedNode.nodeId,
     });
     setPendingCreatedNode(undefined);
-  }, [pendingCreatedNode, state.graphs]);
+  }, [pendingCreatedNode, state.graphs, visitNavigationRoute]);
 
   useEffect(() => {
     if (!openingProjectPath) return;
@@ -745,9 +942,27 @@ export default function App() {
       (path) => path.toLowerCase() === openingProjectPath.toLowerCase(),
     );
     if (!openedPath) return;
-    dispatch({ type: "selectProject", path: openedPath });
+    visitNavigationRoute({
+      kind: "project",
+      projectPath: openedPath,
+      compositePath: [],
+    });
     setOpeningProjectPath(undefined);
-  }, [openingProjectPath, state.graphs]);
+  }, [openingProjectPath, state.graphs, visitNavigationRoute]);
+
+  useEffect(() => {
+    if (
+      !pendingCreatedQuickChatId ||
+      !state.quickChats.some((chat) => chat.id === pendingCreatedQuickChatId)
+    ) {
+      return;
+    }
+    visitNavigationRoute({
+      kind: "quickChat",
+      id: pendingCreatedQuickChatId,
+    });
+    setPendingCreatedQuickChatId(undefined);
+  }, [pendingCreatedQuickChatId, state.quickChats, visitNavigationRoute]);
 
   const executeCommand = useCallback(
     async (command: AppCommand) => {
@@ -844,7 +1059,7 @@ export default function App() {
           response.event?.type === "quickChatChanged"
         ) {
           dispatch({ type: "envelopeReceived", envelope: response });
-          dispatch({ type: "selectQuickChat", id: response.event.chat.id });
+          setPendingCreatedQuickChatId(response.event.chat.id);
         }
       },
       renameQuickChat: () =>
@@ -1060,7 +1275,7 @@ export default function App() {
             }`}
             type="button"
             aria-expanded="true"
-            onClick={() => dispatch({ type: "selectQuickChats" })}
+            onClick={() => visitNavigationRoute({ kind: "quickChats" })}
           >
             <span aria-hidden="true">◌</span>
             <span>
@@ -1115,9 +1330,10 @@ export default function App() {
               }`}
               type="button"
               onClick={() =>
-                dispatch({
-                  type: "selectProject",
-                  path: projectNavigation.global!.path,
+                visitNavigationRoute({
+                  kind: "project",
+                  projectPath: projectNavigation.global!.path,
+                  compositePath: [],
                 })
               }
             >
@@ -1142,7 +1358,11 @@ export default function App() {
                         : ""
                     }
                     onClick={() =>
-                      dispatch({ type: "selectProject", path: project.path })
+                      visitNavigationRoute({
+                        kind: "project",
+                        projectPath: project.path,
+                        compositePath: [],
+                      })
                     }
                   >
                     <span aria-hidden="true">⌁</span>
@@ -1196,16 +1416,16 @@ export default function App() {
                         compositePath={state.compositePath}
                         selectedNodeId={state.selectedNodeId}
                         onSelectNode={(compositePath, nodeId) =>
-                          dispatch({
-                            type: "selectGraphLocation",
+                          visitNavigationRoute({
+                            kind: "project",
                             projectPath: project.path,
                             compositePath,
                             nodeId,
                           })
                         }
                         onOpenGraph={(compositePath) =>
-                          dispatch({
-                            type: "selectGraphLocation",
+                          visitNavigationRoute({
+                            kind: "project",
                             projectPath: project.path,
                             compositePath,
                           })
@@ -1335,12 +1555,17 @@ export default function App() {
                       : undefined
                   }
                   disabled={breadcrumb.depth === state.compositePath.length}
-                  onClick={() =>
-                    dispatch({
-                      type: "leaveComposite",
-                      depth: breadcrumb.depth,
-                    })
-                  }
+                  onClick={() => {
+                    if (!selectedProjectPath) return;
+                    visitNavigationRoute({
+                      kind: "project",
+                      projectPath: selectedProjectPath,
+                      compositePath: state.compositePath.slice(
+                        0,
+                        breadcrumb.depth,
+                      ),
+                    });
+                  }}
                 >
                   {breadcrumb.label}
                 </button>
@@ -1354,7 +1579,15 @@ export default function App() {
             node={terminalNode}
             commands={nodeCommands}
             pendingCommandId={pendingCommandId}
-            onBack={() => setTerminalNodeId(undefined)}
+            onBack={() => {
+              if (!selectedProjectPath) return;
+              visitNavigationRoute({
+                kind: "project",
+                projectPath: selectedProjectPath,
+                compositePath: state.compositePath,
+                nodeId: terminalNode.id,
+              });
+            }}
             onExecuteCommand={(command) => void executeCommand(command)}
             onSessionExit={async (succeeded) => {
               const command = attendedSketchExitCommand(
@@ -1372,7 +1605,7 @@ export default function App() {
             selectedChat={inspectedQuickChat}
             pendingCommandId={pendingCommandId}
             commandsForChat={quickChatCommands}
-            onBack={() => dispatch({ type: "selectQuickChats" })}
+            onBack={() => visitNavigationRoute({ kind: "quickChats" })}
             onNewChat={() => {
               const command = commands.find(
                 (candidate) => candidate.id === "chat.new",
@@ -1408,7 +1641,11 @@ export default function App() {
             }
             onBack={() => {
               if (selectedProjectPath) {
-                dispatch({ type: "selectProject", path: selectedProjectPath });
+                visitNavigationRoute({
+                  kind: "project",
+                  projectPath: selectedProjectPath,
+                  compositePath: [],
+                });
               }
             }}
             onExecute={(command) => void executeCommand(command)}
@@ -1554,7 +1791,12 @@ export default function App() {
                 if (inspectedEdge) {
                   setSelectedEdgeKey(undefined);
                 } else {
-                  dispatch({ type: "clearNodeSelection" });
+                  if (!selectedProjectPath) return;
+                  visitNavigationRoute({
+                    kind: "project",
+                    projectPath: selectedProjectPath,
+                    compositePath: state.compositePath,
+                  });
                 }
               }}
             >
@@ -1578,7 +1820,14 @@ export default function App() {
                   }
                   commands={nodeCommands}
                   pendingCommandId={pendingCommandId}
-                  onClose={() => dispatch({ type: "clearNodeSelection" })}
+                  onClose={() => {
+                    if (!selectedProjectPath) return;
+                    visitNavigationRoute({
+                      kind: "project",
+                      projectPath: selectedProjectPath,
+                      compositePath: state.compositePath,
+                    });
+                  }}
                   onExecuteCommand={(command) => void executeCommand(command)}
                 />
               )}
@@ -1634,8 +1883,8 @@ export default function App() {
               response.event?.type === "quickChatChanged"
             ) {
               dispatch({ type: "envelopeReceived", envelope: response });
-              dispatch({
-                type: "selectQuickChat",
+              visitNavigationRoute({
+                kind: "quickChat",
                 id: response.event.chat.id,
               });
               announce(`Created Quick Chat ${response.event.chat.title}.`);

@@ -46,6 +46,8 @@ export type CommandId =
   | "view.resetZoom"
   | "view.fitGraph"
   | "view.resetLayout"
+  | "navigation.back"
+  | "navigation.forward"
   | "selection.clear"
   | "selection.nextLoop"
   | "selection.previousLoop";
@@ -138,6 +140,10 @@ export interface CommandActions {
   fitGraph?(): void;
   resetLayout?(): void;
   openNewEdge?(): void;
+  navigateBack?(): void;
+  navigateForward?(): void;
+  canNavigateBack?: boolean;
+  canNavigateForward?: boolean;
 }
 
 export interface ProjectRowCommandActions {
@@ -859,6 +865,44 @@ export function createCommandRegistry(
             ...unavailable("Select a graph first"),
             execute: () => undefined,
           }),
+    },
+    {
+      id: "navigation.back",
+      label: "Back",
+      description: "Return to the previous visited destination",
+      category: "Navigation",
+      shortcut: {
+        key: "ArrowLeft",
+        ctrl: true,
+        alt: true,
+        label: "Ctrl+Alt+←",
+        global: true,
+      },
+      surfaces: [],
+      enabled: Boolean(actions.canNavigateBack && actions.navigateBack),
+      disabledReason: actions.canNavigateBack
+        ? undefined
+        : "No previous destination is available",
+      execute: actions.navigateBack ?? (() => undefined),
+    },
+    {
+      id: "navigation.forward",
+      label: "Forward",
+      description: "Advance to the next visited destination",
+      category: "Navigation",
+      shortcut: {
+        key: "ArrowRight",
+        ctrl: true,
+        alt: true,
+        label: "Ctrl+Alt+→",
+        global: true,
+      },
+      surfaces: [],
+      enabled: Boolean(actions.canNavigateForward && actions.navigateForward),
+      disabledReason: actions.canNavigateForward
+        ? undefined
+        : "No next destination is available",
+      execute: actions.navigateForward ?? (() => undefined),
     },
     {
       id: "selection.clear",

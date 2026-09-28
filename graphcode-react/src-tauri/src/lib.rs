@@ -1,5 +1,6 @@
 mod connection;
 mod endpoint;
+mod navigation_history;
 mod protocol;
 mod settings;
 mod terminal;
@@ -25,6 +26,7 @@ use thiserror::Error;
 struct BridgeState {
     connection: Mutex<Option<ConnectionHandle>>,
     native_menu_revision: Mutex<u64>,
+    navigation_history: Mutex<()>,
     settings: Mutex<()>,
     terminal: terminal::TerminalManager,
     ui_layout: Mutex<()>,
@@ -36,6 +38,7 @@ impl BridgeState {
         Ok(Self {
             connection: Mutex::new(None),
             native_menu_revision: Mutex::new(0),
+            navigation_history: Mutex::new(()),
             settings: Mutex::new(()),
             terminal: terminal::TerminalManager::default(),
             ui_layout: Mutex::new(()),
@@ -58,6 +61,8 @@ enum BridgeError {
     NotStarted,
     #[error("failed to update native menu: {0}")]
     Menu(String),
+    #[error("failed to access persistent navigation history: {0}")]
+    NavigationHistory(String),
     #[error("failed to access persistent UI layout: {0}")]
     UiLayout(String),
     #[error("workspace operation failed to finish: {0}")]
@@ -357,6 +362,41 @@ fn load_ui_layout(
 }
 
 #[tauri::command]
+fn load_navigation_history(
+    app: tauri::AppHandle,
+    state: State<'_, BridgeState>,
+) -> Result<navigation_history::NavigationHistory, BridgeError> {
+    let _guard = state
+        .navigation_history
+        .lock()
+        .expect("navigation history mutex poisoned");
+    let state_directory = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| BridgeError::AppData(error.to_string()))?;
+    navigation_history::load(&state_directory)
+        .map_err(|error| BridgeError::NavigationHistory(error.to_string()))
+}
+
+#[tauri::command]
+fn save_navigation_history(
+    app: tauri::AppHandle,
+    state: State<'_, BridgeState>,
+    history: navigation_history::NavigationHistory,
+) -> Result<(), BridgeError> {
+    let _guard = state
+        .navigation_history
+        .lock()
+        .expect("navigation history mutex poisoned");
+    let state_directory = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| BridgeError::AppData(error.to_string()))?;
+    navigation_history::save(&state_directory, history)
+        .map_err(|error| BridgeError::NavigationHistory(error.to_string()))
+}
+
+#[tauri::command]
 fn save_ui_viewport(
     app: tauri::AppHandle,
     state: State<'_, BridgeState>,
@@ -422,6 +462,8 @@ pub fn run() {
             rename_workspace,
             open_workspace,
             set_native_menu,
+            load_navigation_history,
+            save_navigation_history,
             load_ui_layout,
             save_ui_viewport,
             save_ui_node_positions
