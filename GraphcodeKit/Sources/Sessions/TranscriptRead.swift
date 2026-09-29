@@ -118,11 +118,9 @@ public enum TranscriptReadError: String, Error, Equatable, Sendable {
 struct TranscriptSourceChunk: Equatable, Sendable {
   var identity: String
   var totalBytes: UInt64
-  var offset: UInt64
   var data: Data
-  var authenticatedOffset: UInt64
-  var authenticatedPrefixHash: String
-  var completeSource: Data? = nil
+  var sourceWorkBytes: Int
+  var remoteTransferBytes: Int
 }
 struct TranscriptCursor: Codable, Equatable, Sendable {
   var version: Int
@@ -160,8 +158,10 @@ struct TranscriptCursor: Codable, Equatable, Sendable {
 public enum TranscriptReader {
   static let maximumSourceRecordBytes = 256 * 1024
   static let maximumEntryBytes = 32 * 1024
-  static let readWindowBytes =
-    TranscriptQuery.maximumByteLimit + maximumSourceRecordBytes + 1
+  static let maximumReadableTranscriptBytes = 512 * 1024
+  static let maximumSourceWorkBytes = maximumReadableTranscriptBytes * 2
+  static let maximumRemoteTransferBytes =
+    ((maximumReadableTranscriptBytes + 2) / 3) * 4 + 1024
   static let remoteMarker = "graphcode-transcript:"
 
   public static func read(
@@ -181,22 +181,15 @@ public enum TranscriptReader {
           throw TranscriptReadError.invalidCursor
         }
       }
-      let nextOffset = cursor?.nextOffset ?? 0
-      let anchorLength = cursor?.anchorLength ?? 0
-      guard nextOffset >= UInt64(anchorLength) else {
-        throw TranscriptReadError.invalidCursor
-      }
-      let readOffset = nextOffset - UInt64(anchorLength)
-      let readCount = readWindowBytes + anchorLength
       let chunk: TranscriptSourceChunk
+      let localSource: LocalTranscriptSource?
       if let projectPath, let location = RemoteProjectLocation.parse(projectPath: projectPath) {
-        chunk = try await remoteChunk(
-          node: node, location: location, offset: readOffset, count: readCount,
-          authenticatedOffset: nextOffset)
+        chunk = try await remoteChunk(node: node, location: location)
+        localSource = nil
       } else {
-        chunk = try localChunk(
-          node: node, projectPath: projectPath, offset: readOffset, count: readCount,
-          authenticatedOffset: nextOffset)
+        let source = try localChunk(node: node, projectPath: projectPath)
+        chunk = source.chunk
+        localSource = source
       }
       let draft = try pageDraft(
         nodeID: node.id,
@@ -204,25 +197,11 @@ public enum TranscriptReader {
         query: query,
         cursor: cursor,
         chunk: chunk)
-      let prefixHash: String?
-      if draft.hasMore {
-        if draft.nextOffset == chunk.authenticatedOffset {
-          prefixHash = chunk.authenticatedPrefixHash
-        } else if let projectPath,
-          let location = RemoteProjectLocation.parse(projectPath: projectPath)
-        {
-          prefixHash = try await remotePrefixHash(
-            node: node, location: location, offset: draft.nextOffset,
-            expectedIdentity: chunk.identity)
-        } else {
-          prefixHash = try localPrefixHash(
-            node: node, projectPath: projectPath, offset: draft.nextOffset,
-            expectedIdentity: chunk.identity)
-        }
-      } else {
-        prefixHash = nil
+      var totalBytes = chunk.totalBytes
+      if let localSource {
+        totalBytes = try verifyLocalSnapshot(localSource)
       }
-      return .success(try finalize(draft, prefixHash: prefixHash))
+      return .success(try finalize(draft, source: chunk.data, totalBytes: totalBytes))
     } catch let error as TranscriptReadError {
       return .failure(error)
     } catch {
@@ -239,13 +218,30 @@ public enum TranscriptReader {
   ) throws -> TranscriptPage {
     let draft = try pageDraft(
       nodeID: nodeID, provider: provider, query: query, cursor: cursor, chunk: chunk)
-    let prefixHash =
-      draft.hasMore
-      ? chunk.completeSource.map {
-        GraphcodeSHA256.hex(Data($0.prefix(Int(clamping: draft.nextOffset))))
-      }
-      : nil
-    return try finalize(draft, prefixHash: prefixHash)
+    return try finalize(draft, source: chunk.data, totalBytes: chunk.totalBytes)
+  }
+
+  static func page(
+    nodeID: UUID,
+    provider: CLISessionBackendKind,
+    query: TranscriptQuery,
+    cursor: TranscriptCursor?,
+    chunk: TranscriptSourceChunk,
+    afterParse: () throws -> TranscriptSourceChunk
+  ) throws -> TranscriptPage {
+    let draft = try pageDraft(
+      nodeID: nodeID, provider: provider, query: query, cursor: cursor, chunk: chunk)
+    let current = try afterParse()
+    try validateSnapshot(
+      snapshot: chunk.data,
+      currentPrefix: Data(current.data.prefix(chunk.data.count)),
+      initialIdentity: chunk.identity,
+      finalIdentity: current.identity,
+      finalSize: current.totalBytes)
+    guard chunk.sourceWorkBytes + current.sourceWorkBytes <= maximumSourceWorkBytes else {
+      throw TranscriptReadError.oversized
+    }
+    return try finalize(draft, source: chunk.data, totalBytes: current.totalBytes)
   }
 
   private struct PageDraft {
@@ -265,31 +261,38 @@ public enum TranscriptReader {
     cursor: TranscriptCursor?,
     chunk: TranscriptSourceChunk
   ) throws -> PageDraft {
-    guard chunk.offset <= chunk.totalBytes,
-      cursor?.sourceIdentity == nil || cursor?.sourceIdentity == chunk.identity
-    else {
-      throw TranscriptReadError.invalidCursor
-    }
-    guard chunk.authenticatedOffset == cursor?.nextOffset ?? 0,
-      cursor?.prefixHash == nil || cursor?.prefixHash == chunk.authenticatedPrefixHash
+    guard chunk.data.count <= maximumReadableTranscriptBytes,
+      chunk.sourceWorkBytes <= maximumSourceWorkBytes,
+      chunk.remoteTransferBytes <= maximumRemoteTransferBytes
+    else { throw TranscriptReadError.oversized }
+    guard cursor?.sourceIdentity == nil || cursor?.sourceIdentity == chunk.identity
     else {
       throw TranscriptReadError.invalidCursor
     }
 
     let anchorLength = cursor?.anchorLength ?? 0
-    guard chunk.data.count >= anchorLength else { throw TranscriptReadError.invalidCursor }
+    let nextOffset = cursor?.nextOffset ?? 0
+    guard nextOffset <= UInt64(chunk.data.count),
+      nextOffset >= UInt64(anchorLength)
+    else { throw TranscriptReadError.invalidCursor }
     if let cursor {
-      let anchor = chunk.data.prefix(anchorLength)
-      guard hash(Data(anchor)) == cursor.anchorHash else {
+      let prefix = Data(chunk.data.prefix(Int(nextOffset)))
+      let anchor = prefix.suffix(anchorLength)
+      guard GraphcodeSHA256.hex(prefix) == cursor.prefixHash,
+        hash(Data(anchor)) == cursor.anchorHash
+      else {
         throw TranscriptReadError.invalidCursor
       }
     }
 
-    let body = chunk.data.dropFirst(anchorLength)
+    let body = chunk.data.dropFirst(Int(nextOffset))
     var entries: [TranscriptEntry] = []
     var encodedEntriesBytes = 2
     var consumed = 0
-    var lastRecord = cursor.map { Data(chunk.data.prefix($0.anchorLength)) } ?? Data()
+    var lastRecord =
+      cursor.map {
+        Data(chunk.data.prefix(Int($0.nextOffset)).suffix($0.anchorLength))
+      } ?? Data()
     var stoppedForBound = false
 
     while consumed < body.count {
@@ -304,7 +307,7 @@ public enum TranscriptReader {
       guard length <= maximumSourceRecordBytes else { throw TranscriptReadError.oversized }
       let rawRecord = Data(remaining.prefix(length))
       let line = Data(rawRecord.dropLast())
-      let sourceOffset = (cursor?.nextOffset ?? 0) + UInt64(consumed)
+      let sourceOffset = nextOffset + UInt64(consumed)
       let entry = try TranscriptNormalizer.entry(
         provider: provider, line: line, sourceOffset: sourceOffset)
 
@@ -328,24 +331,30 @@ public enum TranscriptReader {
       lastRecord = rawRecord
     }
 
-    let nextOffset = (cursor?.nextOffset ?? 0) + UInt64(consumed)
-    let hasMore = stoppedForBound || nextOffset < chunk.totalBytes
+    let servedThrough = nextOffset + UInt64(consumed)
+    let hasMore = stoppedForBound || servedThrough < chunk.totalBytes
     return PageDraft(
       nodeID: nodeID,
       provider: provider,
       entries: entries,
       hasMore: hasMore,
-      nextOffset: nextOffset,
+      nextOffset: servedThrough,
       sourceIdentity: chunk.identity,
       lastRecord: lastRecord)
   }
 
-  private static func finalize(_ draft: PageDraft, prefixHash: String?) throws -> TranscriptPage {
+  private static func finalize(
+    _ draft: PageDraft,
+    source: Data,
+    totalBytes: UInt64
+  ) throws -> TranscriptPage {
+    let hasMore = draft.hasMore || draft.nextOffset < totalBytes
     let nextCursor: String?
-    if draft.hasMore {
-      guard let prefixHash, prefixHash.count == 64 else {
+    if hasMore {
+      guard draft.nextOffset <= UInt64(source.count) else {
         throw TranscriptReadError.invalidCursor
       }
+      let prefixHash = GraphcodeSHA256.hex(Data(source.prefix(Int(draft.nextOffset))))
       nextCursor = try TranscriptCursor(
         version: 2,
         nodeID: draft.nodeID,
@@ -364,16 +373,21 @@ public enum TranscriptReader {
       provider: draft.provider,
       entries: draft.entries,
       nextCursor: nextCursor,
-      hasMore: draft.hasMore)
+      hasMore: hasMore)
+  }
+
+  private struct LocalTranscriptSource {
+    var node: LoopNode
+    var url: URL
+    var identity: String
+    var snapshot: Data
+    var chunk: TranscriptSourceChunk
   }
 
   private static func localChunk(
     node: LoopNode,
-    projectPath: String?,
-    offset: UInt64,
-    count: Int,
-    authenticatedOffset: UInt64
-  ) throws -> TranscriptSourceChunk {
+    projectPath: String?
+  ) throws -> LocalTranscriptSource {
     let url = try localURL(node: node, projectPath: projectPath)
     let attributes: [FileAttributeKey: Any]
     do {
@@ -384,7 +398,9 @@ public enum TranscriptReader {
     guard let size = (attributes[.size] as? NSNumber)?.uint64Value else {
       throw TranscriptReadError.corrupt
     }
-    guard offset <= size else { throw TranscriptReadError.invalidCursor }
+    guard size <= UInt64(maximumReadableTranscriptBytes) else {
+      throw TranscriptReadError.oversized
+    }
     let handle: FileHandle
     do {
       handle = try FileHandle(forReadingFrom: url)
@@ -393,30 +409,19 @@ public enum TranscriptReader {
     }
     defer { try? handle.close() }
     do {
-      try handle.seek(toOffset: offset)
-      let prefixHash = try sha256Prefix(of: handle, through: authenticatedOffset)
-      try handle.seek(toOffset: offset)
-      let data = try handle.read(upToCount: count) ?? Data()
-      let finalPrefixHash = try sha256Prefix(of: handle, through: authenticatedOffset)
-      let finalAttributes = try FileManager.default.attributesOfItem(atPath: url.path)
-      let identity = localIdentity(
-        node: node, url: url, attributes: attributes)
-      let finalIdentity = localIdentity(node: node, url: url, attributes: finalAttributes)
-      try validateStableRead(
-        identityBefore: identity,
-        prefixHashBefore: prefixHash,
-        identityAfter: finalIdentity,
-        prefixHashAfter: finalPrefixHash)
-      guard let finalSize = (finalAttributes[.size] as? NSNumber)?.uint64Value,
-        offset <= finalSize
-      else { throw TranscriptReadError.invalidCursor }
-      return TranscriptSourceChunk(
+      let data = try handle.read(upToCount: maximumReadableTranscriptBytes + 1) ?? Data()
+      guard data.count <= maximumReadableTranscriptBytes else {
+        throw TranscriptReadError.oversized
+      }
+      let identity = localIdentity(node: node, url: url, attributes: attributes)
+      let chunk = TranscriptSourceChunk(
         identity: identity,
-        totalBytes: finalSize,
-        offset: offset,
+        totalBytes: UInt64(data.count),
         data: data,
-        authenticatedOffset: authenticatedOffset,
-        authenticatedPrefixHash: prefixHash)
+        sourceWorkBytes: data.count,
+        remoteTransferBytes: 0)
+      return LocalTranscriptSource(
+        node: node, url: url, identity: identity, snapshot: data, chunk: chunk)
     } catch let error as TranscriptReadError {
       throw error
     } catch {
@@ -440,47 +445,43 @@ public enum TranscriptReader {
     return hash(Data(parts.joined(separator: "|").utf8))
   }
 
-  static func validateStableRead(
-    identityBefore: String,
-    prefixHashBefore: String,
-    identityAfter: String,
-    prefixHashAfter: String
-  ) throws {
-    guard identityBefore == identityAfter, prefixHashBefore == prefixHashAfter else {
-      throw TranscriptReadError.invalidCursor
-    }
-  }
-
-  private static func sha256Prefix(of handle: FileHandle, through offset: UInt64) throws -> String {
-    try GraphcodeSHA256.hex(reading: handle, through: offset)
-  }
-
-  private static func localPrefixHash(
-    node: LoopNode,
-    projectPath: String?,
-    offset: UInt64,
-    expectedIdentity: String
-  ) throws -> String {
-    let url = try localURL(node: node, projectPath: projectPath)
-    let before = try FileManager.default.attributesOfItem(atPath: url.path)
-    guard localIdentity(node: node, url: url, attributes: before) == expectedIdentity,
-      let size = (before[.size] as? NSNumber)?.uint64Value,
-      offset <= size
-    else { throw TranscriptReadError.invalidCursor }
-    let handle = try FileHandle(forReadingFrom: url)
+  private static func verifyLocalSnapshot(_ source: LocalTranscriptSource) throws -> UInt64 {
+    let handle = try FileHandle(forReadingFrom: source.url)
     defer { try? handle.close() }
-    let digest = try sha256Prefix(of: handle, through: offset)
-    let finalDigest = try sha256Prefix(of: handle, through: offset)
-    let after = try FileManager.default.attributesOfItem(atPath: url.path)
-    try validateStableRead(
-      identityBefore: expectedIdentity,
-      prefixHashBefore: digest,
-      identityAfter: localIdentity(node: node, url: url, attributes: after),
-      prefixHashAfter: finalDigest)
-    guard let finalSize = (after[.size] as? NSNumber)?.uint64Value,
-      offset <= finalSize
+    let prefix = try handle.read(upToCount: source.snapshot.count) ?? Data()
+    let attributes = try FileManager.default.attributesOfItem(atPath: source.url.path)
+    guard let size = (attributes[.size] as? NSNumber)?.uint64Value else {
+      throw TranscriptReadError.corrupt
+    }
+    guard size <= UInt64(maximumReadableTranscriptBytes) else {
+      throw TranscriptReadError.oversized
+    }
+    try validateSnapshot(
+      snapshot: source.snapshot,
+      currentPrefix: prefix,
+      initialIdentity: source.identity,
+      finalIdentity: localIdentity(node: source.node, url: source.url, attributes: attributes),
+      finalSize: size)
+    guard source.chunk.sourceWorkBytes + prefix.count <= maximumSourceWorkBytes else {
+      throw TranscriptReadError.oversized
+    }
+    return size
+  }
+
+  static func validateSnapshot(
+    snapshot: Data,
+    currentPrefix: Data,
+    initialIdentity: String,
+    finalIdentity: String,
+    finalSize: UInt64
+  ) throws {
+    guard finalSize <= UInt64(maximumReadableTranscriptBytes) else {
+      throw TranscriptReadError.oversized
+    }
+    guard snapshot == currentPrefix,
+      initialIdentity == finalIdentity,
+      finalSize >= UInt64(snapshot.count)
     else { throw TranscriptReadError.invalidCursor }
-    return digest
   }
 
   private static func localURL(node: LoopNode, projectPath: String?) throws -> URL {
@@ -526,29 +527,14 @@ public enum TranscriptReader {
 
   private static func remoteChunk(
     node: LoopNode,
-    location: RemoteProjectLocation,
-    offset: UInt64,
-    count: Int,
-    authenticatedOffset: UInt64
+    location: RemoteProjectLocation
   ) async throws -> TranscriptSourceChunk {
     let find = remoteFind(node: node, location: location)
+    let program = RemoteProjectLocation.shellQuoted(remoteSnapshotProgram)
     let script = [
       find,
       "if [ -z \"$F\" ] || [ ! -f \"$F\" ]; then echo '\(remoteMarker) missing'; exit 0; fi",
-      "I=$(stat -c '%d:%i' \"$F\" 2>/dev/null || stat -f '%d:%i' \"$F\" 2>/dev/null)",
-      "N=$(wc -c < \"$F\" 2>/dev/null | tr -d ' ')",
-      "if [ -z \"$I\" ] || [ -z \"$N\" ]; then echo '\(remoteMarker) corrupt'; exit 0; fi",
-      "if [ \(offset) -gt \"$N\" ]; then echo '\(remoteMarker) cursor'; exit 0; fi",
-      "if [ \(authenticatedOffset) -gt \"$N\" ]; then echo '\(remoteMarker) cursor'; exit 0; fi",
-      remoteHashFunction,
-      "P=$(hash_prefix \"$F\" \(authenticatedOffset)) || { echo '\(remoteMarker) corrupt'; exit 0; }",
-      "D=$(dd if=\"$F\" bs=1 skip=\(offset) count=\(count) 2>/dev/null | base64 | tr -d '\\r\\n')",
-      "I2=$(stat -c '%d:%i' \"$F\" 2>/dev/null || stat -f '%d:%i' \"$F\" 2>/dev/null)",
-      "N2=$(wc -c < \"$F\" 2>/dev/null | tr -d ' ')",
-      "P2=$(hash_prefix \"$F\" \(authenticatedOffset)) || { echo '\(remoteMarker) corrupt'; exit 0; }",
-      "if [ \"$I\" != \"$I2\" ] || [ -z \"$N2\" ] || [ \"$P\" != \"$P2\" ]; then "
-        + "echo '\(remoteMarker) cursor'; exit 0; fi",
-      "echo \"\(remoteMarker) data $I2 $N2 $P $D\"",
+      "python3 -c \(program) \"$F\" \(maximumReadableTranscriptBytes)",
     ].joined(separator: "; ")
     let invocation = location.sshInvocation(
       remoteCommand: location.remoteLoginShellCommand(script))
@@ -560,24 +546,35 @@ public enum TranscriptReader {
     guard let marker = lines.last(where: { $0.hasPrefix(remoteMarker) }) else {
       throw TranscriptReadError.transportFailure
     }
+    return try decodeRemoteSnapshotMarker(marker, node: node)
+  }
+
+  static func decodeRemoteSnapshotMarker(
+    _ marker: String,
+    node: LoopNode
+  ) throws -> TranscriptSourceChunk {
     let fields = marker.dropFirst(remoteMarker.count).split(separator: " ", maxSplits: 5)
       .map(String.init)
     switch fields.first {
     case "missing": throw TranscriptReadError.missing
+    case "oversized": throw TranscriptReadError.oversized
     case "corrupt": throw TranscriptReadError.corrupt
     case "cursor": throw TranscriptReadError.invalidCursor
     case "data":
-      guard fields.count == 5, let total = UInt64(fields[2]),
-        fields[3].count == 64,
-        let data = Data(base64Encoded: fields[4])
+      guard fields.count == 5,
+        let total = UInt64(fields[2]),
+        let work = Int(fields[3]),
+        work <= maximumSourceWorkBytes,
+        let data = Data(base64Encoded: fields[4]),
+        data.count <= maximumReadableTranscriptBytes,
+        marker.utf8.count <= maximumRemoteTransferBytes
       else { throw TranscriptReadError.corrupt }
       return TranscriptSourceChunk(
         identity: hash(Data("\(node.backend.rawValue)|\(node.id)|\(fields[1])".utf8)),
         totalBytes: total,
-        offset: offset,
         data: data,
-        authenticatedOffset: authenticatedOffset,
-        authenticatedPrefixHash: fields[3])
+        sourceWorkBytes: work,
+        remoteTransferBytes: marker.utf8.count)
     default:
       throw TranscriptReadError.transportFailure
     }
@@ -620,59 +617,38 @@ public enum TranscriptReader {
     }
   }
 
-  private static let remoteHashFunction =
-    "hash_prefix() { F=\"$1\"; N=\"$2\"; "
-    + "if command -v sha256sum >/dev/null 2>&1; then "
-    + "head -c \"$N\" \"$F\" | sha256sum | awk '{print $1}'; "
-    + "elif command -v shasum >/dev/null 2>&1; then "
-    + "head -c \"$N\" \"$F\" | shasum -a 256 | awk '{print $1}'; "
-    + "elif command -v openssl >/dev/null 2>&1; then "
-    + "head -c \"$N\" \"$F\" | openssl dgst -sha256 -r | awk '{print $1}'; "
-    + "else return 1; fi; }"
-
-  private static func remotePrefixHash(
-    node: LoopNode,
-    location: RemoteProjectLocation,
-    offset: UInt64,
-    expectedIdentity: String
-  ) async throws -> String {
-    let find = remoteFind(node: node, location: location)
-    let script = [
-      find,
-      "if [ -z \"$F\" ] || [ ! -f \"$F\" ]; then echo '\(remoteMarker) missing'; exit 0; fi",
-      "I=$(stat -c '%d:%i' \"$F\" 2>/dev/null || stat -f '%d:%i' \"$F\" 2>/dev/null)",
-      "N=$(wc -c < \"$F\" 2>/dev/null | tr -d ' ')",
-      "if [ -z \"$I\" ] || [ -z \"$N\" ] || [ \(offset) -gt \"$N\" ]; then "
-        + "echo '\(remoteMarker) cursor'; exit 0; fi",
-      remoteHashFunction,
-      "P=$(hash_prefix \"$F\" \(offset)) || { echo '\(remoteMarker) corrupt'; exit 0; }",
-      "I2=$(stat -c '%d:%i' \"$F\" 2>/dev/null || stat -f '%d:%i' \"$F\" 2>/dev/null)",
-      "P2=$(hash_prefix \"$F\" \(offset)) || { echo '\(remoteMarker) corrupt'; exit 0; }",
-      "if [ \"$I\" != \"$I2\" ] || [ \"$P\" != \"$P2\" ]; then "
-        + "echo '\(remoteMarker) cursor'; exit 0; fi",
-      "echo \"\(remoteMarker) hash $I2 $P\"",
-    ].joined(separator: "; ")
-    let invocation = location.sshInvocation(
-      remoteCommand: location.remoteLoginShellCommand(script))
-    let result = await ZmxSessionLauncher.collectRemoteOutput(invocation, location: location)
-    guard result.succeeded else { throw TranscriptReadError.transportFailure }
-    let marker = result.output.split(whereSeparator: \.isNewline)
-      .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-      .last(where: { $0.hasPrefix(remoteMarker) })
-    guard let marker else { throw TranscriptReadError.transportFailure }
-    let fields = marker.dropFirst(remoteMarker.count).split(separator: " ").map(String.init)
-    switch fields.first {
-    case "missing": throw TranscriptReadError.missing
-    case "cursor": throw TranscriptReadError.invalidCursor
-    case "corrupt": throw TranscriptReadError.corrupt
-    case "hash":
-      guard fields.count == 3, fields[2].count == 64,
-        hash(Data("\(node.backend.rawValue)|\(node.id)|\(fields[1])".utf8)) == expectedIdentity
-      else { throw TranscriptReadError.invalidCursor }
-      return fields[2]
-    default: throw TranscriptReadError.transportFailure
-    }
-  }
+  static let remoteSnapshotProgram = """
+    import base64, os, sys
+    marker = "\(remoteMarker)"
+    path = sys.argv[1]
+    limit = int(sys.argv[2])
+    try:
+        before = os.stat(path)
+        if before.st_size > limit:
+            print(marker + " oversized")
+            raise SystemExit
+        with open(path, "rb") as source:
+            snapshot = source.read(limit + 1)
+        if len(snapshot) > limit:
+            print(marker + " oversized")
+            raise SystemExit
+        with open(path, "rb") as source:
+            current = source.read(len(snapshot))
+        after = os.stat(path)
+        if (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino):
+            print(marker + " cursor")
+        elif current != snapshot or after.st_size < len(snapshot):
+            print(marker + " cursor")
+        elif after.st_size > limit:
+            print(marker + " oversized")
+        else:
+            identity = str(after.st_dev) + ":" + str(after.st_ino)
+            work = len(snapshot) + len(current)
+            encoded = base64.b64encode(snapshot).decode("ascii")
+            print(marker + " data " + identity + " " + str(after.st_size) + " " + str(work) + " " + encoded)
+    except (OSError, ValueError):
+        print(marker + " corrupt")
+    """
 
   static func hash(_ data: Data) -> String {
     var value: UInt64 = 14_695_981_039_346_656_037

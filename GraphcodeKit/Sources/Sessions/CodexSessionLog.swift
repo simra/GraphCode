@@ -53,6 +53,20 @@ public enum CodexSessionLog {
       .map(\.0)
   }
 
+  /// Every rollout in the complete Codex session hierarchy.
+  ///
+  /// Exact thread lookup uses this uncapped walk. The 40-file list above remains only
+  /// for heuristic CWD-based summary/activity readers, never for transcript authority.
+  static func allRollouts() -> [URL] {
+    guard
+      let walker = FileManager.default.enumerator(
+        at: sessionsDirectory, includingPropertiesForKeys: nil)
+    else { return [] }
+    return walker.compactMap { $0 as? URL }.filter {
+      $0.pathExtension == "jsonl" && $0.lastPathComponent.hasPrefix("rollout-")
+    }
+  }
+
   /// The directory a rollout was started in, off its `session_meta` record.
   ///
   /// Always the first line, so only the first line is read — the alternative is parsing
@@ -96,7 +110,7 @@ public enum CodexSessionLog {
   /// can never prove which node owns a rollout.
   static func rollout(forThreadID threadID: String, among rollouts: [URL]? = nil) -> URL? {
     guard UUID(uuidString: threadID) != nil else { return nil }
-    return (rollouts ?? recentRollouts()).first {
+    return (rollouts ?? allRollouts()).first {
       SessionTransplant.rolloutUUID(in: $0.lastPathComponent) == threadID
     }
   }

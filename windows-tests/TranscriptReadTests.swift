@@ -27,17 +27,12 @@ final class TranscriptReadTests: XCTestCase {
     identity: String = "synthetic-source"
   ) throws -> TranscriptPage {
     let decoded = try cursor.map(TranscriptCursor.decode)
-    let anchorLength = decoded?.anchorLength ?? 0
-    let nextOffset = decoded?.nextOffset ?? 0
-    let start = Int(nextOffset) - anchorLength
     let chunk = TranscriptSourceChunk(
       identity: identity,
       totalBytes: UInt64(data.count),
-      offset: UInt64(start),
-      data: data.subdata(in: start..<data.count),
-      authenticatedOffset: nextOffset,
-      authenticatedPrefixHash: GraphcodeSHA256.hex(Data(data.prefix(Int(nextOffset)))),
-      completeSource: data)
+      data: data,
+      sourceWorkBytes: data.count,
+      remoteTransferBytes: 0)
     return try TranscriptReader.page(
       nodeID: nodeID,
       provider: provider,
@@ -152,14 +147,74 @@ final class TranscriptReadTests: XCTestCase {
 
   func testReplacementDuringReadIsInvalidCursor() {
     XCTAssertThrowsError(
-      try TranscriptReader.validateStableRead(
-        identityBefore: "same-inode",
-        prefixHashBefore: String(repeating: "a", count: 64),
-        identityAfter: "same-inode",
-        prefixHashAfter: String(repeating: "b", count: 64))
+      try TranscriptReader.validateSnapshot(
+        snapshot: Data("before".utf8),
+        currentPrefix: Data("rewritten".utf8),
+        initialIdentity: "same-inode",
+        finalIdentity: "same-inode",
+        finalSize: 9)
     ) { error in
       XCTAssertEqual(error as? TranscriptReadError, .invalidCursor)
     }
+  }
+
+  func testRewriteBetweenParseAndFinalizationFailsWhileAppendSucceeds() throws {
+    let nodeID = UUID()
+    let source = Data(
+      [
+        #"{"type":"assistant.message","data":{"content":"first"}}"#,
+        #"{"type":"assistant.message","data":{"content":"second"}}"#,
+        #"{"type":"assistant.message","data":{"content":"third"}}"#,
+      ].joined(separator: "\n").appending("\n").utf8)
+    let chunk = TranscriptSourceChunk(
+      identity: "generation",
+      totalBytes: UInt64(source.count),
+      data: source,
+      sourceWorkBytes: source.count,
+      remoteTransferBytes: 0)
+    let first = try TranscriptReader.page(
+      nodeID: nodeID,
+      provider: .copilotCLI,
+      query: TranscriptQuery(nodeID: nodeID, maxEntries: 1),
+      cursor: nil,
+      chunk: chunk)
+    let cursorValue = try XCTUnwrap(first.nextCursor)
+    let cursor = try TranscriptCursor.decode(cursorValue)
+    let query = TranscriptQuery(nodeID: nodeID, cursor: cursorValue, maxEntries: 1)
+
+    var rewritten = source
+    rewritten[Int(cursor.nextOffset) + 10] ^= 1
+    XCTAssertThrowsError(
+      try TranscriptReader.page(
+        nodeID: nodeID, provider: .copilotCLI, query: query, cursor: cursor, chunk: chunk,
+        afterParse: {
+          TranscriptSourceChunk(
+            identity: "generation",
+            totalBytes: UInt64(rewritten.count),
+            data: rewritten,
+            sourceWorkBytes: rewritten.count,
+            remoteTransferBytes: 0)
+        })
+    ) { error in
+      XCTAssertEqual(error as? TranscriptReadError, .invalidCursor)
+    }
+
+    let appended =
+      source
+      + Data(
+        #"{"type":"assistant.message","data":{"content":"fourth"}}"#.appending("\n").utf8)
+    let page = try TranscriptReader.page(
+      nodeID: nodeID, provider: .copilotCLI, query: query, cursor: cursor, chunk: chunk,
+      afterParse: {
+        TranscriptSourceChunk(
+          identity: "generation",
+          totalBytes: UInt64(appended.count),
+          data: appended,
+          sourceWorkBytes: source.count,
+          remoteTransferBytes: 0)
+      })
+    XCTAssertTrue(page.hasMore)
+    XCTAssertNotNil(page.nextCursor)
   }
 
   func testStreamingPrefixDigestMatchesInMemorySHA256() throws {
@@ -268,6 +323,96 @@ final class TranscriptReadTests: XCTestCase {
     XCTAssertTrue(remote.contains("SELECT id FROM threads WHERE id="))
     XCTAssertTrue(remote.contains("rollout-*-$T.jsonl"))
     XCTAssertFalse(remote.contains(#""cwd":"#))
+  }
+
+  func testCodexExactLookupSearchesBeyondRecentRolloutLimit() throws {
+    let root = FileManager.default.temporaryDirectory
+      .appendingPathComponent("transcript-codex-complete-\(UUID())", isDirectory: true)
+    let targetThread = UUID().uuidString.lowercased()
+    let old = root.appendingPathComponent("2025/01/01", isDirectory: true)
+    try FileManager.default.createDirectory(at: old, withIntermediateDirectories: true)
+    let target = old.appendingPathComponent(
+      "rollout-2025-01-01T00-00-00-\(targetThread).jsonl")
+    try Data().write(to: target)
+    for index in 0..<(CodexSessionLog.recentRolloutLimit + 5) {
+      let directory = root.appendingPathComponent(
+        "2026/01/\(String(format: "%02d", index % 28 + 1))", isDirectory: true)
+      try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+      let rollout = directory.appendingPathComponent(
+        "rollout-2026-01-01T00-00-\(String(format: "%02d", index))-\(UUID().uuidString).jsonl")
+      try Data().write(to: rollout)
+      try FileManager.default.setAttributes(
+        [.modificationDate: Date().addingTimeInterval(Double(index + 1))],
+        ofItemAtPath: rollout.path)
+    }
+    defer { try? FileManager.default.removeItem(at: root) }
+    let original = CodexSessionLog.sessionsDirectory
+    CodexSessionLog.sessionsDirectory = root
+    defer { CodexSessionLog.sessionsDirectory = original }
+
+    XCTAssertFalse(CodexSessionLog.recentRollouts().contains(target))
+    XCTAssertEqual(
+      TranscriptReader.codexLocalURL(
+        nodeID: UUID(), banked: targetThread, database: nil),
+      target)
+  }
+
+  func testSourceWorkIsBoundedIndependentOfCursorDepth() throws {
+    let record = #"{"type":"assistant.message","data":{"content":"bounded"}}"# + "\n"
+    let source = Data(String(repeating: record, count: 50).utf8)
+    let nodeID = UUID()
+    var cursor: String?
+    var pages = 0
+    repeat {
+      let chunk = TranscriptSourceChunk(
+        identity: "bounded-source",
+        totalBytes: UInt64(source.count),
+        data: source,
+        sourceWorkBytes: source.count * 2,
+        remoteTransferBytes: source.base64EncodedString().utf8.count)
+      XCTAssertLessThanOrEqual(chunk.sourceWorkBytes, TranscriptReader.maximumSourceWorkBytes)
+      XCTAssertLessThanOrEqual(
+        chunk.remoteTransferBytes, TranscriptReader.maximumRemoteTransferBytes)
+      let result = try TranscriptReader.page(
+        nodeID: nodeID,
+        provider: .copilotCLI,
+        query: TranscriptQuery(nodeID: nodeID, cursor: cursor, maxEntries: 1),
+        cursor: try cursor.map(TranscriptCursor.decode),
+        chunk: chunk)
+      cursor = result.nextCursor
+      pages += 1
+    } while cursor != nil
+    XCTAssertGreaterThan(pages, 40)
+
+    var node = LoopNode(
+      id: nodeID, title: "Remote", loopType: .turnBased, firstInstruction: "test")
+    node.backend = .copilotCLI
+    let remoteData = Data(count: TranscriptReader.maximumReadableTranscriptBytes)
+    let marker =
+      TranscriptReader.remoteMarker + " data 1:2 \(remoteData.count) "
+      + "\(remoteData.count * 2) \(remoteData.base64EncodedString())"
+    let remoteChunk = try TranscriptReader.decodeRemoteSnapshotMarker(marker, node: node)
+    XCTAssertEqual(remoteChunk.sourceWorkBytes, TranscriptReader.maximumSourceWorkBytes)
+    XCTAssertLessThanOrEqual(
+      remoteChunk.remoteTransferBytes, TranscriptReader.maximumRemoteTransferBytes)
+    XCTAssertEqual(remoteChunk.data.count, TranscriptReader.maximumReadableTranscriptBytes)
+
+    let oversized = TranscriptSourceChunk(
+      identity: "oversized",
+      totalBytes: UInt64(TranscriptReader.maximumReadableTranscriptBytes + 1),
+      data: Data(count: TranscriptReader.maximumReadableTranscriptBytes + 1),
+      sourceWorkBytes: TranscriptReader.maximumReadableTranscriptBytes + 1,
+      remoteTransferBytes: 0)
+    XCTAssertThrowsError(
+      try TranscriptReader.page(
+        nodeID: nodeID,
+        provider: .copilotCLI,
+        query: TranscriptQuery(nodeID: nodeID),
+        cursor: nil,
+        chunk: oversized)
+    ) { error in
+      XCTAssertEqual(error as? TranscriptReadError, .oversized)
+    }
   }
 
   #if canImport(SQLite3)

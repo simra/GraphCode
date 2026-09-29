@@ -61,20 +61,30 @@ cursor binds:
 - a SHA-256 commitment to every source byte before that offset;
 - the length and hash of the preceding complete record.
 
+Each request reads one complete, bounded source snapshot. Parsing, validation of the
+previous prefix, the exact served byte range, and the new prefix commitment all use that
+same immutable byte buffer. Before finalization, a local read re-reads only that bounded
+snapshot length and requires byte-for-byte equality; append-only growth is accepted and
+causes `hasMore`, while rewrite/truncate/replacement fails. The remote Python probe does
+the same snapshot and prefix verification on the remote host before returning the
+snapshot. There is no parse-then-later-prefix-hash race.
+
 Appending after a page does not change the committed prefix, offset, or anchor, so the
-cursor remains valid and newly appended complete records appear on later pages. The
-daemon hashes the committed prefix before and after each bounded read; local hashing is
-streamed and remote hashing emits only the fixed-size digest. Replacement during a read,
-same-inode truncate/regrow, an earlier-prefix rewrite, compaction, provider change, node
+cursor remains valid and newly appended complete records appear on later pages.
+Same-inode truncate/regrow, an earlier-prefix rewrite, compaction, provider change, node
 change, or alteration at the page boundary returns `transcriptInvalidCursor`; the daemon
 never guesses a new position or remaps this integrity failure to a transport failure.
 
 Requests default to 32 entries / 64 KiB and are capped at 64 entries / 128 KiB of encoded
 entry JSON. A normalized entry is capped at 32 KiB and a provider source record at
-256 KiB. The full response envelope is preflighted against the v2 1 MiB frame ceiling.
-An entry, source record, or response that cannot fit fails with `transcriptOversized`
-rather than being silently truncated. A final partially appended JSONL line is not
-consumed until its newline arrives.
+256 KiB. The first contract also imposes a 512 KiB maximum readable transcript extent.
+Every local or remote request therefore examines at most two 512 KiB buffers (snapshot
+plus verification), independent of cursor depth. Remote transfer of the base64 snapshot
+is capped below the v2 1 MiB frame limit, and the correlated response is separately
+preflighted against that limit. A source beyond 512 KiB, entry, source record, transfer,
+or response that cannot fit fails with `transcriptOversized` rather than being silently
+truncated. A final partially appended JSONL line is not consumed until its newline
+arrives.
 
 ## Errors
 
