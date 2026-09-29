@@ -437,7 +437,11 @@ test("opens a Quick Chat as an interactive terminal workspace", async ({
         };
         return target.__GRAPHCODE_E2E_NATIVE_COMMANDS__
           .filter(({ command }) => command === "open_terminal")
-          .map(({ args }) => args.nodeId);
+          .map(({ args }) => {
+            const terminalTarget = args.target as
+              { kind: "node"; nodeId: string } | undefined;
+            return terminalTarget?.nodeId;
+          });
       }, quickChat.id),
     )
     .toContain(quickChat.id);
