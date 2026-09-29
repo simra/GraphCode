@@ -35,7 +35,7 @@ export async function listenForSettingsChanges(
   return listen<unknown>("daemon://frame", ({ payload }) => {
     const envelope = decodeEnvelope(payload);
     if (
-      (envelope.kind === "event" || envelope.kind === "response") &&
+      envelope.kind === "event" &&
       envelope.event?.type === "settingsChanged"
     ) {
       onChange({

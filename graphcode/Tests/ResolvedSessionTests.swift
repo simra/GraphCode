@@ -269,4 +269,14 @@ struct ResolvedSessionTests {
     #expect(decoded.endsResolvedSessionsAfterMinutes == 0)
     #expect(decoded.resolvedSessionGrace == nil)
   }
+
+  @Test
+  func handEditedGraceMinutesCannotOverflowDurationConversion() {
+    var settings = GraphcodeSettings()
+    settings.endsResolvedSessionsAfterMinutes = Int.max
+
+    #expect(
+      settings.resolvedSessionGrace
+        == .seconds(GraphcodeSettings.maximumResolvedSessionGraceMinutes * 60))
+  }
 }

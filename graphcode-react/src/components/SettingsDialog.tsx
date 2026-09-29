@@ -18,6 +18,7 @@ import {
   changedSettingsFields,
   copilotInstallCommand,
   graphcodeSettingsSchema,
+  MAX_RESOLVED_SESSION_GRACE_MINUTES,
   rebaseSettingsDraft,
   validateSettingsDraft,
   type EditableSettingsField,
@@ -165,7 +166,9 @@ function SettingFrame({
         <label htmlFor={`settings-${field}`}>{label}</label>
         <span className="settings-effect">{effectLabel(snapshot, field)}</span>
       </div>
-      <div className="settings-control">{children}</div>
+      <fieldset className="settings-control" disabled={Boolean(unavailable)}>
+        {children}
+      </fieldset>
       <p id={descriptionId}>{unavailable ?? description}</p>
     </div>
   );
@@ -433,13 +436,14 @@ export function SettingsEditor({
           snapshot={snapshot}
           field="endsResolvedSessionsAfterMinutes"
           label="End a finished loop's session"
-          description="Use zero to keep sessions indefinitely. The loop, transcript, and history remain after its process ends."
+          description={`Use zero to keep sessions indefinitely, or at most ${MAX_RESOLVED_SESSION_GRACE_MINUTES.toLocaleString("en-US")} minutes. The loop, transcript, and history remain after its process ends.`}
         >
           <div className="settings-number-row">
             <input
               id="settings-endsResolvedSessionsAfterMinutes"
               type="number"
               min={0}
+              max={MAX_RESOLVED_SESSION_GRACE_MINUTES}
               step={1}
               value={draft.endsResolvedSessionsAfterMinutes}
               aria-invalid={Boolean(errors.endsResolvedSessionsAfterMinutes)}

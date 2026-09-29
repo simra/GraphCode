@@ -67,3 +67,9 @@ refreshes a clean form or rebases dirty fields over the newer snapshot. A
 `settingsConflict` response performs the same reload-and-reapply flow; the user reviews and
 saves again rather than the client retrying an unseen merge. Corrupt and unavailable files
 remain errors with an explicit repair-and-reload path.
+
+Resolved-session grace is entered as whole minutes. The Tauri form accepts zero through
+`150,119,987,579,016` (`floor(Number.MAX_SAFE_INTEGER / 60)`), ensuring both that the
+browser preserves the integer exactly and that conversion to seconds fits Swift's
+64-bit `Int`. `GraphcodeSettings.resolvedSessionGrace` independently clamps hand-edited
+larger values before multiplying, so malformed-but-decodable settings cannot overflow.

@@ -29,6 +29,7 @@ vi.mock("../bridge/settings", () => ({
 
 import {
   editableSettingsFields,
+  MAX_RESOLVED_SESSION_GRACE_MINUTES,
   settingsDefaults,
 } from "../forms/settingsForm";
 import { SettingsDialog } from "./SettingsDialog";
@@ -202,6 +203,45 @@ describe("SettingsDialog", () => {
       "Use zero to keep sessions",
     );
     expect(settingsBridge.save).not.toHaveBeenCalled();
+    expect(grace.max).toBe(String(MAX_RESOLVED_SESSION_GRACE_MINUTES));
+  });
+
+  it("disables every custom control descendant when capabilities are omitted", async () => {
+    settingsBridge.load.mockResolvedValueOnce({
+      ...snapshot,
+      settings: {
+        ...snapshot.settings,
+        copilotPreferredVersion: "1.2.3",
+      },
+      fields: snapshot.fields.filter(
+        ({ field }) =>
+          field !== "copilotPreferredVersion" &&
+          field !== "endsResolvedSessionsAfterMinutes",
+      ),
+    });
+    const rendered = await renderDialog();
+    roots.push(rendered.root);
+
+    for (const field of [
+      "copilotPreferredVersion",
+      "endsResolvedSessionsAfterMinutes",
+    ]) {
+      const frame = rendered.container.querySelector(
+        `[data-setting="${field}"]`,
+      )!;
+      const descendants = [
+        ...frame.querySelectorAll<HTMLElement>("input, select, button"),
+      ];
+      expect(descendants.length).toBeGreaterThan(0);
+      expect(descendants.every((element) => element.matches(":disabled"))).toBe(
+        true,
+      );
+    }
+    expect(
+      rendered.container.querySelector<HTMLInputElement>(
+        "#settings-copilot-version-value",
+      ),
+    ).not.toBeNull();
   });
 
   it("installs the listener before loading and retries after listener failure", async () => {

@@ -53,6 +53,15 @@ final class SharedSettingsContractTests: XCTestCase {
     XCTAssertEqual(saved["daemonHeartbeatEnabled"] as? Bool, true)
   }
 
+  func testResolvedSessionGraceClampsHandEditedOverflow() {
+    var settings = GraphcodeSettings()
+    settings.endsResolvedSessionsAfterMinutes = Int.max
+
+    XCTAssertEqual(
+      settings.resolvedSessionGrace,
+      .seconds(GraphcodeSettings.maximumResolvedSessionGraceMinutes * 60))
+  }
+
   func testConcurrentWritersReceiveAnExplicitRevisionConflict() throws {
     let url = try temporarySettings(copying: fixture("macos-defaults"))
     let original = try GraphcodeSettingsStore.snapshot(from: url)

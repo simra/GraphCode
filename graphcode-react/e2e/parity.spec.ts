@@ -217,6 +217,7 @@ async function installTauriMock(page: Page) {
           command: string;
           args: Record<string, unknown>;
         }[];
+        __GRAPHCODE_E2E_SETTINGS_CONFLICT_ONCE__: boolean;
       };
 
       const target = window as TauriMockWindow;
@@ -226,8 +227,10 @@ async function installTauriMock(page: Page) {
       >();
       const listeners = new Map<string, number[]>();
       let nextCallbackId = 1;
+      let currentSettings = sharedSettings;
       target.__GRAPHCODE_E2E_COMMANDS__ = [];
       target.__GRAPHCODE_E2E_NATIVE_COMMANDS__ = [];
+      target.__GRAPHCODE_E2E_SETTINGS_CONFLICT_ONCE__ = false;
 
       function runCallback(id: number, payload: unknown) {
         const registered = callbacks.get(id);
@@ -285,14 +288,47 @@ async function installTauriMock(page: Page) {
             return { version: 1, projects: {} };
           }
           if (command === "load_settings") {
-            return sharedSettings;
+            const loaded = currentSettings;
+            queueMicrotask(() => {
+              emit("daemon://frame", {
+                version: 2,
+                kind: "response",
+                requestID: crypto.randomUUID(),
+                event: { settingsChanged: { _0: loaded } },
+              });
+            });
+            return loaded;
           }
           if (command === "update_settings") {
-            return {
-              ...sharedSettings,
+            if (target.__GRAPHCODE_E2E_SETTINGS_CONFLICT_ONCE__) {
+              target.__GRAPHCODE_E2E_SETTINGS_CONFLICT_ONCE__ = false;
+              currentSettings = {
+                ...currentSettings,
+                revision: "settings-revision-conflict",
+                settings: {
+                  ...currentSettings.settings,
+                  mailroomEnabled: false,
+                },
+              };
+              throw {
+                code: "settingsConflict",
+                message: "settings changed in another client",
+              };
+            }
+            currentSettings = {
+              ...currentSettings,
               revision: "settings-revision-2",
               settings: args.settings,
             };
+            queueMicrotask(() => {
+              emit("daemon://frame", {
+                version: 2,
+                kind: "response",
+                requestID: crypto.randomUUID(),
+                event: { settingsChanged: { _0: currentSettings } },
+              });
+            });
+            return currentSettings;
           }
           if (command === "send_daemon_command") {
             target.__GRAPHCODE_E2E_COMMANDS__.push(args.command);
@@ -423,6 +459,9 @@ test("retypes a timed loop to a goal loop in place", async ({ page }) => {
     name: "Change Timed worker to Goal",
   });
   await expect(dialog).toBeVisible();
+  await expect(
+    dialog.getByText("Settings refreshed from another client."),
+  ).toHaveCount(0);
   await dialog
     .getByRole("textbox", { name: "What does done look like?" })
     .fill("The status check passes");
@@ -462,6 +501,32 @@ test("retypes a timed loop to a goal loop in place", async ({ page }) => {
         },
       },
     });
+});
+
+test("keeps conflict reload source distinct from correlated frame responses", async ({
+  page,
+}) => {
+  await page.evaluate(() => {
+    const target = window as Window & {
+      __GRAPHCODE_E2E_SETTINGS_CONFLICT_ONCE__: boolean;
+    };
+    target.__GRAPHCODE_E2E_SETTINGS_CONFLICT_ONCE__ = true;
+  });
+  await page.getByRole("button", { name: "Settings", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: "Settings" });
+  await dialog.getByLabel("Daemon heartbeat (experimental)").check();
+  await dialog.getByRole("button", { name: "Save", exact: true }).click();
+
+  await expect(dialog.getByRole("status")).toContainText(
+    "revision changed before your save",
+  );
+  await expect(
+    dialog.getByText("Settings refreshed from another client."),
+  ).toHaveCount(0);
+  await expect(
+    dialog.getByLabel("Daemon heartbeat (experimental)"),
+  ).toBeChecked();
+  await expect(dialog.getByLabel("Mailroom")).not.toBeChecked();
 });
 
 test("opens a Quick Chat as an interactive terminal workspace", async ({

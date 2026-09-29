@@ -30,6 +30,12 @@ const copilotPermissionsSchema = z.enum([
   "yoloAutopilot",
 ]);
 
+// JavaScript must preserve the integer exactly, and converting minutes to seconds must
+// remain inside Swift's 64-bit Int on supported platforms.
+export const MAX_RESOLVED_SESSION_GRACE_MINUTES = Math.floor(
+  Number.MAX_SAFE_INTEGER / 60,
+);
+
 export const graphcodeSettingsSchema = z
   .object({
     defaultBackend: backendSchema.default("claudeCode"),
@@ -125,11 +131,11 @@ export function validateSettingsDraft(
 ): SettingsValidationErrors {
   const errors: SettingsValidationErrors = {};
   if (
-    !Number.isInteger(draft.endsResolvedSessionsAfterMinutes) ||
-    draft.endsResolvedSessionsAfterMinutes < 0
+    !Number.isSafeInteger(draft.endsResolvedSessionsAfterMinutes) ||
+    draft.endsResolvedSessionsAfterMinutes < 0 ||
+    draft.endsResolvedSessionsAfterMinutes > MAX_RESOLVED_SESSION_GRACE_MINUTES
   ) {
-    errors.endsResolvedSessionsAfterMinutes =
-      "Use zero to keep sessions, or a whole number of minutes.";
+    errors.endsResolvedSessionsAfterMinutes = `Use zero to keep sessions, or a whole number up to ${MAX_RESOLVED_SESSION_GRACE_MINUTES.toLocaleString("en-US")} minutes.`;
   }
   return errors;
 }

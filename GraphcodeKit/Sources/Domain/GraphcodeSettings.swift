@@ -323,8 +323,15 @@ public struct GraphcodeSettings: Codable, Equatable, Sendable {
   /// an optional because an encoded `nil` is an absent key, which reads back as the default.
   public var endsResolvedSessionsAfterMinutes: Int
 
+  /// Multiplying by sixty must stay representable when constructing `Duration`.
+  public static let maximumResolvedSessionGraceMinutes = Int.max / 60
+
   public var resolvedSessionGrace: Duration? {
-    endsResolvedSessionsAfterMinutes > 0 ? .seconds(endsResolvedSessionsAfterMinutes * 60) : nil
+    guard endsResolvedSessionsAfterMinutes > 0 else { return nil }
+    let minutes = min(
+      endsResolvedSessionsAfterMinutes, Self.maximumResolvedSessionGraceMinutes)
+    let seconds = minutes.multipliedReportingOverflow(by: 60)
+    return .seconds(seconds.overflow ? Int.max : seconds.partialValue)
   }
 
   /// Whether graphcode picks a model for loops nobody chose one for.

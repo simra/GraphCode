@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   graphcodeSettingsSchema,
+  MAX_RESOLVED_SESSION_GRACE_MINUTES,
   rebaseSettingsDraft,
   settingsDefaults,
   validateSettingsDraft,
@@ -41,9 +42,27 @@ describe("settings form contract", () => {
         endsResolvedSessionsAfterMinutes: -1,
       }),
     ).toEqual({
-      endsResolvedSessionsAfterMinutes:
-        "Use zero to keep sessions, or a whole number of minutes.",
+      endsResolvedSessionsAfterMinutes: `Use zero to keep sessions, or a whole number up to ${MAX_RESOLVED_SESSION_GRACE_MINUTES.toLocaleString("en-US")} minutes.`,
     });
+    expect(
+      validateSettingsDraft({
+        ...settingsDefaults,
+        endsResolvedSessionsAfterMinutes: Number.MAX_SAFE_INTEGER + 1,
+      }),
+    ).toHaveProperty("endsResolvedSessionsAfterMinutes");
+    expect(
+      validateSettingsDraft({
+        ...settingsDefaults,
+        endsResolvedSessionsAfterMinutes:
+          MAX_RESOLVED_SESSION_GRACE_MINUTES + 1,
+      }),
+    ).toHaveProperty("endsResolvedSessionsAfterMinutes");
+    expect(
+      validateSettingsDraft({
+        ...settingsDefaults,
+        endsResolvedSessionsAfterMinutes: MAX_RESOLVED_SESSION_GRACE_MINUTES,
+      }),
+    ).toEqual({});
   });
 
   it("rebases only locally edited fields onto a newer snapshot", () => {
