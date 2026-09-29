@@ -208,7 +208,7 @@ export function TranscriptPanel({
             >
               <strong>{state.error.title}</strong>
               <p>{state.error.message}</p>
-              {state.error.kind !== "invalidCursor" ? (
+              {state.error.retryable ? (
                 <button
                   type="button"
                   disabled={state.loadingInitial || state.loadingMore}

@@ -60,7 +60,7 @@ describe("transcriptHistoryReducer", () => {
       type: "loadFailed",
       cursor: "cursor-1",
       error: transcriptHistoryError(
-        new Error("transcriptTransportFailure: disconnected"),
+        "graphcoded refused the command (transcriptTransportFailure): disconnected",
       ),
     });
 
@@ -82,16 +82,50 @@ describe("transcriptHistoryReducer", () => {
   });
 
   it.each([
-    ["transcriptUnauthorized", "unauthorized"],
-    ["transcriptMissing", "missing"],
-    ["transcriptUnsupportedProvider", "unsupported"],
-    ["transcriptOversized", "oversized"],
-    ["transcriptInvalidCursor", "invalidCursor"],
-    ["transcriptCorrupt", "corrupt"],
-    ["transcriptTransportFailure", "transport"],
-  ] as const)("maps %s into an actionable %s state", (code, kind) => {
-    expect(transcriptHistoryError(new Error(`${code}: fixture`)).kind).toBe(
-      kind,
-    );
+    ["transcriptUnauthorized", "unauthorized", false],
+    ["transcriptMissing", "missing", true],
+    ["transcriptCorrupt", "corrupt", false],
+    ["transcriptOversized", "oversized", false],
+    ["transcriptInvalidBounds", "invalidBounds", false],
+    ["transcriptInvalidCursor", "invalidCursor", false],
+    ["transcriptUnsupportedProvider", "unsupported", false],
+    ["transcriptTransportFailure", "transport", true],
+  ] as const)(
+    "maps the production %s rejection into an actionable %s state",
+    (code, kind, retryable) => {
+      expect(
+        transcriptHistoryError(
+          `graphcoded refused the command (${code}): fixture`,
+        ),
+      ).toMatchObject({ kind, retryable });
+    },
+  );
+
+  it("gives invalid cursors fresh-snapshot guidance without retrying the stale cursor", () => {
+    expect(
+      transcriptHistoryError(
+        "graphcoded refused the command (transcriptInvalidCursor): source changed",
+      ),
+    ).toEqual({
+      kind: "invalidCursor",
+      title: "The transcript changed while paging",
+      message:
+        "Close and reopen history to start from a fresh bounded snapshot. Already loaded entries remain visible.",
+      retryable: false,
+    });
+  });
+
+  it("keeps unknown production bridge failures generic and retryable", () => {
+    expect(
+      transcriptHistoryError(
+        "graphcoded refused the command (futureCode): fixture",
+      ),
+    ).toEqual({
+      kind: "unknown",
+      title: "History could not be loaded",
+      message:
+        "Reconnect to graphcoded and try again. The live terminal was not affected.",
+      retryable: true,
+    });
   });
 });

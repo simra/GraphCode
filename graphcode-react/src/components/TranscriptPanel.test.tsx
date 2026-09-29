@@ -58,7 +58,7 @@ describe("TranscriptPanel", () => {
     await act(async () => {
       root.render(
         <TranscriptPanel
-          projectPath="C:\\project"
+          projectPath={"C:\\project"}
           node={node}
           onClose={() => undefined}
           readPage={readPage}
@@ -123,7 +123,7 @@ describe("TranscriptPanel", () => {
     await act(async () => {
       root.render(
         <TranscriptPanel
-          projectPath="C:\\project"
+          projectPath={"C:\\project"}
           node={node}
           onClose={() => undefined}
           readPage={readPage}
@@ -133,7 +133,7 @@ describe("TranscriptPanel", () => {
     await act(async () => {
       root.render(
         <TranscriptPanel
-          projectPath="C:\\project"
+          projectPath={"C:\\project"}
           node={{ ...node, id: "node-2", title: "New node", backend: "codex" }}
           onClose={() => undefined}
           readPage={readPage}
@@ -182,13 +182,13 @@ describe("TranscriptPanel", () => {
         hasMore: true,
       })
       .mockRejectedValueOnce(
-        new Error("transcriptInvalidCursor: source changed"),
+        "graphcoded refused the command (transcriptInvalidCursor): source changed",
       );
 
     await act(async () => {
       root.render(
         <TranscriptPanel
-          projectPath="C:\\project"
+          projectPath={"C:\\project"}
           node={node}
           onClose={() => undefined}
           readPage={readPage}
@@ -206,6 +206,78 @@ describe("TranscriptPanel", () => {
       "The transcript changed while paging",
     );
     expect(container.textContent).not.toContain("Load more history");
+    expect(container.textContent).not.toContain("Try again");
+  });
+
+  it("retries a recoverable production transport rejection with the same cursor", async () => {
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    const readPage = vi
+      .fn()
+      .mockResolvedValueOnce({
+        nodeID: node.id,
+        provider: "copilotCLI",
+        entries: [
+          {
+            sourceOffset: 1,
+            kind: "status",
+            text: "Already loaded",
+            redactions: [],
+          },
+        ],
+        nextCursor: "next",
+        hasMore: true,
+      })
+      .mockRejectedValueOnce(
+        "graphcoded refused the command (transcriptTransportFailure): disconnected",
+      )
+      .mockResolvedValueOnce({
+        nodeID: node.id,
+        provider: "copilotCLI",
+        entries: [
+          {
+            sourceOffset: 2,
+            kind: "status",
+            text: "Recovered page",
+            redactions: [],
+          },
+        ],
+        hasMore: false,
+      });
+
+    await act(async () => {
+      root.render(
+        <TranscriptPanel
+          projectPath={"C:\\project"}
+          node={node}
+          onClose={() => undefined}
+          readPage={readPage}
+        />,
+      );
+    });
+    await act(async () => {
+      Array.from(container.querySelectorAll("button"))
+        .find((button) => button.textContent === "Load more history")!
+        .click();
+    });
+    expect(container.textContent).toContain(
+      "History could not reach the transcript source",
+    );
+
+    await act(async () => {
+      Array.from(container.querySelectorAll("button"))
+        .find((button) => button.textContent === "Try again")!
+        .click();
+    });
+    expect(readPage).toHaveBeenLastCalledWith(
+      "C:\\project",
+      node.id,
+      "next",
+      32,
+      64 * 1024,
+    );
+    expect(container.textContent).toContain("Recovered page");
   });
 
   it("focuses the panel controls and closes with Escape", async () => {
@@ -220,7 +292,7 @@ describe("TranscriptPanel", () => {
     await act(async () => {
       root.render(
         <TranscriptPanel
-          projectPath="C:\\project"
+          projectPath={"C:\\project"}
           node={node}
           onClose={onClose}
           readPage={async () => ({

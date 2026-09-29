@@ -29,6 +29,36 @@ export interface DaemonConnection {
   dispose(): Promise<void>;
 }
 
+export class DaemonBridgeError extends Error {
+  constructor(
+    readonly code: string,
+    message: string,
+  ) {
+    super(message);
+    this.name = "DaemonBridgeError";
+  }
+}
+
+export function daemonBridgeError(error: unknown): DaemonBridgeError {
+  if (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    "message" in error &&
+    typeof error.code === "string" &&
+    typeof error.message === "string"
+  ) {
+    return new DaemonBridgeError(error.code, error.message);
+  }
+  const message = error instanceof Error ? error.message : String(error);
+  const refused = message.match(
+    /^graphcoded refused the command \(([^)]+)\):\s*(.*)$/s,
+  );
+  return refused
+    ? new DaemonBridgeError(refused[1], refused[2])
+    : new DaemonBridgeError("daemonUnavailable", message);
+}
+
 export async function startDaemonConnection(
   handlers: DaemonConnectionHandlers,
 ): Promise<DaemonConnection> {
@@ -75,10 +105,15 @@ export async function startDaemonConnection(
 export async function sendDaemonCommand(
   command: object,
 ): Promise<DaemonWireEnvelope> {
-  const raw = await invoke<unknown>("send_daemon_command", { command });
+  let raw: unknown;
+  try {
+    raw = await invoke<unknown>("send_daemon_command", { command });
+  } catch (error) {
+    throw daemonBridgeError(error);
+  }
   const envelope = decodeEnvelope(raw);
   if (envelope.kind === "error") {
-    throw new Error(`${envelope.error.code}: ${envelope.error.message}`);
+    throw new DaemonBridgeError(envelope.error.code, envelope.error.message);
   }
   return envelope;
 }

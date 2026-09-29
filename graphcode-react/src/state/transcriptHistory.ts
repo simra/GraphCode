@@ -3,12 +3,14 @@ import type {
   TranscriptPage,
   TranscriptRedaction,
 } from "../protocol/domain";
+import { daemonBridgeError } from "../bridge/daemon";
 
 export type TranscriptHistoryErrorKind =
   | "unauthorized"
   | "missing"
   | "unsupported"
   | "oversized"
+  | "invalidBounds"
   | "invalidCursor"
   | "corrupt"
   | "transport"
@@ -18,6 +20,7 @@ export interface TranscriptHistoryError {
   kind: TranscriptHistoryErrorKind;
   title: string;
   message: string;
+  retryable: boolean;
 }
 
 export interface TranscriptHistoryState {
@@ -105,15 +108,15 @@ function appendOrderedEntries(
 }
 
 export function transcriptHistoryError(error: unknown): TranscriptHistoryError {
-  const message = error instanceof Error ? error.message : String(error);
-  const code = message.split(":", 1)[0];
-  switch (code) {
+  const failure = daemonBridgeError(error);
+  switch (failure.code) {
     case "transcriptUnauthorized":
       return {
         kind: "unauthorized",
         title: "History is not authorized",
         message:
           "Reopen this project and select the loop again. GraphCode will not reveal whether transcripts outside the joined project exist.",
+        retryable: false,
       };
     case "transcriptMissing":
       return {
@@ -121,6 +124,7 @@ export function transcriptHistoryError(error: unknown): TranscriptHistoryError {
         title: "No transcript was found",
         message:
           "The provider session may not have started yet, or its retained transcript may have expired.",
+        retryable: true,
       };
     case "transcriptUnsupportedProvider":
       return {
@@ -128,6 +132,7 @@ export function transcriptHistoryError(error: unknown): TranscriptHistoryError {
         title: "This provider does not support structured history",
         message:
           "GraphCode will not substitute raw terminal output for a transcript on this provider.",
+        retryable: false,
       };
     case "transcriptOversized":
       return {
@@ -135,6 +140,7 @@ export function transcriptHistoryError(error: unknown): TranscriptHistoryError {
         title: "This transcript is too large to read safely",
         message:
           "The daemon rejected the bounded read rather than truncating or loading an unbounded session.",
+        retryable: false,
       };
     case "transcriptInvalidCursor":
       return {
@@ -142,14 +148,23 @@ export function transcriptHistoryError(error: unknown): TranscriptHistoryError {
         title: "The transcript changed while paging",
         message:
           "Close and reopen history to start from a fresh bounded snapshot. Already loaded entries remain visible.",
+        retryable: false,
+      };
+    case "transcriptInvalidBounds":
+      return {
+        kind: "invalidBounds",
+        title: "The history request exceeded safe bounds",
+        message:
+          "GraphCode requested a page outside the daemon's safety limits. Close history and retry after updating or restarting the app.",
+        retryable: false,
       };
     case "transcriptCorrupt":
-    case "transcriptInvalidBounds":
       return {
         kind: "corrupt",
         title: "The transcript could not be decoded safely",
         message:
-          "The provider history is malformed or violated the daemon's bounded transcript contract.",
+          "The provider history is malformed and cannot be rendered as a structured transcript.",
+        retryable: false,
       };
     case "transcriptTransportFailure":
       return {
@@ -157,6 +172,7 @@ export function transcriptHistoryError(error: unknown): TranscriptHistoryError {
         title: "History could not reach the transcript source",
         message:
           "Check the project connection and try again. Already loaded entries remain visible.",
+        retryable: true,
       };
     default:
       return {
@@ -164,6 +180,7 @@ export function transcriptHistoryError(error: unknown): TranscriptHistoryError {
         title: "History could not be loaded",
         message:
           "Reconnect to graphcoded and try again. The live terminal was not affected.",
+        retryable: true,
       };
   }
 }
