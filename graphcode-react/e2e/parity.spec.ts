@@ -13,6 +13,57 @@ const quickChat = {
     presence: { presence: "idle", confidence: "reported" },
   },
 };
+const settingsFixture = {
+  settings: {
+    defaultBackend: "claudeCode",
+    defaultModelTier: "standard",
+    codexApprovals: "yolo",
+    openCodePermissions: "auto",
+    piProjectTrust: "approve",
+    claudePermissionMode: "auto",
+    copilotPermissions: "allowEverything",
+    copilotPreferredVersion: "",
+    briefsSessionsAboutTheGraph: true,
+    endsResolvedSessionsAfterMinutes: 10,
+    autoSelectsModel: false,
+    worktreePolicies: {},
+    showsActivityStrip: false,
+    betaUpdates: false,
+    summarisesLoops: false,
+    summaryUsesModel: false,
+    visualisesSummaries: false,
+    daemonHeartbeatEnabled: false,
+    mailroomEnabled: true,
+    keepsMacAwakeWhileLoopsRun: false,
+    futureSetting: { retained: true },
+  },
+  revision: "settings-revision-1",
+  exists: true,
+  supportDirectory: "C:\\fixtures\\.graphcode",
+  filePath: "C:\\fixtures\\.graphcode\\settings.json",
+  fields: [
+    { field: "defaultBackend", timing: "nextLoop" },
+    { field: "defaultModelTier", timing: "nextLoop" },
+    { field: "autoSelectsModel", timing: "nextLoop" },
+    { field: "codexApprovals", timing: "nextSession" },
+    { field: "openCodePermissions", timing: "nextSession" },
+    { field: "piProjectTrust", timing: "nextSession" },
+    { field: "claudePermissionMode", timing: "nextSession" },
+    { field: "copilotPermissions", timing: "nextSession" },
+    { field: "copilotPreferredVersion", timing: "nextSession" },
+    { field: "briefsSessionsAboutTheGraph", timing: "nextSession" },
+    { field: "endsResolvedSessionsAfterMinutes", timing: "live" },
+    { field: "worktreePolicies", timing: "live" },
+    { field: "showsActivityStrip", timing: "live" },
+    { field: "betaUpdates", timing: "live" },
+    { field: "summarisesLoops", timing: "live" },
+    { field: "summaryUsesModel", timing: "live" },
+    { field: "visualisesSummaries", timing: "live" },
+    { field: "daemonHeartbeatEnabled", timing: "live" },
+    { field: "mailroomEnabled", timing: "live" },
+    { field: "keepsMacAwakeWhileLoopsRun", timing: "live" },
+  ],
+};
 
 const envelopes = [
   {
@@ -146,7 +197,7 @@ const envelopes = [
 
 async function installTauriMock(page: Page) {
   await page.addInitScript(
-    ({ daemonEnvelopes, quickChatFixture }) => {
+    ({ daemonEnvelopes, quickChatFixture, sharedSettings }) => {
       type Callback = (payload: unknown) => void;
       type TauriMockWindow = Window & {
         __TAURI_INTERNALS__: {
@@ -233,6 +284,16 @@ async function installTauriMock(page: Page) {
           if (command === "load_ui_layout") {
             return { version: 1, projects: {} };
           }
+          if (command === "load_settings") {
+            return sharedSettings;
+          }
+          if (command === "update_settings") {
+            return {
+              ...sharedSettings,
+              revision: "settings-revision-2",
+              settings: args.settings,
+            };
+          }
           if (command === "send_daemon_command") {
             target.__GRAPHCODE_E2E_COMMANDS__.push(args.command);
             const daemonCommand = args.command as {
@@ -282,7 +343,11 @@ async function installTauriMock(page: Page) {
         },
       };
     },
-    { daemonEnvelopes: envelopes, quickChatFixture: quickChat },
+    {
+      daemonEnvelopes: envelopes,
+      quickChatFixture: quickChat,
+      sharedSettings: settingsFixture,
+    },
   );
 }
 
@@ -463,4 +528,48 @@ test("opens a Quick Chat as an interactive terminal workspace", async ({
       }),
     )
     .toContain("close_terminal");
+});
+
+test("edits shared settings through the revisioned daemon bridge", async ({
+  page,
+}) => {
+  await page.getByRole("button", { name: "Settings", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: "Settings" });
+  await expect(dialog).toBeVisible();
+
+  await dialog.getByLabel("New loops use").selectOption("copilotCLI");
+  await dialog.getByLabel("Daemon heartbeat (experimental)").check();
+  await expect(
+    dialog.locator('[data-setting="defaultBackend"] .settings-effect'),
+  ).toHaveText("New loops");
+  await expect(
+    dialog.getByLabel("Keep the Mac awake while loops run"),
+  ).toBeDisabled();
+  await dialog.getByRole("button", { name: "Save", exact: true }).click();
+
+  await expect
+    .poll(() =>
+      page.evaluate(() => {
+        const target = window as Window & {
+          __GRAPHCODE_E2E_NATIVE_COMMANDS__: {
+            command: string;
+            args: Record<string, unknown>;
+          }[];
+        };
+        return target.__GRAPHCODE_E2E_NATIVE_COMMANDS__.find(
+          ({ command }) => command === "update_settings",
+        );
+      }),
+    )
+    .toMatchObject({
+      command: "update_settings",
+      args: {
+        expectedRevision: "settings-revision-1",
+        settings: {
+          defaultBackend: "copilotCLI",
+          daemonHeartbeatEnabled: true,
+          futureSetting: { retained: true },
+        },
+      },
+    });
 });

@@ -66,8 +66,6 @@ enum BridgeError {
     #[error("workspace operation failed to finish: {0}")]
     WorkspaceTask(String),
     #[error(transparent)]
-    Settings(#[from] settings::SettingsError),
-    #[error(transparent)]
     Terminal(#[from] terminal::TerminalError),
     #[error(transparent)]
     Workspace(#[from] workspace::WorkspaceError),
@@ -256,32 +254,29 @@ async fn load_terminal_history(
 #[tauri::command]
 async fn load_settings(
     state: State<'_, BridgeState>,
-) -> Result<settings::SettingsSnapshot, BridgeError> {
+) -> Result<settings::SettingsSnapshot, settings::SettingsError> {
     let connection = state
         .connection
         .lock()
         .expect("bridge state mutex poisoned")
         .clone()
-        .ok_or(BridgeError::NotStarted)?;
-    settings::load(&connection).await.map_err(Into::into)
+        .ok_or(settings::SettingsError::NotStarted)?;
+    settings::load(&connection).await
 }
 
 #[tauri::command]
-async fn set_daemon_heartbeat_enabled(
+async fn update_settings(
     state: State<'_, BridgeState>,
     expected_revision: String,
     settings: Value,
-    enabled: bool,
-) -> Result<settings::SettingsSnapshot, BridgeError> {
+) -> Result<settings::SettingsSnapshot, settings::SettingsError> {
     let connection = state
         .connection
         .lock()
         .expect("bridge state mutex poisoned")
         .clone()
-        .ok_or(BridgeError::NotStarted)?;
-    settings::set_daemon_heartbeat(&connection, &expected_revision, settings, enabled)
-        .await
-        .map_err(Into::into)
+        .ok_or(settings::SettingsError::NotStarted)?;
+    settings::update(&connection, &expected_revision, settings).await
 }
 
 #[tauri::command]
@@ -519,7 +514,7 @@ pub fn run() {
             kill_terminal_session,
             load_terminal_history,
             load_settings,
-            set_daemon_heartbeat_enabled,
+            update_settings,
             list_workspaces,
             create_workspace,
             rename_workspace,

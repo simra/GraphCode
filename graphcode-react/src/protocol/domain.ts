@@ -231,9 +231,7 @@ export type SettingsApplicationTiming =
   "live" | "nextLoop" | "nextSession" | "appRestart" | "daemonRestart";
 
 export interface SettingsSnapshot {
-  settings: Record<string, unknown> & {
-    daemonHeartbeatEnabled: boolean;
-  };
+  settings: Record<string, unknown>;
   revision: string;
   exists: boolean;
   supportDirectory: string;

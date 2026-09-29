@@ -6,23 +6,19 @@ import type {
   SettingsSnapshot as DaemonSettingsSnapshot,
 } from "../protocol/domain";
 
-export interface SettingsSnapshot extends DaemonSettingsSnapshot {
-  daemonHeartbeatEnabled: boolean;
-}
+export type SettingsSnapshot = DaemonSettingsSnapshot;
 
 export function loadSettings(): Promise<SettingsSnapshot> {
   return invoke("load_settings");
 }
 
-export function setDaemonHeartbeatEnabled(
+export function updateSettings(
   expectedRevision: string,
   settings: Record<string, unknown>,
-  enabled: boolean,
 ): Promise<SettingsSnapshot> {
-  return invoke("set_daemon_heartbeat_enabled", {
+  return invoke("update_settings", {
     expectedRevision,
     settings,
-    enabled,
   });
 }
 
@@ -44,9 +40,29 @@ export async function listenForSettingsChanges(
     ) {
       onChange({
         ...envelope.event.snapshot,
-        daemonHeartbeatEnabled:
-          envelope.event.snapshot.settings.daemonHeartbeatEnabled,
       });
     }
   });
+}
+
+export interface SettingsBridgeError {
+  code: string;
+  message: string;
+}
+
+export function settingsBridgeError(error: unknown): SettingsBridgeError {
+  if (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    "message" in error &&
+    typeof error.code === "string" &&
+    typeof error.message === "string"
+  ) {
+    return { code: error.code, message: error.message };
+  }
+  return {
+    code: "settingsUnavailable",
+    message: error instanceof Error ? error.message : String(error),
+  };
 }

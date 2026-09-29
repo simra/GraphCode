@@ -9,7 +9,9 @@ import { LoopWorkspaceRail } from "./components/LoopWorkspaceRail";
 import { MailroomView } from "./components/MailroomView";
 import { NewEdgeDialog } from "./components/NewEdgeDialog";
 import { ProjectGraphTree } from "./components/ProjectGraphTree";
+import { SettingsEditor } from "./components/SettingsDialog";
 import type { AppCommand } from "./commands/registry";
+import { editableSettingsFields, settingsDefaults } from "./forms/settingsForm";
 import type { LoopGraph } from "./protocol/domain";
 
 const graph: LoopGraph = {
@@ -193,6 +195,40 @@ describe("automated accessibility checks", () => {
           ]}
           onClose={() => undefined}
           onExecuteCommand={() => undefined}
+        />,
+      ),
+    );
+  });
+
+  it("checks the complete settings form and disabled capability semantics", async () => {
+    await expectNoAxeViolations(
+      renderToStaticMarkup(
+        <SettingsEditor
+          snapshot={{
+            settings: settingsDefaults,
+            revision: "fixture",
+            exists: true,
+            supportDirectory: "C:\\fixture",
+            filePath: "C:\\fixture\\settings.json",
+            fields: editableSettingsFields.map((field) => ({
+              field,
+              timing:
+                field === "defaultBackend"
+                  ? "nextLoop"
+                  : field.includes("Permission") ||
+                      field === "codexApprovals" ||
+                      field === "piProjectTrust" ||
+                      field === "copilotPreferredVersion" ||
+                      field === "briefsSessionsAboutTheGraph"
+                    ? "nextSession"
+                    : "live",
+            })),
+          }}
+          draft={settingsDefaults}
+          errors={{}}
+          enteringCopilotVersion={false}
+          onEnteringCopilotVersionChange={() => undefined}
+          onChange={() => undefined}
         />,
       ),
     );

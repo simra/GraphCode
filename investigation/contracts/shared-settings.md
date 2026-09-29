@@ -51,3 +51,19 @@ Every snapshot carries the complete field timing table:
 `nextSession` includes a resume or restart because launch arguments and briefing content
 are assembled when that session starts. No current shared setting requires restarting the
 daemon.
+
+## Tauri client behavior
+
+The React/Tauri settings dialog sends complete typed snapshots through
+`updateSettings`; it never opens or writes `settings.json`. The daemon remains responsible
+for defaults, migrations, revision checks, atomic persistence, and preservation of unknown
+top-level and nested policy fields.
+
+The dialog exposes all safe daemon/provider settings and displays the timing supplied in
+the snapshot beside every field. Fields without a Tauri implementation remain visible and
+disabled with a capability explanation: the activity strip, macOS update channel, macOS
+awake assertion, and project-scoped worktree policy editor. A `settingsChanged` event
+refreshes a clean form or rebases dirty fields over the newer snapshot. A
+`settingsConflict` response performs the same reload-and-reapply flow; the user reviews and
+saves again rather than the client retrying an unseen merge. Corrupt and unavailable files
+remain errors with an explicit repair-and-reload path.

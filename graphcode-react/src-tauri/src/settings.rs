@@ -1,4 +1,4 @@
-use serde::{Deserialize, Serialize};
+use serde::{ser::SerializeStruct, Deserialize, Serialize};
 use serde_json::{json, Value};
 use thiserror::Error;
 
@@ -6,10 +6,41 @@ use crate::connection::{ConnectionError, ConnectionHandle};
 
 #[derive(Debug, Error)]
 pub enum SettingsError {
+    #[error("daemon connection has not been started")]
+    NotStarted,
     #[error(transparent)]
-    Connection(#[from] ConnectionError),
+    Connection(ConnectionError),
     #[error("graphcoded returned an invalid settings response")]
     InvalidResponse,
+}
+
+impl From<ConnectionError> for SettingsError {
+    fn from(error: ConnectionError) -> Self {
+        Self::Connection(error)
+    }
+}
+
+impl SettingsError {
+    fn code(&self) -> &str {
+        match self {
+            Self::NotStarted => "settingsUnavailable",
+            Self::Connection(ConnectionError::Daemon { code, .. }) => code,
+            Self::Connection(_) => "settingsUnavailable",
+            Self::InvalidResponse => "settingsInvalidResponse",
+        }
+    }
+}
+
+impl Serialize for SettingsError {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let mut state = serializer.serialize_struct("SettingsError", 2)?;
+        state.serialize_field("code", self.code())?;
+        state.serialize_field("message", &self.to_string())?;
+        state.end()
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -21,8 +52,6 @@ pub struct SettingsSnapshot {
     pub support_directory: String,
     pub file_path: String,
     pub fields: Vec<SettingsFieldContract>,
-    #[serde(default)]
-    pub daemon_heartbeat_enabled: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -37,16 +66,14 @@ pub async fn load(connection: &ConnectionHandle) -> Result<SettingsSnapshot, Set
     snapshot_from_frame(&frame)
 }
 
-pub async fn set_daemon_heartbeat(
+pub async fn update(
     connection: &ConnectionHandle,
     expected_revision: &str,
-    mut settings: Value,
-    enabled: bool,
+    settings: Value,
 ) -> Result<SettingsSnapshot, SettingsError> {
-    let object = settings
-        .as_object_mut()
-        .ok_or(SettingsError::InvalidResponse)?;
-    object.insert("daemonHeartbeatEnabled".into(), Value::Bool(enabled));
+    if !settings.is_object() {
+        return Err(SettingsError::InvalidResponse);
+    }
     let frame = connection
         .request(json!({
             "updateSettings": {
@@ -63,13 +90,11 @@ fn snapshot_from_frame(frame: &Value) -> Result<SettingsSnapshot, SettingsError>
         .pointer("/event/settingsChanged/_0")
         .or_else(|| frame.pointer("/event/settingsChanged"))
         .ok_or(SettingsError::InvalidResponse)?;
-    let mut snapshot: SettingsSnapshot =
+    let snapshot: SettingsSnapshot =
         serde_json::from_value(value.clone()).map_err(|_| SettingsError::InvalidResponse)?;
-    snapshot.daemon_heartbeat_enabled = snapshot
-        .settings
-        .get("daemonHeartbeatEnabled")
-        .and_then(Value::as_bool)
-        .ok_or(SettingsError::InvalidResponse)?;
+    if !snapshot.settings.is_object() {
+        return Err(SettingsError::InvalidResponse);
+    }
     Ok(snapshot)
 }
 
@@ -97,8 +122,23 @@ mod tests {
         });
 
         let snapshot = snapshot_from_frame(&frame).unwrap();
-        assert!(!snapshot.daemon_heartbeat_enabled);
+        assert_eq!(snapshot.settings["daemonHeartbeatEnabled"], false);
         assert_eq!(snapshot.revision, "abc");
         assert_eq!(snapshot.fields[0].timing, "live");
+    }
+
+    #[test]
+    fn serializes_daemon_error_codes_for_conflict_recovery() {
+        let error = SettingsError::Connection(ConnectionError::Daemon {
+            code: "settingsConflict".into(),
+            message: "reload".into(),
+        });
+        assert_eq!(
+            serde_json::to_value(error).unwrap(),
+            json!({
+                "code": "settingsConflict",
+                "message": "graphcoded refused the command (settingsConflict): reload"
+            })
+        );
     }
 }
