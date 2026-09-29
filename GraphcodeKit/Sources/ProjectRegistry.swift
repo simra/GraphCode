@@ -3,6 +3,7 @@ import Foundation
 public struct ProjectRegistryCommandResult: Equatable, Sendable {
   public let response: DaemonEvent?
   public let error: String?
+  public let errorCode: DaemonWireErrorCode?
   /// A successful command may intentionally have no response payload (for example,
   /// `.forgetProject`). The daemon uses this bit to distinguish that outcome from an
   /// internal routing failure.
@@ -11,10 +12,12 @@ public struct ProjectRegistryCommandResult: Equatable, Sendable {
   public init(
     response: DaemonEvent? = nil,
     error: String? = nil,
+    errorCode: DaemonWireErrorCode? = nil,
     succeeded: Bool? = nil
   ) {
     self.response = response
     self.error = error
+    self.errorCode = errorCode
     self.succeeded = succeeded ?? (error == nil)
   }
 }
@@ -52,6 +55,7 @@ public actor ProjectRegistry {
   private let quickChatStore: QuickChatStore
   private let platformPaths: any PlatformPaths
   private let replayStore: DaemonReplayStore
+  private let settingsURL: URL
   private var stores: [String: GraphStore] = [:]
   private var connections: [UUID: DaemonConnectionChannel] = [:]
   private var connectionProjectPaths: [UUID: Set<String>] = [:]
@@ -124,6 +128,7 @@ public actor ProjectRegistry {
     persistenceDirectory: URL,
     platformPaths: any PlatformPaths = CurrentPlatformPaths.value,
     replayStore: DaemonReplayStore = DaemonReplayStore(),
+    settingsURL: URL = GraphcodeSettingsStore.url,
     ensureSession: (@Sendable (LoopNode, String?) -> Void)? = CLISessionBackend.ensureSession,
     terminateSession: (@Sendable (LoopNode, String?) -> Void)? =
       CLISessionBackend.terminateSession,
@@ -171,6 +176,7 @@ public actor ProjectRegistry {
     self.persistsSynchronously = persistsSynchronously
     quickChatStore = QuickChatStore(baseDirectory: persistenceDirectory)
     self.replayStore = replayStore
+    self.settingsURL = settingsURL
     self.ensureSession = ensureSession
     self.terminateSession = terminateSession
     self.restartSession = restartSession
@@ -503,6 +509,7 @@ public actor ProjectRegistry {
     }
     var response: DaemonEvent? = nil
     var error: String? = nil
+    var errorCode: DaemonWireErrorCode? = nil
 
     switch command {
     case .listRecentProjects:
@@ -667,6 +674,40 @@ public actor ProjectRegistry {
       response = .quickChatDeleted(id)
       await broadcast(response!)
 
+    case .loadSettings:
+      guard case .v2 = channel.mode else {
+        error = "shared settings requests require daemon protocol v2"
+        break
+      }
+      do {
+        response = .settingsChanged(try GraphcodeSettingsStore.snapshot(from: settingsURL))
+      } catch let storeError as GraphcodeSettingsStore.StoreError {
+        (errorCode, error) = Self.settingsError(storeError)
+      } catch let caught {
+        _ = caught
+        errorCode = .settingsUnavailable
+        error = "settings could not be loaded"
+      }
+
+    case .updateSettings(let expectedRevision, let settings):
+      guard case .v2 = channel.mode else {
+        error = "shared settings requests require daemon protocol v2"
+        break
+      }
+      do {
+        let snapshot = try GraphcodeSettingsStore.update(
+          settings, expectedRevision: expectedRevision, at: settingsURL)
+        response = .settingsChanged(snapshot)
+        await broadcast(response!)
+        await refreshAwakeAssertion()
+      } catch let storeError as GraphcodeSettingsStore.StoreError {
+        (errorCode, error) = Self.settingsError(storeError)
+      } catch let caught {
+        _ = caught
+        errorCode = .settingsUnavailable
+        error = "settings could not be saved"
+      }
+
     case .openNodeSession(let path, let nodeID):
       switch routing(for: path, isSidebar: sidebarConnections.contains(connectionID)) {
       case .project(let canonicalPath):
@@ -777,7 +818,8 @@ public actor ProjectRegistry {
       }
     }
 
-    return ProjectRegistryCommandResult(response: error == nil ? response : nil, error: error)
+    return ProjectRegistryCommandResult(
+      response: error == nil ? response : nil, error: error, errorCode: errorCode)
   }
 
   /// Produces a correlated v2 response after the command has been applied. The v1
@@ -804,6 +846,11 @@ public actor ProjectRegistry {
       return nil
     case .deleteQuickChat(let id):
       return .quickChatDeleted(id)
+    case .loadSettings:
+      return (try? GraphcodeSettingsStore.snapshot(from: settingsURL))
+        .map(DaemonEvent.settingsChanged)
+    case .updateSettings:
+      return nil
     case .openNodeSession(let path, _):
       guard let store = stores[Self.canonicalize(path, platformPaths: platformPaths)] else {
         return nil
@@ -819,6 +866,30 @@ public actor ProjectRegistry {
       return .graphChanged(await store.graph)
     case .announce, .mailbox:
       return nil
+    }
+  }
+
+  private static func settingsError(
+    _ error: GraphcodeSettingsStore.StoreError
+  ) -> (DaemonWireErrorCode, String) {
+    switch error {
+    case .conflict(let currentRevision):
+      return (
+        .settingsConflict,
+        "settings changed in another client; reload revision \(currentRevision) and try again"
+      )
+    case .corrupt, .invalidShape:
+      return (
+        .settingsCorrupt,
+        "settings.json is corrupt; fix or restore the file, then reload without replacing it"
+      )
+    case .payloadTooLarge:
+      return (
+        .settingsPayloadTooLarge,
+        "settings.json exceeds the bounded shared-settings payload limit"
+      )
+    case .unreadable, .encodingFailed, .writeFailed:
+      return (.settingsUnavailable, "settings.json could not be read or saved")
     }
   }
 
@@ -1254,7 +1325,10 @@ public actor ProjectRegistry {
   }
 
   private func broadcast(_ event: DaemonEvent) async {
-    for id in connections.keys {
+    for id in connections.keys
+    where event.requiredCapability.map({
+      connectionCapabilities[id]?.contains($0.rawValue) == true
+    }) ?? true {
       await send(event, to: id)
     }
   }

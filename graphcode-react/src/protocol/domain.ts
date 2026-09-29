@@ -227,6 +227,23 @@ export interface NodesChanged {
   nodes: LoopNode[];
 }
 
+export type SettingsApplicationTiming =
+  "live" | "nextLoop" | "nextSession" | "appRestart" | "daemonRestart";
+
+export interface SettingsSnapshot {
+  settings: Record<string, unknown> & {
+    daemonHeartbeatEnabled: boolean;
+  };
+  revision: string;
+  exists: boolean;
+  supportDirectory: string;
+  filePath: string;
+  fields: {
+    field: string;
+    timing: SettingsApplicationTiming;
+  }[];
+}
+
 export type DaemonEvent =
   | { type: "recentProjectsListed"; projects: ProjectRef[] }
   | { type: "graphChanged"; graph: LoopGraph }
@@ -236,6 +253,7 @@ export type DaemonEvent =
   | { type: "quickChatDeleted"; id: string }
   | { type: "quickChatActivity"; id: string; activity: QuickChatActivity }
   | { type: "mailbox"; projectPath: string; mailbox: Mailbox }
+  | { type: "settingsChanged"; snapshot: SettingsSnapshot }
   | { type: "errorOccurred"; message: string }
   | { type: "unsupported"; name: string; payload: unknown };
 

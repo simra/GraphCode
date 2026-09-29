@@ -13,6 +13,10 @@ public enum DaemonWireErrorCode: String, Codable, Sendable {
   case replayUnavailable
   case cursorOutsideWindow
   case requestFailed
+  case settingsConflict
+  case settingsCorrupt
+  case settingsUnavailable
+  case settingsPayloadTooLarge
   case connectionClosed
   case transportFailure
 }
@@ -679,6 +683,8 @@ public actor DaemonConnectionChannel {
     case .recentProjectsListed:
       return true
     case .quickChatsListed, .quickChatChanged, .quickChatDeleted, .quickChatActivity:
+      return true
+    case .settingsChanged:
       return true
     case .errorOccurred:
       return true

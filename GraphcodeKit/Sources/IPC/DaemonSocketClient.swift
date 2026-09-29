@@ -25,6 +25,8 @@ public struct DaemonSocketClient: Sendable {
     case daemonNotRunning
     case connectionFailed(errno: Int32)
     case timedOut
+    case malformedResponse
+    case daemon(code: String, message: String)
   }
 
   public static let ambiguousExitCode: Int32 = 75
@@ -215,7 +217,42 @@ public struct DaemonSocketClient: Sendable {
   /// never sends — because nothing it sent would cause one — blocks forever with no
   /// output at all, which is exactly how `status` used to hang.
   public func send(_ command: DaemonCommand) throws {
-    let data = try JSONEncoder().encode(command)
+    try sendData(JSONEncoder().encode(command))
+  }
+
+  /// Performs one correlated version-2 request on this short-lived connection.
+  public func request(
+    _ command: DaemonCommand,
+    clientID: Foundation.UUID = Foundation.UUID()
+  ) throws -> DaemonEvent? {
+    try sendData(
+      JSONEncoder().encode(
+        DaemonWireEnvelope.hello(
+          supportedVersions: [DaemonWireProtocol.currentVersion], clientID: clientID)))
+    let hello = try decodedEnvelope(from: receiveData())
+    guard hello.kind == .hello, hello.selectedVersion == DaemonWireProtocol.currentVersion else {
+      throw ClientError.malformedResponse
+    }
+
+    let requestID = Foundation.UUID()
+    try sendData(JSONEncoder().encode(DaemonWireEnvelope.request(id: requestID, command: command)))
+    for _ in 0..<64 {
+      let envelope = try decodedEnvelope(from: receiveData())
+      guard envelope.requestID == requestID else { continue }
+      switch envelope.kind {
+      case .response:
+        return envelope.event
+      case .error:
+        guard let error = envelope.error else { throw ClientError.malformedResponse }
+        throw ClientError.daemon(code: error.code, message: error.message)
+      default:
+        throw ClientError.malformedResponse
+      }
+    }
+    throw ClientError.timedOut
+  }
+
+  private func sendData(_ data: Data) throws {
     #if canImport(Darwin) || canImport(Glibc)
       try (connection as! UnixSocketConnection).sendFrameSync(data)
     #else
@@ -241,34 +278,11 @@ public struct DaemonSocketClient: Sendable {
       let responseDeadline = Date().addingTimeInterval(timeout)
     #endif
     for _ in 0..<limit {
-      let data: Data
-      do {
-        #if canImport(Darwin) || canImport(Glibc)
-          data = try (connection as! UnixSocketConnection).receiveFrameSync()
-        #else
-          data = try Self.blocking {
-            if let pipe = connection as? WindowsNamedPipeConnection {
-              return try await pipe.receiveFrameWithDeadline(
-                max(0, responseDeadline.timeIntervalSinceNow))
-            }
-            return try await connection.receiveFrame()
-          }
-        #endif
-      } catch {
-        #if canImport(Darwin) || canImport(Glibc)
-          if case FramedMessageIO.IOError.readFailed(let code) = error,
-            code == EAGAIN || code == EWOULDBLOCK
-          {
-            throw ClientError.timedOut
-          }
-        #endif
-        #if os(Windows)
-          if case WindowsPipeError.timedOut = error {
-            throw ClientError.timedOut
-          }
-        #endif
-        throw error
-      }
+      #if os(Windows)
+        let data = try receiveData(deadline: responseDeadline)
+      #else
+        let data = try receiveData()
+      #endif
       guard let event = try? JSONDecoder().decode(DaemonEvent.self, from: data) else { continue }
       if isSatisfied(event) { return event }
     }
@@ -281,6 +295,44 @@ public struct DaemonSocketClient: Sendable {
     #else
       try? Self.blocking { try await connection.close() }
     #endif
+  }
+
+  private func decodedEnvelope(from data: Data) throws -> DaemonWireEnvelope {
+    do {
+      return try JSONDecoder().decode(DaemonWireEnvelope.self, from: data).validated()
+    } catch {
+      throw ClientError.malformedResponse
+    }
+  }
+
+  private func receiveData(deadline: Date? = nil) throws -> Data {
+    do {
+      #if canImport(Darwin) || canImport(Glibc)
+        return try (connection as! UnixSocketConnection).receiveFrameSync()
+      #else
+        return try Self.blocking {
+          if let pipe = connection as? WindowsNamedPipeConnection, let deadline {
+            return try await pipe.receiveFrameWithDeadline(
+              max(0, deadline.timeIntervalSinceNow))
+          }
+          return try await connection.receiveFrame()
+        }
+      #endif
+    } catch {
+      #if canImport(Darwin) || canImport(Glibc)
+        if case FramedMessageIO.IOError.readFailed(let code) = error,
+          code == EAGAIN || code == EWOULDBLOCK
+        {
+          throw ClientError.timedOut
+        }
+      #endif
+      #if os(Windows)
+        if case WindowsPipeError.timedOut = error {
+          throw ClientError.timedOut
+        }
+      #endif
+      throw error
+    }
   }
 
   #if os(Windows)

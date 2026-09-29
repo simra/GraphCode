@@ -1,7 +1,9 @@
 import { useEffect, useState } from "react";
 import {
   loadSettings,
+  listenForSettingsChanges,
   setDaemonHeartbeatEnabled,
+  settingsTiming,
   type SettingsSnapshot,
 } from "../bridge/settings";
 
@@ -23,7 +25,18 @@ export function SettingsDialog({ onClose }: { onClose(): void }) {
       );
   };
 
-  useEffect(reload, []);
+  useEffect(() => {
+    reload();
+    let unlisten: (() => void) | undefined;
+    void listenForSettingsChanges((snapshot) => {
+      setSettings(snapshot);
+      setHeartbeatEnabled(snapshot.daemonHeartbeatEnabled);
+      setError(undefined);
+    }).then((stop) => {
+      unlisten = stop;
+    });
+    return () => unlisten?.();
+  }, []);
 
   const save = async () => {
     if (!settings) return;
@@ -32,6 +45,7 @@ export function SettingsDialog({ onClose }: { onClose(): void }) {
     try {
       const saved = await setDaemonHeartbeatEnabled(
         settings.revision,
+        settings.settings,
         heartbeatEnabled,
       );
       setSettings(saved);
@@ -79,8 +93,11 @@ export function SettingsDialog({ onClose }: { onClose(): void }) {
                 <strong>Enable daemon heartbeat</strong>
                 <small>
                   Let graphcoded trigger timed loops that define a heartbeat
-                  interval. Changes apply to live loops without a daemon
-                  restart.
+                  interval.{" "}
+                  {settings &&
+                  settingsTiming(settings, "daemonHeartbeatEnabled") === "live"
+                    ? "Changes apply to live loops without a daemon restart."
+                    : "GraphCode will report when this change takes effect."}
                 </small>
               </span>
             </label>

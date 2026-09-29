@@ -310,7 +310,7 @@ import GraphcodeKit
               }
               if let error = result.error {
                 try await channel.sendError(
-                  requestID: requestID, code: .requestFailed, message: error)
+                  requestID: requestID, code: result.errorCode ?? .requestFailed, message: error)
               } else if let response = result.response {
                 try await channel.sendResponse(requestID: requestID, event: response)
               } else if result.succeeded {

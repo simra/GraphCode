@@ -292,7 +292,7 @@ private actor AppDaemonConnection {
         // reconnect rejoin so concurrent startup sends cannot duplicate a join.
         try await sendJoin(command, on: connection)
       case .announce, .listRecentProjects, .listQuickChats, .createQuickChat, .openQuickChat,
-        .renameQuickChat, .deleteQuickChat:
+        .renameQuickChat, .deleteQuickChat, .loadSettings, .updateSettings:
         // Quick chats hang off no project, so they need no rejoin — the raw path is the
         // same one `listRecentProjects` takes.
         try await sendRaw(command, on: connection)

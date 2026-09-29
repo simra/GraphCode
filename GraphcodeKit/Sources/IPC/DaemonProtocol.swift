@@ -43,6 +43,14 @@ public enum DaemonCommand: Codable, Sendable, Equatable {
   case openQuickChat(id: UUID)
   case renameQuickChat(id: UUID, title: String)
   case deleteQuickChat(id: UUID)
+  /// Read the daemon-owned shared settings document. Version-2 clients receive a
+  /// correlated `.settingsChanged` response; subscribed clients also receive that event
+  /// after any successful update.
+  case loadSettings
+  /// Replace every known setting when `expectedRevision` still names the exact file the
+  /// client read. The daemon overlays known fields onto the raw object so fields from a
+  /// newer GraphCode survive an older client's save.
+  case updateSettings(expectedRevision: String, settings: GraphcodeSettings)
   /// Prepare a node's attended terminal session from the daemon's stored configuration.
   /// Sketches and turn-based loops are launched or reattached here; unattended loops are
   /// left alone because their lifecycle belongs to the daemon's ensure sweeps.
@@ -72,6 +80,8 @@ public enum DaemonCommand: Codable, Sendable, Equatable {
 public enum ClientCapability: String, Sendable {
   /// Reads `DaemonEvent.nodesChanged` and folds it into the snapshot it holds.
   case nodesChanged
+  /// Reads `DaemonEvent.settingsChanged`.
+  case settingsChanged
 }
 
 extension DaemonEvent {
@@ -89,6 +99,7 @@ extension DaemonEvent {
       .quickChatsListed, .quickChatChanged, .quickChatDeleted, .quickChatActivity:
       return nil
     case .nodesChanged: return .nodesChanged
+    case .settingsChanged: return .settingsChanged
     }
   }
 }
@@ -278,6 +289,7 @@ public enum DaemonEvent: Codable, Sendable, Equatable {
   case quickChatChanged(QuickChat)
   case quickChatDeleted(UUID)
   case quickChatActivity(id: UUID, activity: QuickChatActivity)
+  case settingsChanged(GraphcodeSettingsSnapshot)
   case errorOccurred(String)
   /// The answer to a `DaemonCommand.mailbox`, sent only to the connection that asked.
   /// `projectPath` is the canonical spelling the daemon routed the query to, which is

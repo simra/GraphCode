@@ -108,3 +108,26 @@ only by SSH reverse forwarding. The one-shot remote shim discovers the current e
 capability through an atomic user-only bridge-state record.
 
 Windows remote hosts, ARM64, and automatic updating remain deferred.
+
+## ADR-007: Make graphcoded the shared settings writer
+
+### Status
+Accepted.
+
+### Context
+macOS and the first Tauri adapter both wrote `settings.json`. Atomic replacement avoided
+partial files but did not prevent two clients from overwriting each other, did not provide
+cross-client refresh, and let non-Swift clients drift from `GraphcodeSettings` defaults and
+migrations.
+
+### Decision
+`graphcoded` owns runtime writes. Clients use correlated v2 `loadSettings` and
+`updateSettings` requests with content revisions. The daemon preserves unknown JSON fields,
+broadcasts capability-gated refresh events, rejects stale revisions, and leaves corrupt
+files untouched with recoverable error codes.
+
+### Consequences
+The macOS settings model and Tauri adapter are daemon clients rather than file writers.
+Hand editing remains supported, but an edit races safely: the next stale client update is
+rejected and must reload. Field timing is protocol data, and no current field requires a
+daemon or app restart. See `investigation/contracts/shared-settings.md`.

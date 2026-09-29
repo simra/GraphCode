@@ -78,6 +78,39 @@ describe("decodeEnvelope", () => {
     expect(projectsEnvelope.event.projects[0].path).toBe("C:\\work\\live");
   });
 
+  it("decodes the shared settings snapshot and application timing", () => {
+    const envelope = decodeEnvelope({
+      version: 2,
+      kind: "event",
+      sequence: 14,
+      event: {
+        settingsChanged: {
+          _0: {
+            settings: { daemonHeartbeatEnabled: true, futureSetting: 7 },
+            revision: "content-revision",
+            exists: true,
+            supportDirectory: "C:\\fixture",
+            filePath: "C:\\fixture\\settings.json",
+            fields: [
+              { field: "daemonHeartbeatEnabled", timing: "live" },
+              { field: "copilotPreferredVersion", timing: "nextSession" },
+            ],
+          },
+        },
+      },
+    });
+
+    if (
+      envelope.kind !== "event" ||
+      envelope.event.type !== "settingsChanged"
+    ) {
+      throw new Error("Expected settingsChanged event");
+    }
+    expect(envelope.event.snapshot.settings.daemonHeartbeatEnabled).toBe(true);
+    expect(envelope.event.snapshot.settings.futureSetting).toBe(7);
+    expect(envelope.event.snapshot.fields[1].timing).toBe("nextSession");
+  });
+
   it("validates inspector fields already carried by LoopNode snapshots", () => {
     const envelope = decodeEnvelope({
       version: 2,

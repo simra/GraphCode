@@ -10,6 +10,18 @@ import Foundation
 /// most, so the read costs nothing measurable, and it means changing a setting in the app
 /// applies to the next loop the daemon starts without restarting anything.
 public enum GraphcodeSettingsStore {
+  enum StoreError: Error, Equatable, Sendable {
+    case unreadable(String)
+    case corrupt(String)
+    case invalidShape
+    case conflict(currentRevision: String)
+    case encodingFailed(String)
+    case writeFailed(String)
+    case payloadTooLarge
+  }
+
+  static let maxDocumentBytes = FramedMessageIO.v2MaxPayloadBytes / 2
+
   public static var url: URL {
     SupportDirectory.url.appendingPathComponent("settings.json")
   }
@@ -19,10 +31,55 @@ public enum GraphcodeSettingsStore {
   /// defaults" — refusing to start sessions because a preferences file didn't parse
   /// would be a far worse failure than quietly ignoring it.
   public static func load(from url: URL = GraphcodeSettingsStore.url) -> GraphcodeSettings {
-    guard let data = try? Data(contentsOf: url),
-      let settings = try? JSONDecoder().decode(GraphcodeSettings.self, from: data)
-    else { return GraphcodeSettings() }
-    return settings
+    (try? snapshot(from: url).settings) ?? GraphcodeSettings()
+  }
+
+  static func snapshot(
+    from url: URL = GraphcodeSettingsStore.url
+  ) throws -> GraphcodeSettingsSnapshot {
+    let document = try readDocument(from: url)
+    return GraphcodeSettingsSnapshot(
+      settings: try decodeSettings(from: document.data, exists: document.exists),
+      revision: revision(of: document.data),
+      exists: document.exists,
+      supportDirectory: url.deletingLastPathComponent().path,
+      filePath: url.path)
+  }
+
+  static func update(
+    _ settings: GraphcodeSettings,
+    expectedRevision: String,
+    at url: URL = GraphcodeSettingsStore.url
+  ) throws -> GraphcodeSettingsSnapshot {
+    let document = try readDocument(from: url)
+    let currentRevision = revision(of: document.data)
+    guard currentRevision == expectedRevision else {
+      throw StoreError.conflict(currentRevision: currentRevision)
+    }
+    var object = try decodeObject(from: document.data, exists: document.exists)
+    let canonical = try encodedObject(settings)
+    for (key, value) in canonical {
+      object[key] = value
+    }
+    let data: Data
+    do {
+      data = try JSONSerialization.data(
+        withJSONObject: object, options: [.prettyPrinted, .sortedKeys])
+    } catch {
+      throw StoreError.encodingFailed(error.localizedDescription)
+    }
+    guard data.count <= maxDocumentBytes else { throw StoreError.payloadTooLarge }
+    do {
+      try FileManager.default.createDirectory(
+        at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+      try data.write(to: url, options: .atomic)
+    } catch {
+      throw StoreError.writeFailed(error.localizedDescription)
+    }
+    return GraphcodeSettingsSnapshot(
+      settings: settings, revision: revision(of: data), exists: true,
+      supportDirectory: url.deletingLastPathComponent().path,
+      filePath: url.path)
   }
 
   /// Changes one setting on disk, reading and writing in one step.
@@ -34,7 +91,7 @@ public enum GraphcodeSettingsStore {
   /// from the answer: the pick lands whether or not anything has looked at settings yet,
   /// and the caller syncs the live model afterwards.
   @discardableResult
-  public static func setDefaultBackend(
+  static func setDefaultBackend(
     _ backend: CLISessionBackendKind, to url: URL = GraphcodeSettingsStore.url
   ) -> Bool {
     var settings = load(from: url)
@@ -43,7 +100,7 @@ public enum GraphcodeSettingsStore {
   }
 
   @discardableResult
-  public static func save(
+  static func save(
     _ settings: GraphcodeSettings, to url: URL = GraphcodeSettingsStore.url
   ) -> Bool {
     let encoder = JSONEncoder()
@@ -59,5 +116,61 @@ public enum GraphcodeSettingsStore {
     } catch {
       return false
     }
+  }
+
+  private static func readDocument(from url: URL) throws -> (data: Data, exists: Bool) {
+    do {
+      let data = try Data(contentsOf: url)
+      guard data.count <= maxDocumentBytes else { throw StoreError.payloadTooLarge }
+      return (data, true)
+    } catch let error as StoreError {
+      throw error
+    } catch let error as CocoaError where error.code == .fileReadNoSuchFile {
+      return (Data(), false)
+    } catch {
+      throw StoreError.unreadable(error.localizedDescription)
+    }
+  }
+
+  private static func decodeSettings(from data: Data, exists: Bool) throws -> GraphcodeSettings {
+    guard exists else { return GraphcodeSettings() }
+    do {
+      return try JSONDecoder().decode(GraphcodeSettings.self, from: data)
+    } catch {
+      throw StoreError.corrupt(error.localizedDescription)
+    }
+  }
+
+  private static func decodeObject(
+    from data: Data, exists: Bool
+  ) throws -> [String: Any] {
+    guard exists else { return [:] }
+    let value: Any
+    do {
+      value = try JSONSerialization.jsonObject(with: data)
+    } catch {
+      throw StoreError.corrupt(error.localizedDescription)
+    }
+    guard let object = value as? [String: Any] else { throw StoreError.invalidShape }
+    _ = try decodeSettings(from: data, exists: true)
+    return object
+  }
+
+  private static func encodedObject(_ settings: GraphcodeSettings) throws -> [String: Any] {
+    do {
+      let data = try JSONEncoder().encode(settings)
+      guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+        throw StoreError.invalidShape
+      }
+      return object
+    } catch let error as StoreError {
+      throw error
+    } catch {
+      throw StoreError.encodingFailed(error.localizedDescription)
+    }
+  }
+
+  private static func revision(of data: Data) -> String {
+    GraphcodeSHA256.hex(data)
   }
 }

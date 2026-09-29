@@ -13,6 +13,7 @@ import Observation
 /// effect on OK would be lying about where the value lives, since the daemon reads the
 /// file fresh for every session it starts.
 @Observable
+@MainActor
 final class SettingsModel {
   static let shared = SettingsModel()
 
@@ -22,10 +23,15 @@ final class SettingsModel {
   /// does for updates.
   static let mailroomChoiceDefaultsKey = "mailroomChoice"
 
+  @ObservationIgnored private let daemonWriter = SettingsDaemonWriter()
+  @ObservationIgnored private var applyingSnapshot = false
+
+  private(set) var lastSaveError: String?
+
   var settings: GraphcodeSettings {
     didSet {
-      guard settings != oldValue else { return }
-      GraphcodeSettingsStore.save(settings)
+      guard settings != oldValue, !applyingSnapshot else { return }
+      save(settings)
     }
   }
 
@@ -60,11 +66,6 @@ final class SettingsModel {
     var booted = loaded
     booted.mailroomEnabled = mailroom.enabled
     settings = booted
-    // The assignment above is this property's initial value, so no observer ran: the
-    // ramp-resolved bit is saved by hand, and only when it differs from the file.
-    if mailroom.fileNeedsWrite {
-      GraphcodeSettingsStore.save(booted)
-    }
     mailroomEnabled = mailroom.enabled
     let version =
       Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0"
@@ -73,6 +74,51 @@ final class SettingsModel {
       || UpdateChannel.channel(
         for: version, override: UserDefaults.standard.string(forKey: "updateChannel"))
         == .beta
+    Task { await reload() }
+  }
+
+  func apply(_ snapshot: GraphcodeSettingsSnapshot) {
+    applyingSnapshot = true
+    settings = snapshot.settings
+    betaUpdates = snapshot.settings.betaUpdates
+    mailroomEnabled = snapshot.settings.mailroomEnabled
+    applyingSnapshot = false
+    lastSaveError = nil
+    Task { await daemonWriter.observe(snapshot) }
+  }
+
+  func setDefaultBackend(_ backend: CLISessionBackendKind) {
+    settings.defaultBackend = backend
+  }
+
+  func reload() async {
+    do {
+      let loaded = try await daemonWriter.load()
+      let mailroom = Self.resolvesMailroom(
+        loaded: loaded.settings.mailroomEnabled,
+        explicitChoice:
+          UserDefaults.standard.object(forKey: Self.mailroomChoiceDefaultsKey) as? Bool,
+        rampedOn: FeatureRamps.isEnabled(.mailroom))
+      guard mailroom.fileNeedsWrite else {
+        apply(loaded)
+        return
+      }
+      var migrated = loaded.settings
+      migrated.mailroomEnabled = mailroom.enabled
+      apply(try await daemonWriter.save(migrated))
+    } catch {
+      lastSaveError = error.localizedDescription
+    }
+  }
+
+  private func save(_ desired: GraphcodeSettings) {
+    Task {
+      do {
+        apply(try await daemonWriter.save(desired))
+      } catch {
+        lastSaveError = error.localizedDescription
+      }
+    }
   }
 
   /// The Mailroom's boot decision, separated so tests can pin it without touching
@@ -95,5 +141,41 @@ final class SettingsModel {
   struct MailroomResolution: Equatable {
     var enabled: Bool
     var fileNeedsWrite: Bool
+  }
+}
+
+private actor SettingsDaemonWriter {
+  private var revision: String?
+
+  func observe(_ snapshot: GraphcodeSettingsSnapshot) {
+    revision = snapshot.revision
+  }
+
+  func load() throws -> GraphcodeSettingsSnapshot {
+    let snapshot = try request(.loadSettings)
+    revision = snapshot.revision
+    return snapshot
+  }
+
+  func save(_ settings: GraphcodeSettings) throws -> GraphcodeSettingsSnapshot {
+    let expectedRevision: String
+    if let revision {
+      expectedRevision = revision
+    } else {
+      expectedRevision = try load().revision
+    }
+    let snapshot = try request(
+      .updateSettings(expectedRevision: expectedRevision, settings: settings))
+    revision = snapshot.revision
+    return snapshot
+  }
+
+  private func request(_ command: DaemonCommand) throws -> GraphcodeSettingsSnapshot {
+    let client = try DaemonSocketClient()
+    defer { client.closeConnection() }
+    guard case .settingsChanged(let snapshot) = try client.request(command) else {
+      throw DaemonSocketClient.ClientError.malformedResponse
+    }
+    return snapshot
   }
 }

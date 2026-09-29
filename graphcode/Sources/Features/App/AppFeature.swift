@@ -406,6 +406,9 @@ struct AppFeature {
           return .send(.projects(.element(id: path, action: .daemonEvent(event))))
         case .nodesChanged(let path, let revision, let nodes):
           return foldDelta(state, path: path, revision: revision, nodes: nodes)
+        case .settingsChanged(let snapshot):
+          SettingsModel.shared.apply(snapshot)
+          return .none
         // Only the Windows shell learns about quick chats from the daemon; this app owns
         // them locally through `quickChatStore`, so the broadcast is redundant here.
         case .quickChatsListed, .quickChatChanged, .quickChatDeleted, .quickChatActivity:
@@ -677,6 +680,13 @@ extension AppFeature {
       }
       .cancellable(id: CancelID.daemonSubscription),
       .run { _ in try? await orchestratorClient.send(.listRecentProjects) },
+      .run { _ in
+        try? await orchestratorClient.send(
+          .announce(capabilities: [
+            ClientCapability.nodesChanged.rawValue,
+            ClientCapability.settingsChanged.rawValue,
+          ]))
+      },
       // Without this the sidebar comes up empty on every launch even though the
       // daemon has been persisting every project all along — the app just never
       // asked for them back. Each restored project arrives as an ordinary

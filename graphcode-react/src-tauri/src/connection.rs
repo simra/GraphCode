@@ -374,7 +374,7 @@ async fn send_bootstrap_requests(
     writer: &mut WriteHalf<BoxedDaemonStream>,
 ) -> Result<(), protocol::ProtocolError> {
     for command in [
-        json!({ "announce": { "capabilities": ["nodesChanged"] } }),
+        json!({ "announce": { "capabilities": ["nodesChanged", "settingsChanged"] } }),
         json!({ "restoreOpenProjects": {} }),
         json!({ "openGlobalGraph": {} }),
         json!({ "listRecentProjects": {} }),

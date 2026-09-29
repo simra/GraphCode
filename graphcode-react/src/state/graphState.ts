@@ -218,6 +218,8 @@ function applyDaemonEvent(state: AppState, event: DaemonEvent): AppState {
           [event.projectPath]: event.mailbox,
         },
       };
+    case "settingsChanged":
+      return state;
     case "errorOccurred":
       return {
         ...state,

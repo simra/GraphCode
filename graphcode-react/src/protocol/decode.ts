@@ -288,6 +288,26 @@ const nodesChangedSchema = z.object({
   nodes: z.array(loopNodeSchema),
 });
 
+const settingsSnapshotSchema = z.object({
+  settings: z.object({ daemonHeartbeatEnabled: z.boolean() }).passthrough(),
+  revision: z.string().min(1),
+  exists: z.boolean(),
+  supportDirectory: z.string(),
+  filePath: z.string(),
+  fields: z.array(
+    z.object({
+      field: z.string().min(1),
+      timing: z.enum([
+        "live",
+        "nextLoop",
+        "nextSession",
+        "appRestart",
+        "daemonRestart",
+      ]),
+    }),
+  ),
+});
+
 const rawEnvelopeSchema = z
   .object({
     version: z.literal(2),
@@ -352,6 +372,11 @@ function decodeEvent(raw: Record<string, unknown>): DaemonEvent {
       };
     case "nodesChanged":
       return { type: name, change: nodesChangedSchema.parse(payload) };
+    case "settingsChanged":
+      return {
+        type: name,
+        snapshot: settingsSnapshotSchema.parse(singleAssociatedValue(payload)),
+      };
     case "quickChatsListed":
       return {
         type: name,

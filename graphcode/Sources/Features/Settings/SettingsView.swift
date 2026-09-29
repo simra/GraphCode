@@ -28,6 +28,22 @@ struct SettingsView: View {
 
   private var sessions: some View {
     Form {
+      if let error = model.lastSaveError {
+        Section {
+          Text(error)
+            .foregroundStyle(.red)
+          Button("Reload settings") {
+            Task { await model.reload() }
+          }
+        } header: {
+          Text("Settings file needs attention")
+        } footer: {
+          Text("GraphCode did not replace the file. Repair or restore it, then reload.")
+            .font(.caption2)
+            .foregroundStyle(.secondary)
+        }
+      }
+
       Section {
         // Only backends graphcode can actually launch. Codex is absent until it has been
         // spiked end to end — offering it here would set every new loop to something that

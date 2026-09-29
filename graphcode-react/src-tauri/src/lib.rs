@@ -27,7 +27,6 @@ struct BridgeState {
     connection: Mutex<Option<ConnectionHandle>>,
     native_menu_revision: Mutex<u64>,
     navigation_history: Mutex<()>,
-    settings: Mutex<()>,
     terminal: terminal::TerminalManager,
     ui_layout: Mutex<()>,
     _workspace_guard: workspace::WorkspaceGuard,
@@ -39,7 +38,6 @@ impl BridgeState {
             connection: Mutex::new(None),
             native_menu_revision: Mutex::new(0),
             navigation_history: Mutex::new(()),
-            settings: Mutex::new(()),
             terminal: terminal::TerminalManager::default(),
             ui_layout: Mutex::new(()),
             _workspace_guard: workspace::WorkspaceGuard::acquire()?,
@@ -256,19 +254,34 @@ async fn load_terminal_history(
 }
 
 #[tauri::command]
-fn load_settings(state: State<'_, BridgeState>) -> Result<settings::SettingsSnapshot, BridgeError> {
-    let _guard = state.settings.lock().expect("settings mutex poisoned");
-    settings::load().map_err(Into::into)
+async fn load_settings(
+    state: State<'_, BridgeState>,
+) -> Result<settings::SettingsSnapshot, BridgeError> {
+    let connection = state
+        .connection
+        .lock()
+        .expect("bridge state mutex poisoned")
+        .clone()
+        .ok_or(BridgeError::NotStarted)?;
+    settings::load(&connection).await.map_err(Into::into)
 }
 
 #[tauri::command]
-fn set_daemon_heartbeat_enabled(
+async fn set_daemon_heartbeat_enabled(
     state: State<'_, BridgeState>,
     expected_revision: String,
+    settings: Value,
     enabled: bool,
 ) -> Result<settings::SettingsSnapshot, BridgeError> {
-    let _guard = state.settings.lock().expect("settings mutex poisoned");
-    settings::set_daemon_heartbeat(&expected_revision, enabled).map_err(Into::into)
+    let connection = state
+        .connection
+        .lock()
+        .expect("bridge state mutex poisoned")
+        .clone()
+        .ok_or(BridgeError::NotStarted)?;
+    settings::set_daemon_heartbeat(&connection, &expected_revision, settings, enabled)
+        .await
+        .map_err(Into::into)
 }
 
 #[tauri::command]

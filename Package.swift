@@ -83,6 +83,7 @@ import PackageDescription
       name: "GraphcodeWindowsProductionTests",
       dependencies: ["GraphcodeKit"],
       path: "windows-tests",
+      exclude: ["fixtures"],
       swiftSettings: [.swiftLanguageMode(.v5)]
     )
   ]
