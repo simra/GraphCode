@@ -4,11 +4,96 @@ import XCTest
 @testable import GraphcodeKit
 
 final class WindowsProjectRefCodecTests: XCTestCase {
+  private struct LegacyProjectRef: Decodable {
+    let path: String
+    let name: String
+    let lastOpenedAt: Date
+  }
+
+  func testLegacyProjectRefDecodesWithoutMetadata() throws {
+    let data = Data(#"{"path":"C:\\synthetic\\same","name":"Legacy","lastOpenedAt":0}"#.utf8)
+    let project = try JSONDecoder().decode(ProjectRef.self, from: data)
+
+    XCTAssertEqual(project.path, "C:\\synthetic\\same")
+    XCTAssertNil(project.metadata)
+  }
+
+  func testLegacyClientShapeIgnoresMetadataAndMissingCapabilitiesFailClosed() throws {
+    let encoded = try JSONEncoder().encode(
+      ProjectRef(path: "C:\\synthetic\\same", name: "Current", metadata: .local))
+    let legacy = try JSONDecoder().decode(LegacyProjectRef.self, from: encoded)
+
+    XCTAssertEqual(legacy.path, "C:\\synthetic\\same")
+    XCTAssertEqual(legacy.name, "Current")
+
+    let partial = Data(
+      #"""
+      {
+        "path": "C:\\synthetic\\same",
+        "name": "Partial",
+        "lastOpenedAt": 0,
+        "metadata": {
+          "location": "ssh",
+          "capabilities": { "diagnostics": true }
+        }
+      }
+      """#.utf8)
+    let decoded = try JSONDecoder().decode(ProjectRef.self, from: partial)
+
+    XCTAssertEqual(decoded.metadata?.location, .ssh)
+    XCTAssertTrue(decoded.metadata?.capabilities.diagnostics == true)
+    XCTAssertFalse(decoded.metadata?.capabilities.revealInFileManager == true)
+    XCTAssertFalse(decoded.metadata?.capabilities.templates == true)
+    XCTAssertFalse(decoded.metadata?.capabilities.attachments == true)
+    XCTAssertFalse(decoded.metadata?.capabilities.interactiveTerminals == true)
+  }
+
+  func testIdenticalLookingPathsRetainAuthoritativeLocationMetadata() throws {
+    let path = "C:\\synthetic\\same"
+    let local = ProjectRef(path: path, name: "Same", metadata: .local)
+    let ssh = ProjectRef(path: path, name: "Same", metadata: .ssh)
+    let codespace = ProjectRef(path: path, name: "Same", metadata: .codespace)
+
+    XCTAssertEqual(local.path, ssh.path)
+    XCTAssertEqual(ssh.path, codespace.path)
+    XCTAssertEqual(local.metadata?.location, .local)
+    XCTAssertEqual(ssh.metadata?.location, .ssh)
+    XCTAssertEqual(codespace.metadata?.location, .codespace)
+    XCTAssertTrue(local.metadata?.capabilities.interactiveTerminals == true)
+    XCTAssertFalse(ssh.metadata?.capabilities.interactiveTerminals == true)
+    XCTAssertFalse(codespace.metadata?.capabilities.interactiveTerminals == true)
+  }
+
+  func testEncodedMetadataContainsNoConnectionDetails() throws {
+    let location = RemoteProjectLocation(
+      user: "sensitive-user",
+      host: "sensitive-host",
+      port: 2222,
+      remotePath: "/synthetic/repository")
+    let project = ProjectRef(
+      path: "C:\\synthetic\\same",
+      name: "Same",
+      metadata: ProjectMetadata.inferred(fromProjectPath: location.projectPath))
+    let json = String(decoding: try JSONEncoder().encode(project), as: UTF8.self)
+
+    XCTAssertTrue(json.contains(#""location":"ssh""#))
+    XCTAssertFalse(json.contains("sensitive-user"))
+    XCTAssertFalse(json.contains("sensitive-host"))
+    XCTAssertFalse(json.contains("2222"))
+    XCTAssertFalse(json.contains("repository"))
+    XCTAssertFalse(json.contains("token"))
+    XCTAssertFalse(json.contains("repoURL"))
+  }
+
   func testGraphCodecPreservesProjectRefsAcrossRepeatedRoundTrips() throws {
     let rootDate = Date(timeIntervalSinceReferenceDate: 812133256.5609074)
     let nestedDate = Date(timeIntervalSinceReferenceDate: 812133256.5608349)
     let nodeDate = Date(timeIntervalSinceReferenceDate: 812133256.5604343)
-    let rootRef = ProjectRef(path: "C:\\synthetic\\source project", name: "source", lastOpenedAt: rootDate)
+    let rootRef = ProjectRef(
+      path: "C:\\synthetic\\source project",
+      name: "source",
+      lastOpenedAt: rootDate,
+      metadata: .local)
     let nestedRef = ProjectRef(path: rootRef.path, name: "nested", lastOpenedAt: nestedDate)
     let child = LoopNode(
       id: UUID(uuidString: "11111111-1111-4111-8111-111111111111")!,

@@ -261,7 +261,7 @@ public struct ProjectPersistence: Sendable {
     saveRecentProjects(loadRecentProjects().filter { $0.path != path })
   }
 
-  private func saveRecentProjects(_ projects: [ProjectRef]) {
+  func saveRecentProjects(_ projects: [ProjectRef]) {
     guard let data = try? JSONEncoder().encode(projects) else { return }
     try? data.write(to: recentProjectsFile, options: .atomic)
   }

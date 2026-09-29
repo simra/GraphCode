@@ -35,6 +35,7 @@ struct GraphOverview: Equatable {
   struct Folder: Identifiable, Equatable {
     let path: String
     let name: String
+    let metadata: ProjectMetadata?
     let loopCount: Int
     /// `"5 loops · 3 running"`, or `nil` for a folder with nothing in it yet — see
     /// `Self.caption`.
@@ -56,7 +57,7 @@ struct GraphOverview: Equatable {
     /// short.
     func widened(to width: CGFloat) -> Folder {
       Folder(
-        path: path, name: name, loopCount: loopCount, caption: caption,
+        path: path, name: name, metadata: metadata, loopCount: loopCount, caption: caption,
         entryPorts: entryPorts, isGlobal: isGlobal,
         band: CGRect(x: band.minX, y: band.minY, width: width, height: band.height))
     }
@@ -234,6 +235,7 @@ struct GraphOverview: Equatable {
     let folder = Folder(
       path: path,
       name: graph.isGlobal ? "No folder" : graph.project.name,
+      metadata: graph.project.metadata,
       loopCount: graph.nodes.count,
       caption: caption(for: graph),
       entryPorts: loops.compactMap(\.entryPort),

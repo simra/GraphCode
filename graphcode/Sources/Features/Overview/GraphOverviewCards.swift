@@ -120,7 +120,12 @@ extension GraphOverviewView {
       // sidebar row's, because the band is the folder.
       .contextMenu {
         if !folder.isGlobal {
-          FolderHygieneMenuItems(store: store, projectPath: folder.path)
+          FolderHygieneMenuItems(
+            store: store,
+            project: ProjectRef(
+              path: folder.path,
+              name: folder.name,
+              metadata: folder.metadata))
           RemoteConnectionMenuItems(store: store, projectPath: folder.path)
           Divider()
           Button("Close Folder") { store.send(.projectCloseTapped(folder.path)) }

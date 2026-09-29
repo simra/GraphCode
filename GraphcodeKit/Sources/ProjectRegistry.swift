@@ -56,6 +56,7 @@ public actor ProjectRegistry {
   private let platformPaths: any PlatformPaths
   private let replayStore: DaemonReplayStore
   private let settingsURL: URL
+  private let classifyProject: @Sendable (String) -> ProjectMetadata
   private var stores: [String: GraphStore] = [:]
   private var connections: [UUID: DaemonConnectionChannel] = [:]
   private var connectionProjectPaths: [UUID: Set<String>] = [:]
@@ -177,7 +178,10 @@ public actor ProjectRegistry {
     terminateQuickChat: (@Sendable (LoopNode, String?) async -> Result<Void, CLISessionError>)? =
       nil,
     quickChatExists: (@Sendable (LoopNode, String?) async -> Bool)? = nil,
-    enumerateQuickChatSessions: (@Sendable () async -> [UUID])? = nil
+    enumerateQuickChatSessions: (@Sendable () async -> [UUID])? = nil,
+    classifyProject: @escaping @Sendable (String) -> ProjectMetadata = {
+      ProjectMetadata.inferred(fromProjectPath: $0)
+    }
   ) {
     self.platformPaths = platformPaths
     persistence = ProjectPersistence(
@@ -187,6 +191,7 @@ public actor ProjectRegistry {
     quickChatStore = QuickChatStore(baseDirectory: persistenceDirectory)
     self.replayStore = replayStore
     self.settingsURL = settingsURL
+    self.classifyProject = classifyProject
     self.ensureSession = ensureSession
     self.terminateSession = terminateSession
     self.restartSession = restartSession
@@ -524,7 +529,7 @@ public actor ProjectRegistry {
 
     switch command {
     case .listRecentProjects:
-      let recentProjects = persistence.loadRecentProjects()
+      let recentProjects = authoritativeRecentProjects()
       if case .v1 = channel.mode {
         await send(.recentProjectsListed(recentProjects), to: connectionID)
       }
@@ -561,7 +566,7 @@ public actor ProjectRegistry {
           for: connectionID,
           channel: channel)
       }
-      response = .recentProjectsListed(persistence.loadRecentProjects())
+      response = .recentProjectsListed(authoritativeRecentProjects())
       error = nil
 
     case .openGlobalGraph:
@@ -606,7 +611,7 @@ public actor ProjectRegistry {
       // delete and put the graph back.
       writer.forget(path: canonicalPath)
       persistence.deleteGraph(path: canonicalPath)
-      response = .recentProjectsListed(persistence.loadRecentProjects())
+      response = .recentProjectsListed(authoritativeRecentProjects())
       error = nil
 
     case .listQuickChats:
@@ -730,9 +735,7 @@ public actor ProjectRegistry {
           error = "loop session unavailable: no loop \(nodeID) in this graph"
           break
         }
-        if let compatibilityError = Self.terminalCompatibilityError(
-          projectPath: canonicalPath)
-        {
+        if let compatibilityError = Self.terminalCompatibilityError(project: graph.project) {
           error = compatibilityError
           break
         }
@@ -883,15 +886,15 @@ public actor ProjectRegistry {
   public func responseEvent(for command: DaemonCommand) async -> DaemonEvent? {
     switch command {
     case .listRecentProjects:
-      return .recentProjectsListed(persistence.loadRecentProjects())
+      return .recentProjectsListed(authoritativeRecentProjects())
     case .restoreOpenProjects:
-      return .recentProjectsListed(persistence.loadRecentProjects())
+      return .recentProjectsListed(authoritativeRecentProjects())
     case .openProject(let path), .closeProject(let path), .forgetProject(let path):
       let canonical = Self.canonicalize(path, platformPaths: platformPaths)
       guard let store = stores[canonical] else { return nil }
       return .graphChanged(await store.graph)
     case .deleteProjectGraph:
-      return .recentProjectsListed(persistence.loadRecentProjects())
+      return .recentProjectsListed(authoritativeRecentProjects())
     case .listQuickChats:
       guard let chats = try? quickChatStore.loadResult() else { return nil }
       switch chats {
@@ -969,10 +972,11 @@ public actor ProjectRegistry {
     }
   }
 
-  static func terminalCompatibilityError(projectPath: String) -> String? {
-    guard RemoteProjectLocation.parse(projectPath: projectPath) != nil else { return nil }
+  static func terminalCompatibilityError(project: ProjectRef) -> String? {
+    if project.path == LoopGraphScope.globalPath { return nil }
+    guard project.metadata?.capabilities.interactiveTerminals != true else { return nil }
     return
-      "remote terminal streaming is not supported in this app yet; no remote session was started"
+      "interactive terminals are not supported for this project; no session was started"
   }
 
   private func open(
@@ -988,7 +992,11 @@ public actor ProjectRegistry {
     guard canonicalPath != LoopGraphScope.globalPath else { return snapshot }
     let project = snapshot.project
     persistence.recordOpened(
-      ProjectRef(path: project.path, name: project.name, lastOpenedAt: Date()))
+      ProjectRef(
+        path: project.path,
+        name: project.name,
+        lastOpenedAt: Date(),
+        metadata: project.metadata))
     guard rememberOpen(canonicalPath) else { return snapshot }
     await joinSidebars(to: store, at: canonicalPath, excluding: connectionID)
     return snapshot
@@ -1201,9 +1209,18 @@ public actor ProjectRegistry {
 
   private func store(forProjectPath path: String) async -> GraphStore {
     if let existing = stores[path] { return existing }
-    let scope = LoopGraphScope(projectPath: path, name: Self.displayName(for: path))
-    let graph = writer.load(path: path) ?? LoopGraph(scope: scope)
-    let persistence = self.persistence
+    let persistedGraph = writer.load(path: path)
+    let metadata = projectMetadata(for: path, persistedGraph: persistedGraph)
+    let reference = ProjectRef(
+      path: path,
+      name: Self.displayName(for: path),
+      metadata: metadata)
+    var graph = persistedGraph ?? LoopGraph(project: reference)
+    graph.project = ProjectRef(
+      path: path,
+      name: graph.project.name,
+      lastOpenedAt: graph.project.lastOpenedAt,
+      metadata: metadata)
     let replayStore = self.replayStore
     // A cross-graph spawn arrives here as a plain request; hopping through an unstructured
     // `Task` is what lets this actor re-enter itself to reach a *different* store without
@@ -1293,6 +1310,32 @@ public actor ProjectRegistry {
     // reboots on its own schedule, so its loops need a repeating check as well.
     if RemoteProjectLocation.parse(projectPath: path) != nil { startRemoteLivenessSweep() }
     return newStore
+  }
+
+  private func projectMetadata(
+    for canonicalPath: String,
+    persistedGraph: LoopGraph?
+  ) -> ProjectMetadata {
+    if let stored = persistence.loadRecentProjects().first(where: {
+      Self.canonicalize($0.path, platformPaths: platformPaths) == canonicalPath
+    })?.metadata {
+      return stored
+    }
+    if let stored = persistedGraph?.project.metadata { return stored }
+    return classifyProject(canonicalPath)
+  }
+
+  private func authoritativeRecentProjects() -> [ProjectRef] {
+    let stored = persistence.loadRecentProjects()
+    let enriched = stored.map { project in
+      guard project.metadata == nil else { return project }
+      var copy = project
+      copy.metadata = classifyProject(
+        Self.canonicalize(project.path, platformPaths: platformPaths))
+      return copy
+    }
+    if enriched != stored { persistence.saveRecentProjects(enriched) }
+    return enriched
   }
 
   /// The global graph's reserved path is a `graphcode://` URL, and a remote project's

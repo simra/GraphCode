@@ -10,6 +10,11 @@ import {
   type NewLoopFormState,
 } from "../forms/newLoop";
 import type { NodeDraftPayload } from "../protocol/commands";
+import type { ProjectRef } from "../protocol/domain";
+import {
+  projectCapabilityDisabledReason,
+  projectSupports,
+} from "../state/projectCapabilities";
 import { useDialogFocus } from "./dialogFocus";
 
 const stepNames = ["Shape", "Brief", "Execution", "Review"] as const;
@@ -36,14 +41,15 @@ function inputProps(errors: NewLoopErrors, field: keyof NewLoopFormState) {
 }
 
 export function NewLoopDialog({
-  projectName,
+  project,
   onClose,
   onCreate,
 }: {
-  projectName: string;
+  project: ProjectRef;
   onClose(): void;
   onCreate(draft: NodeDraftPayload): Promise<void>;
 }) {
+  const projectName = project.name;
   const [step, setStep] = useState(0);
   const [form, setForm] = useState<NewLoopFormState>(initialNewLoopForm);
   const [draftId] = useState(() => crypto.randomUUID());
@@ -376,7 +382,9 @@ export function NewLoopDialog({
                 <div>
                   <strong>Templates</strong>
                   <span>
-                    Disabled pending remote ownership investigation DT-005.
+                    {projectSupports(project, "templates")
+                      ? "This project supports templates; the Tauri picker is not implemented yet."
+                      : projectCapabilityDisabledReason(project, "templates")}
                   </span>
                 </div>
                 <button type="button" disabled>
@@ -385,7 +393,9 @@ export function NewLoopDialog({
                 <div>
                   <strong>Attachments</strong>
                   <span>
-                    Disabled pending secure native staging and DT-005.
+                    {projectSupports(project, "attachments")
+                      ? "This project supports attachments; secure Tauri staging is not implemented yet."
+                      : projectCapabilityDisabledReason(project, "attachments")}
                   </span>
                 </div>
                 <button type="button" disabled>

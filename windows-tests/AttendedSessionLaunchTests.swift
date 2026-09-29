@@ -54,14 +54,22 @@ struct AttendedSessionLaunchTests {
 
   @Test
   func remoteTerminalCompatibilityFailsClosedBeforeLaunch() {
+    let path = "C:\\synthetic\\same"
     let message = ProjectRegistry.terminalCompatibilityError(
-      projectPath: "ssh://dev@build-box/workspaces/project")
+      project: ProjectRef(path: path, name: "SSH", metadata: .ssh))
 
     #expect(
       message
-        == "remote terminal streaming is not supported in this app yet; "
-        + "no remote session was started")
-    #expect(ProjectRegistry.terminalCompatibilityError(projectPath: "C:\\work\\project") == nil)
+        == "interactive terminals are not supported for this project; no session was started")
+    #expect(
+      ProjectRegistry.terminalCompatibilityError(
+        project: ProjectRef(path: path, name: "Local", metadata: .local)) == nil)
+    #expect(
+      ProjectRegistry.terminalCompatibilityError(
+        project: ProjectRef(path: path, name: "Legacy")) != nil)
+    #expect(
+      ProjectRegistry.terminalCompatibilityError(
+        project: ProjectRef(path: LoopGraphScope.globalPath, name: "Global")) == nil)
   }
 
   @Test
@@ -100,7 +108,6 @@ struct AttendedSessionLaunchTests {
     #expect(result?.response == nil)
     #expect(
       result?.error
-        == "remote terminal streaming is not supported in this app yet; "
-        + "no remote session was started")
+        == "interactive terminals are not supported for this project; no session was started")
   }
 }

@@ -6,7 +6,20 @@ describe("NewLoopDialog", () => {
   it("starts with all five domain loop shapes and planned capability IDs", () => {
     const markup = renderToStaticMarkup(
       <NewLoopDialog
-        projectName="Graph"
+        project={{
+          path: "C:\\work\\graph",
+          name: "Graph",
+          metadata: {
+            location: "local",
+            capabilities: {
+              revealInFileManager: true,
+              templates: true,
+              attachments: true,
+              interactiveTerminals: true,
+              diagnostics: true,
+            },
+          },
+        }}
         onClose={() => undefined}
         onCreate={async () => undefined}
       />,

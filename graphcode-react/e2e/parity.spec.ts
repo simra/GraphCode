@@ -1,6 +1,16 @@
 import { expect, test, type Page } from "@playwright/test";
 
 const projectPath = "C:\\fixtures\\GraphCode E2E";
+const projectMetadata = {
+  location: "local",
+  capabilities: {
+    revealInFileManager: true,
+    templates: true,
+    attachments: true,
+    interactiveTerminals: true,
+    diagnostics: true,
+  },
+};
 const sketchId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const quickChat = {
   id: "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
@@ -71,7 +81,13 @@ const envelopes = [
     kind: "event",
     sequence: 1,
     event: {
-      recentProjectsListed: [{ path: projectPath, name: "GraphCode E2E" }],
+      recentProjectsListed: [
+        {
+          path: projectPath,
+          name: "GraphCode E2E",
+          metadata: projectMetadata,
+        },
+      ],
     },
   },
   {
@@ -90,7 +106,11 @@ const envelopes = [
       graphChanged: {
         id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
         revision: 7,
-        project: { path: projectPath, name: "GraphCode E2E" },
+        project: {
+          path: projectPath,
+          name: "GraphCode E2E",
+          metadata: projectMetadata,
+        },
         mailroomDigest: { count: 1, latestID: 12, fingerprint: 12 },
         nodes: [
           {

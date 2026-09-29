@@ -18,11 +18,31 @@ const optional = <T extends z.ZodType>(schema: T) =>
     schema.optional(),
   );
 
+const projectMetadataSchema = z.object({
+  location: z.enum(["local", "ssh", "codespace"]),
+  capabilities: z
+    .object({
+      revealInFileManager: z.boolean().default(false),
+      templates: z.boolean().default(false),
+      attachments: z.boolean().default(false),
+      interactiveTerminals: z.boolean().default(false),
+      diagnostics: z.boolean().default(false),
+    })
+    .default({
+      revealInFileManager: false,
+      templates: false,
+      attachments: false,
+      interactiveTerminals: false,
+      diagnostics: false,
+    }),
+});
+
 const projectRefSchema = z
   .object({
     path: z.string().min(1),
     name: z.string().min(1),
     lastOpenedAt: z.union([z.string(), z.number()]).optional(),
+    metadata: optional(projectMetadataSchema),
   })
   .passthrough();
 

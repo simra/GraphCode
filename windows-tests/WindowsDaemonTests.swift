@@ -16,6 +16,82 @@ final class WindowsDaemonTests: XCTestCase {
     }
   }
 
+  func testRegistryMetadataStaysAuthoritativeAcrossRecentOpenAndReconnect() async throws {
+    let root = FileManager.default.temporaryDirectory
+      .appendingPathComponent("graphcode-classification-\(UUID().uuidString)", isDirectory: true)
+    let projectDirectory = root.appendingPathComponent("identical-project", isDirectory: true)
+    try FileManager.default.createDirectory(
+      at: projectDirectory, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+
+    let first = ProjectRegistry(
+      persistenceDirectory: root,
+      ensureSession: nil,
+      terminateSession: nil,
+      restartSession: nil,
+      evaluatePredicate: nil,
+      checkPredicate: nil,
+      deliverMessage: nil,
+      captureScript: nil,
+      readUsage: nil,
+      readGoalVerdict: nil,
+      readActivity: nil,
+      readSummary: nil,
+      readPresence: nil,
+      sessionAlive: nil,
+      composeBoard: nil,
+      persistsSynchronously: true,
+      classifyProject: { _ in .ssh })
+    let firstTransport = RecordingDaemonConnection()
+    let firstConnection = firstTransport.id
+    await first.addConnection(id: firstConnection, connection: firstTransport)
+
+    let opened = await first.apply(
+      .openProject(path: projectDirectory.path),
+      connectionID: firstConnection)
+    guard case .graphChanged(let firstGraph) = opened?.response else {
+      return XCTFail("Expected graph snapshot")
+    }
+    XCTAssertEqual(firstGraph.project.metadata, ProjectMetadata.ssh)
+
+    let recent = await first.apply(.listRecentProjects, connectionID: firstConnection)
+    guard case .recentProjectsListed(let firstProjects) = recent?.response else {
+      return XCTFail("Expected recent projects")
+    }
+    XCTAssertEqual(firstProjects.first?.metadata, ProjectMetadata.ssh)
+
+    let reconnected = ProjectRegistry(
+      persistenceDirectory: root,
+      ensureSession: nil,
+      terminateSession: nil,
+      restartSession: nil,
+      evaluatePredicate: nil,
+      checkPredicate: nil,
+      deliverMessage: nil,
+      captureScript: nil,
+      readUsage: nil,
+      readGoalVerdict: nil,
+      readActivity: nil,
+      readSummary: nil,
+      readPresence: nil,
+      sessionAlive: nil,
+      composeBoard: nil,
+      persistsSynchronously: true,
+      classifyProject: { _ in .local })
+    let reconnectTransport = RecordingDaemonConnection()
+    let reconnectID = reconnectTransport.id
+    await reconnected.addConnection(id: reconnectID, connection: reconnectTransport)
+    _ = await reconnected.apply(.restoreOpenProjects, connectionID: reconnectID)
+    let reopened = await reconnected.apply(
+      .openProject(path: projectDirectory.path),
+      connectionID: reconnectID)
+    guard case .graphChanged(let reconnectedGraph) = reopened?.response else {
+      return XCTFail("Expected reconnected graph snapshot")
+    }
+    XCTAssertEqual(reconnectedGraph.project.path, projectDirectory.path)
+    XCTAssertEqual(reconnectedGraph.project.metadata, ProjectMetadata.ssh)
+  }
+
   func testGraphcodeSettingsPersistAllProductChoices() throws {
     let url = FileManager.default.temporaryDirectory
       .appendingPathComponent("graphcode-settings-\(UUID().uuidString)", isDirectory: true)

@@ -118,7 +118,7 @@ extension AppSidebarView {
     Button("Move Up") { store.send(.projectMoveUpTapped(project.id)) }
     Button("Move Down") { store.send(.projectMoveDownTapped(project.id)) }
     Divider()
-    FolderHygieneMenuItems(store: store, projectPath: project.id)
+    FolderHygieneMenuItems(store: store, project: project.graph.project)
     RemoteConnectionMenuItems(store: store, projectPath: project.id)
     Divider()
     Button("Close") { store.send(.projectCloseTapped(project.id)) }

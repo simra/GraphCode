@@ -1,0 +1,23 @@
+{
+  "version": 2,
+  "kind": "event",
+  "sequence": 22,
+  "event": {
+    "recentProjectsListed": [
+      {
+        "path": "C:\\synthetic\\identical",
+        "name": "Identical Project",
+        "metadata": {
+          "location": "ssh",
+          "capabilities": {
+            "revealInFileManager": false,
+            "templates": false,
+            "attachments": false,
+            "interactiveTerminals": false,
+            "diagnostics": true
+          }
+        }
+      }
+    ]
+  }
+}

@@ -47,7 +47,7 @@ public struct LoopGraph: Identifiable, Codable, Equatable, Sendable {
 
   public var project: ProjectRef {
     get { scope.projectRef }
-    set { scope = LoopGraphScope(projectPath: newValue.path, name: newValue.name) }
+    set { scope = newValue.path == LoopGraphScope.globalPath ? .global : .project(newValue) }
   }
 
   public var isGlobal: Bool { scope.isGlobal }
@@ -100,7 +100,7 @@ public struct LoopGraph: Identifiable, Codable, Equatable, Sendable {
   ) {
     self.init(
       id: id,
-      scope: LoopGraphScope(projectPath: project.path, name: project.name),
+      scope: project.path == LoopGraphScope.globalPath ? .global : .project(project),
       nodes: nodes,
       edges: edges)
   }

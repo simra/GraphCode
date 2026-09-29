@@ -2,6 +2,10 @@ import type { AppState } from "../state/graphState";
 import { promotionTargetForNode } from "../forms/sketchPromotion";
 import { currentGraph, selectedNode } from "../state/graphState";
 import { supportsStructuredTranscript } from "../state/transcriptHistory";
+import {
+  projectCapabilityDisabledReason,
+  projectSupports,
+} from "../state/projectCapabilities";
 
 export type CommandId =
   | "app.commandPalette"
@@ -210,6 +214,7 @@ export function createCommandRegistry(
     : undefined;
   const projectGraph =
     graph?.project.path === "graphcode://global" ? undefined : graph;
+  const project = graph?.project;
   const node = selectedNode(state);
   const connected = state.connection.phase === "connected";
   const nodeResolved =
@@ -766,13 +771,19 @@ export function createCommandRegistry(
       description: "Ask all backends in this graph for fresh usage readings",
       category: "Loop",
       surfaces: ["node"],
-      ...(graph && connected && actions.refreshUsage
+      ...(graph &&
+      connected &&
+      actions.refreshUsage &&
+      projectSupports(project, "diagnostics")
         ? { enabled: true, execute: actions.refreshUsage }
         : {
             ...unavailable(
-              graph
-                ? "Reconnect to graphcoded before refreshing usage"
-                : "Select an open project first",
+              graph && !projectSupports(project, "diagnostics")
+                ? (projectCapabilityDisabledReason(project, "diagnostics") ??
+                    "Diagnostics are unavailable for this project")
+                : graph
+                  ? "Reconnect to graphcoded before refreshing usage"
+                  : "Select an open project first",
             ),
             execute: () => undefined,
           }),
@@ -787,19 +798,23 @@ export function createCommandRegistry(
       ...(node &&
       connected &&
       actions.openHistory &&
+      projectSupports(project, "diagnostics") &&
       supportsStructuredTranscript(node.backend)
         ? { enabled: true, execute: actions.openHistory }
         : {
             ...unavailable(
               !node
                 ? "Select a loop first"
-                : !supportsStructuredTranscript(node.backend)
-                  ? node.backend
-                    ? `${node.backend} does not advertise structured transcript support`
-                    : "This loop has no advertised transcript provider"
-                  : !connected
-                    ? "Reconnect to graphcoded before reading session history"
-                    : "Session history requires the desktop app",
+                : !projectSupports(project, "diagnostics")
+                  ? (projectCapabilityDisabledReason(project, "diagnostics") ??
+                    "Diagnostics are unavailable for this project")
+                  : !supportsStructuredTranscript(node.backend)
+                    ? node.backend
+                      ? `${node.backend} does not advertise structured transcript support`
+                      : "This loop has no advertised transcript provider"
+                    : !connected
+                      ? "Reconnect to graphcoded before reading session history"
+                      : "Session history requires the desktop app",
             ),
             execute: () => undefined,
           }),
@@ -810,14 +825,22 @@ export function createCommandRegistry(
       description: "Open or attach to the selected loop's zmx session",
       category: "Loop",
       surfaces: ["node"],
-      ...(node && !isComposite && actions.openTerminal
+      ...(node &&
+      !isComposite &&
+      actions.openTerminal &&
+      projectSupports(project, "interactiveTerminals")
         ? { enabled: true, execute: actions.openTerminal }
         : {
             ...unavailable(
               node
                 ? isComposite
                   ? "Composite loops open their child graph"
-                  : "Terminal streaming requires the desktop app"
+                  : !projectSupports(project, "interactiveTerminals")
+                    ? (projectCapabilityDisabledReason(
+                        project,
+                        "interactiveTerminals",
+                      ) ?? "Interactive terminals are unavailable")
+                    : "Terminal streaming requires the desktop app"
                 : "Select a loop first",
             ),
             execute: () => undefined,

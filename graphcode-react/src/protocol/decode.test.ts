@@ -1,4 +1,7 @@
 import { describe, expect, it } from "vitest";
+import codespaceClassification from "../../../graphcode-windows/fixtures/daemon-v2-project-classification-codespace.json";
+import localClassification from "../../../graphcode-windows/fixtures/daemon-v2-project-classification-local.json";
+import sshClassification from "../../../graphcode-windows/fixtures/daemon-v2-project-classification-ssh.json";
 import oversizedGrace from "../../../windows-tests/fixtures/settings/oversized-grace.json";
 import { decodeEnvelope, ProtocolDecodeError } from "./decode";
 import { MAX_RESOLVED_SESSION_GRACE_MINUTES } from "./domain";
@@ -50,6 +53,7 @@ describe("decodeEnvelope", () => {
         },
       },
     });
+
     const projectsEnvelope = decodeEnvelope({
       version: 2,
       kind: "response",
@@ -78,6 +82,88 @@ describe("decodeEnvelope", () => {
       throw new Error("Expected recentProjectsListed response");
     }
     expect(projectsEnvelope.event.projects[0].path).toBe("C:\\work\\live");
+  });
+
+  it("decodes authoritative project metadata and accepts legacy references", () => {
+    const current = [
+      decodeEnvelope(localClassification),
+      decodeEnvelope(sshClassification),
+      decodeEnvelope(codespaceClassification),
+    ];
+    const legacy = decodeEnvelope({
+      version: 2,
+      kind: "event",
+      sequence: 15,
+      event: {
+        recentProjectsListed: [{ path: "C:\\same\\project", name: "Legacy" }],
+      },
+    });
+
+    if (
+      current.some(
+        (envelope) =>
+          envelope.kind !== "event" ||
+          envelope.event.type !== "recentProjectsListed",
+      ) ||
+      legacy.kind !== "event" ||
+      legacy.event.type !== "recentProjectsListed"
+    ) {
+      throw new Error("Expected recent project events");
+    }
+    const projects = current.map((envelope) => {
+      if (
+        envelope.kind !== "event" ||
+        envelope.event.type !== "recentProjectsListed"
+      ) {
+        throw new Error("Expected recent project event");
+      }
+      return envelope.event.projects[0];
+    });
+    expect(projects.map((project) => project.path)).toEqual([
+      "C:\\synthetic\\identical",
+      "C:\\synthetic\\identical",
+      "C:\\synthetic\\identical",
+    ]);
+    expect(projects.map((project) => project.metadata?.location)).toEqual([
+      "local",
+      "ssh",
+      "codespace",
+    ]);
+    expect(legacy.event.projects[0].metadata).toBeUndefined();
+  });
+
+  it("defaults omitted capability flags to unsupported", () => {
+    const envelope = decodeEnvelope({
+      version: 2,
+      kind: "event",
+      sequence: 16,
+      event: {
+        recentProjectsListed: [
+          {
+            path: "C:\\same\\project",
+            name: "Partial",
+            metadata: {
+              location: "ssh",
+              capabilities: { diagnostics: true },
+            },
+          },
+        ],
+      },
+    });
+
+    if (
+      envelope.kind !== "event" ||
+      envelope.event.type !== "recentProjectsListed"
+    ) {
+      throw new Error("Expected recent project event");
+    }
+    expect(envelope.event.projects[0].metadata?.capabilities).toEqual({
+      revealInFileManager: false,
+      templates: false,
+      attachments: false,
+      interactiveTerminals: false,
+      diagnostics: true,
+    });
   });
 
   it("decodes the shared settings snapshot and application timing", () => {

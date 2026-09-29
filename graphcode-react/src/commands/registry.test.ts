@@ -19,7 +19,20 @@ function stateWithSelectedNode(): AppState {
     graphs: {
       "C:\\work\\graph": {
         id: "graph",
-        project: { path: "C:\\work\\graph", name: "Graph" },
+        project: {
+          path: "C:\\work\\graph",
+          name: "Graph",
+          metadata: {
+            location: "local",
+            capabilities: {
+              revealInFileManager: true,
+              templates: true,
+              attachments: true,
+              interactiveTerminals: true,
+              diagnostics: true,
+            },
+          },
+        },
         nodes: [
           { id: "node-a", title: "A", state: "running" },
           { id: "node-b", title: "B", state: "idle" },
@@ -107,6 +120,48 @@ describe("command registry", () => {
     expect(sketchCommand?.enabled).toBe(true);
     sketchCommand?.execute();
     expect(openTerminal).toHaveBeenCalledTimes(2);
+  });
+
+  it("gates terminals and diagnostics from authoritative project capabilities", () => {
+    const state = stateWithSelectedNode();
+    state.graphs["C:\\work\\graph"].project.metadata = {
+      location: "ssh",
+      capabilities: {
+        revealInFileManager: false,
+        templates: false,
+        attachments: false,
+        interactiveTerminals: false,
+        diagnostics: false,
+      },
+    };
+    const commands = createCommandRegistry(state, {
+      openPalette: vi.fn(),
+      clearSelection: vi.fn(),
+      selectNode: vi.fn(),
+      openTerminal: vi.fn(),
+      openHistory: vi.fn(),
+      refreshUsage: vi.fn(async () => undefined),
+    });
+
+    expect(
+      commands.find((command) => command.id === "loop.openTerminal"),
+    ).toMatchObject({
+      enabled: false,
+      disabledReason:
+        "Interactive terminals are not supported for SSH projects",
+    });
+    expect(
+      commands.find((command) => command.id === "loop.refreshUsage"),
+    ).toMatchObject({
+      enabled: false,
+      disabledReason: "Diagnostics are not supported for SSH projects",
+    });
+    expect(
+      commands.find((command) => command.id === "loop.openHistory"),
+    ).toMatchObject({
+      enabled: false,
+      disabledReason: "Diagnostics are not supported for SSH projects",
+    });
   });
 
   it("capability-gates structured session history by provider", () => {

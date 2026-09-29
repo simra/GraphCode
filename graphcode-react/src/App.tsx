@@ -2174,7 +2174,7 @@ export default function App() {
       ) : null}
       {newLoopOpen && selectedGraph && selectedProjectPath ? (
         <NewLoopDialog
-          projectName={selectedGraph.project.name}
+          project={selectedGraph.project}
           onClose={() => setNewLoopOpen(false)}
           onCreate={async (draft: NodeDraftPayload) => {
             setPendingCreatedNode({

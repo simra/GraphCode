@@ -1,7 +1,23 @@
+export type ProjectLocationKind = "local" | "ssh" | "codespace";
+
+export interface ProjectCapabilities {
+  revealInFileManager: boolean;
+  templates: boolean;
+  attachments: boolean;
+  interactiveTerminals: boolean;
+  diagnostics: boolean;
+}
+
+export interface ProjectMetadata {
+  location: ProjectLocationKind;
+  capabilities: ProjectCapabilities;
+}
+
 export interface ProjectRef {
   path: string;
   name: string;
   lastOpenedAt?: string | number;
+  metadata?: ProjectMetadata;
 }
 
 export type EncodedEnum = string | Record<string, unknown>;

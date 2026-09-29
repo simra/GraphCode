@@ -300,10 +300,13 @@ struct ProjectCanvasView: View {
   /// without opening anything; with nothing reclaimable the item stays, without one.
   @ViewBuilder
   private var folderMenu: some View {
-    let path = store.graph.project.path
+    let project = store.graph.project
+    let path = project.path
     if AppWorktreesReducer.tracksWorktrees(path) {
       Button(worktreesMenuTitle) { store.send(.worktreeSweepTapped) }
       Button("Project Settings…") { store.send(.projectSettingsTapped) }
+    }
+    if project.metadata?.capabilities.revealInFileManager == true {
       Button("Open in Finder") { NSWorkspace.shared.open(URL(fileURLWithPath: path)) }
     }
     // The whole-canvas counterparts to a card's Export Loop…/Import Loops Here…:
