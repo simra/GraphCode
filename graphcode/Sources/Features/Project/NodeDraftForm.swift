@@ -27,10 +27,16 @@ import SwiftUI
 struct NodeDraftForm: View {
   @Bindable var store: StoreOf<ProjectFeature>
 
-  /// Whether this graph's repository lives on another machine — see
-  /// `RemoteProjectLocation`. Drives which bindings the form can honestly offer.
-  private var isRemoteProject: Bool {
-    RemoteProjectLocation.parse(projectPath: store.graph.project.path) != nil
+  private var supportsLocalWorktrees: Bool {
+    store.graph.project.metadata?.location == .local
+  }
+
+  private var supportsTemplates: Bool {
+    store.graph.project.metadata?.capabilities.templates == true
+  }
+
+  private var supportsAttachments: Bool {
+    store.graph.project.metadata?.capabilities.attachments == true
   }
 
   var body: some View {
@@ -75,7 +81,9 @@ struct NodeDraftForm: View {
     // accept text, so a pasted screenshot would land nowhere and read as the dialog
     // ignoring it. Off while the template picker has the body — that sheet's ⌘V
     // belongs to its search field.
-    .catchingPastedImages(isEnabled: !store.templates.isPickerOpen) { payload in
+    .catchingPastedImages(
+      isEnabled: supportsAttachments && !store.templates.isPickerOpen
+    ) { payload in
       store.send(.draftAttachment(.imageArrived(payload)))
     }
   }
@@ -120,6 +128,11 @@ struct NodeDraftForm: View {
     }
     .buttonStyle(.plain)
     .keyboardShortcut("t", modifiers: .command)
+    .disabled(!supportsTemplates)
+    .help(
+      supportsTemplates
+        ? "Choose a template"
+        : "Templates are unavailable because this project did not advertise support")
   }
   @ViewBuilder
   private var typeFields: some View {
@@ -164,7 +177,7 @@ struct NodeDraftForm: View {
           }
           .labelsHidden()
         }
-        if !isRemoteProject && !store.graph.isGlobal {
+        if supportsLocalWorktrees && !store.graph.isGlobal {
           DraftField(
             label: "Branch", fromTemplate: store.templateSetFields.contains(.branch)
           ) {

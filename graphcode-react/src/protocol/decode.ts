@@ -37,12 +37,18 @@ const projectMetadataSchema = z.object({
     }),
 });
 
+const lossyProjectMetadataSchema = z.preprocess((value) => {
+  if (value === null || value === undefined) return undefined;
+  const decoded = projectMetadataSchema.safeParse(value);
+  return decoded.success ? decoded.data : undefined;
+}, projectMetadataSchema.optional());
+
 const projectRefSchema = z
   .object({
     path: z.string().min(1),
     name: z.string().min(1),
     lastOpenedAt: z.union([z.string(), z.number()]).optional(),
-    metadata: optional(projectMetadataSchema),
+    metadata: lossyProjectMetadataSchema,
   })
   .passthrough();
 

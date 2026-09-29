@@ -7,8 +7,11 @@ extension AppFeature {
   /// Called from `.nodeTapped`, which every click, key and palette selection reaches —
   /// blocked loops included, which `openNode` returns early for — and from Back/Forward,
   /// which deliberately does not.
-  func resumeCodespace(_ projectPath: String) -> Effect<Action> {
-    guard let location = Self.codespace(atProjectPath: projectPath) else { return .none }
+  func resumeCodespace(_ project: ProjectRef?) -> Effect<Action> {
+    guard project?.metadata?.location == .codespace,
+      let project,
+      let location = Self.codespace(atProjectPath: project.path)
+    else { return .none }
     @Dependency(\.codespaceReconnect) var codespaceReconnect
     return .run { _ in codespaceReconnect.request(location) }
   }

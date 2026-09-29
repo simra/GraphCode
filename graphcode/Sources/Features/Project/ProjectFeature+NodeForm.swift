@@ -64,7 +64,9 @@ extension ProjectFeature {
     // here, and a failure needs somewhere to be shown. If it fails, the node is
     // still created — unbound rather than not at all — since losing the loop over a
     // branch that already exists would be the more annoying outcome.
-    let request = state.newWorktreeRequest
+    let request =
+      state.graph.project.metadata?.location == .local
+      ? state.newWorktreeRequest : nil
     return .merge(
       closedWatch,
       .run { send in
@@ -166,26 +168,37 @@ extension ProjectFeature {
     state.draftParentIsCustodial = custodial
     state.templates = TemplateFormState()
     state.showingNewNodeForm = true
-    let repositoryPath = state.graph.project.path
-    return .merge(
-      .run { send in
+    let project = state.graph.project
+    let repositoryPath = project.path
+    let supportsLocalWorktrees = project.metadata?.location == .local
+    let supportsTemplates = project.metadata?.capabilities.templates == true
+    let loadWorktrees: Effect<Action> =
+      supportsLocalWorktrees
+      ? .run { send in
         // A non-repo folder just yields nothing — a missing worktree list is not worth
         // an error banner when the picker degrades to "None" on its own.
         let worktrees = (try? await gitClient.listWorktrees(repositoryPath)) ?? []
         await send(.worktreesLoaded(worktrees))
-      },
-      // The template library rides in with the form: read once, then kept current by
-      // the directory watch, so an external edit or a `git pull` shows up without a
-      // relaunch (PROMPT_TEMPLATES.md § Storage).
-      .run { send in
+      }
+      : .none
+    let loadTemplates: Effect<Action> =
+      supportsTemplates
+      ? .run { send in
         await send(.templateLibraryChanged(await templateLibrary.load(repositoryPath)))
-      },
-      .run { [projectPath = repositoryPath] send in
+      }
+      : .none
+    let watchTemplates: Effect<Action> =
+      supportsTemplates
+      ? .run { [projectPath = repositoryPath] send in
         for await _ in templateLibrary.watch(projectPath) {
           await send(.templateLibraryChanged(await templateLibrary.load(projectPath)))
         }
       }
       .cancellable(id: CancelID.templateWatch, cancelInFlight: true)
-    )
+      : .none
+    return .merge(
+      loadWorktrees,
+      loadTemplates,
+      watchTemplates)
   }
 }

@@ -148,7 +148,7 @@ extension NodeDraftForm {
           .buttonStyle(.plain)
           .font(.system(size: 12.5))
           .foregroundStyle(.white.opacity(0.7))
-        if hasBriefToSave {
+        if hasBriefToSave && store.graph.project.metadata?.capabilities.templates == true {
           Button("Save as template…") { store.send(.saveTemplateTapped) }
             .buttonStyle(.plain)
             .font(.system(size: 12.5, weight: .semibold))

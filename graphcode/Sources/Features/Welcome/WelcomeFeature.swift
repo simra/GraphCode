@@ -316,6 +316,11 @@ struct WelcomeFeature {
         return .none
 
       case .remoteConnectionRequested(let projectPath):
+        guard
+          let project = state.recentProjects.first(where: { $0.path == projectPath }),
+          let kind = project.metadata?.location,
+          kind != .local
+        else { return .none }
         guard let location = RemoteProjectLocation.parse(projectPath: projectPath)
         else { return .none }
         state.remoteDraft = .inspecting(location, projectPath: projectPath)

@@ -59,16 +59,13 @@ extension ProjectFeature {
     // A composite never opens a session, so it has no prompt for a path to travel in —
     // and no prose field for the placeholder to land in either.
     guard state.draftLoopType != .composite else { return .none }
-    let projectPath = state.graph.project.path
-    // A remote loop runs on another machine, and the ensure dial that delivers
-    // graphcode's files there carries text (`ZmxSessionLauncher.remoteDeliveryScript`).
-    // A path to a file that host has never seen would read to the agent as a file that
-    // isn't there, which is worse than saying so here.
-    guard RemoteProjectLocation.parse(projectPath: projectPath) == nil else {
+    let project = state.graph.project
+    guard project.metadata?.capabilities.attachments == true else {
       state.draftAttachments.notice =
-        "Images can't be attached to a loop on another machine yet."
+        "Images can't be attached because this project did not advertise support."
       return .none
     }
+    let projectPath = project.path
     let number = state.draftAttachments.taken + 1
     let url = DraftImageImport.destination(
       projectPath: projectPath, nodeID: state.draftID, number: number,
@@ -89,6 +86,11 @@ extension ProjectFeature {
   /// Takes the chip, the file, and the placeholder — and renumbers the placeholders
   /// after it, so removing the middle of three doesn't leave one pointing at nothing.
   func removeDraftAttachment(_ state: inout State, _ id: UUID) -> Effect<Action> {
+    guard state.graph.project.metadata?.capabilities.attachments == true else {
+      state.draftAttachments.notice =
+        "Images can't be changed because this project did not advertise support."
+      return .none
+    }
     guard let index = state.draftAttachments.items.firstIndex(where: { $0.id == id })
     else { return .none }
     let total = state.draftAttachments.items.count
@@ -106,8 +108,10 @@ extension ProjectFeature {
   /// left alone: `NodeMemory.remove` takes them when the node itself goes.
   func cancelNodeForm(_ state: inout State) -> Effect<Action> {
     state.showingNewNodeForm = false
-    DraftImageImport.discardAll(
-      projectPath: state.graph.project.path, nodeID: state.draftID)
+    if state.graph.project.metadata?.capabilities.attachments == true {
+      DraftImageImport.discardAll(
+        projectPath: state.graph.project.path, nodeID: state.draftID)
+    }
     state.draftAttachments = DraftAttachments()
     return .cancel(id: CancelID.templateWatch)
   }

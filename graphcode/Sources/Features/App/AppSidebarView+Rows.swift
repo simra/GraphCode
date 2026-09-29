@@ -105,8 +105,7 @@ extension AppSidebarView {
 
   func sidebarGlyph(for project: ProjectFeature.State) -> String {
     if project.graph.isGlobal { return "point.3.connected.trianglepath.dotted" }
-    if RemoteProjectLocation.parse(projectPath: project.id) != nil { return "network" }
-    return "folder"
+    return project.graph.project.metadata?.location == .local ? "folder" : "network"
   }
 
   /// Three verbs, deliberately distinct: closing is reversible from the Add Folder menu,
@@ -119,7 +118,7 @@ extension AppSidebarView {
     Button("Move Down") { store.send(.projectMoveDownTapped(project.id)) }
     Divider()
     FolderHygieneMenuItems(store: store, project: project.graph.project)
-    RemoteConnectionMenuItems(store: store, projectPath: project.id)
+    RemoteConnectionMenuItems(store: store, project: project.graph.project)
     Divider()
     Button("Close") { store.send(.projectCloseTapped(project.id)) }
     Button("Remove from GraphCode") { store.send(.projectRemoveTapped(project.id)) }

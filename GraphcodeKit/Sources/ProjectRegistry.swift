@@ -1210,17 +1210,18 @@ public actor ProjectRegistry {
   private func store(forProjectPath path: String) async -> GraphStore {
     if let existing = stores[path] { return existing }
     let persistedGraph = writer.load(path: path)
-    let metadata = projectMetadata(for: path, persistedGraph: persistedGraph)
+    let metadata = classifyProject(path)
     let reference = ProjectRef(
       path: path,
       name: Self.displayName(for: path),
       metadata: metadata)
-    var graph = persistedGraph ?? LoopGraph(project: reference)
-    graph.project = ProjectRef(
-      path: path,
-      name: graph.project.name,
-      lastOpenedAt: graph.project.lastOpenedAt,
-      metadata: metadata)
+    let graph = graphByApplyingAuthoritativeProjectMetadata(
+      persistedGraph ?? LoopGraph(project: reference),
+      canonicalRootPath: path)
+    if let persistedGraph, persistedGraph != graph {
+      writer.save(graph)
+      if persistsSynchronously { writer.flush() }
+    }
     let replayStore = self.replayStore
     // A cross-graph spawn arrives here as a plain request; hopping through an unstructured
     // `Task` is what lets this actor re-enter itself to reach a *different* store without
@@ -1312,23 +1313,31 @@ public actor ProjectRegistry {
     return newStore
   }
 
-  private func projectMetadata(
-    for canonicalPath: String,
-    persistedGraph: LoopGraph?
-  ) -> ProjectMetadata {
-    if let stored = persistence.loadRecentProjects().first(where: {
-      Self.canonicalize($0.path, platformPaths: platformPaths) == canonicalPath
-    })?.metadata {
-      return stored
+  private func graphByApplyingAuthoritativeProjectMetadata(
+    _ graph: LoopGraph,
+    canonicalRootPath: String? = nil
+  ) -> LoopGraph {
+    var copy = graph
+    if !copy.isGlobal {
+      let project = copy.project
+      let path =
+        canonicalRootPath ?? Self.canonicalize(project.path, platformPaths: platformPaths)
+      copy.project = ProjectRef(
+        path: path,
+        name: project.name,
+        lastOpenedAt: project.lastOpenedAt,
+        metadata: classifyProject(path))
     }
-    if let stored = persistedGraph?.project.metadata { return stored }
-    return classifyProject(canonicalPath)
+    for index in copy.nodes.indices {
+      guard let subGraph = copy.nodes[index].subGraph else { continue }
+      copy.nodes[index].subGraph = graphByApplyingAuthoritativeProjectMetadata(subGraph)
+    }
+    return copy
   }
 
   private func authoritativeRecentProjects() -> [ProjectRef] {
     let stored = persistence.loadRecentProjects()
     let enriched = stored.map { project in
-      guard project.metadata == nil else { return project }
       var copy = project
       copy.metadata = classifyProject(
         Self.canonicalize(project.path, platformPaths: platformPaths))

@@ -47,11 +47,13 @@ extension ProjectFeature {
   ) -> Effect<Action> {
     switch action {
     case .saveTemplateTapped:
+      guard state.graph.project.metadata?.capabilities.templates == true else { return .none }
       guard let draft = templateDraftContext(&state) else { return .none }
       state.templates.pendingSave = draft
       return .none
 
     case .saveLoopTemplateTapped(let nodeID):
+      guard state.graph.project.metadata?.capabilities.templates == true else { return .none }
       guard let context = templateContext(fromNode: nodeID, in: &state) else { return .none }
       state.templates.pendingSave = context
       return .none
@@ -61,6 +63,7 @@ extension ProjectFeature {
       return .none
 
     case .saveTemplateConfirmed:
+      guard state.graph.project.metadata?.capabilities.templates == true else { return .none }
       return confirmSaveTemplate(&state)
 
     case .templateSaved(let template):
@@ -73,6 +76,7 @@ extension ProjectFeature {
       return .none
 
     case .templateRelocationTapped:
+      guard state.graph.project.metadata?.capabilities.templates == true else { return .none }
       return relocateTemplate(&state)
 
     default:
@@ -87,6 +91,7 @@ extension ProjectFeature {
   /// back as tokens, not baked in: the filled text is matched against the brief
   /// the template carried, and only a clean match rewinds to `{token}`.
   func templateDraftContext(_ state: inout State) -> TemplateSaveContext? {
+    guard state.graph.project.metadata?.capabilities.templates == true else { return nil }
     let text = state.currentBriefText
     guard
       !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -146,6 +151,7 @@ extension ProjectFeature {
   /// wants to reuse. Saving a shaped loop captures its type and settings
   /// alongside the text; saving a Main loop captures text only.
   func templateContext(fromNode nodeID: UUID, in state: inout State) -> TemplateSaveContext? {
+    guard state.graph.project.metadata?.capabilities.templates == true else { return nil }
     guard let node = state.graph.nodes[id: nodeID] else { return nil }
     var settings = TemplateSettings()
     settings.backend = Self.templateBackend(node.backend)
@@ -204,6 +210,7 @@ extension ProjectFeature {
   }
 
   func confirmSaveTemplate(_ state: inout State) -> Effect<Action> {
+    guard state.graph.project.metadata?.capabilities.templates == true else { return .none }
     guard var context = state.templates.pendingSave else { return .none }
     let name = context.name.trimmingCharacters(in: .whitespaces)
     guard !name.isEmpty else { return .none }
@@ -231,6 +238,7 @@ extension ProjectFeature {
   }
 
   func relocateTemplate(_ state: inout State) -> Effect<Action> {
+    guard state.graph.project.metadata?.capabilities.templates == true else { return .none }
     guard let notice = state.templates.saveNotice else { return .none }
     state.templates.saveNotice = nil
     let projectPath = state.graph.project.path

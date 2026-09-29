@@ -12,8 +12,7 @@ import GraphcodeKit
 struct WorktreeSweepFeature {
   @ObservableState
   struct State: Equatable, Identifiable {
-    let projectPath: String
-    let projectName: String
+    let project: ProjectRef
     /// The graph's loops at the moment the sheet opened — what `unbound` is read from.
     let nodes: [LoopNode]
     /// `nil` while the first inspection runs; empty for a folder with no worktrees.
@@ -32,7 +31,20 @@ struct WorktreeSweepFeature {
     var unlocking: Set<String> = []
     var failure: String?
 
-    var id: String { projectPath }
+    var projectPath: String { project.path }
+    var projectName: String { project.name }
+    var id: String { project.path }
+
+    init(project: ProjectRef, nodes: [LoopNode]) {
+      self.project = project
+      self.nodes = nodes
+    }
+
+    init(projectPath: String, projectName: String, nodes: [LoopNode]) {
+      self.init(
+        project: ProjectRef(path: projectPath, name: projectName, metadata: .local),
+        nodes: nodes)
+    }
 
     var safe: [WorktreeAssessment] { tiered(.safeToRemove) }
     var look: [WorktreeAssessment] { tiered(.lookBeforeRemoving) }
@@ -80,18 +92,39 @@ struct WorktreeSweepFeature {
   @Dependency(\.gitClient) var gitClient
   @Dependency(\.remoteGitClient) var remoteGitClient
 
+  private enum RepositoryAccess {
+    case local
+    case remote(RemoteProjectLocation)
+  }
+
+  private static func repositoryAccess(for project: ProjectRef) -> RepositoryAccess? {
+    switch project.metadata?.location {
+    case .local:
+      return .local
+    case .ssh, .codespace:
+      guard let location = RemoteProjectLocation.parse(projectPath: project.path) else {
+        return nil
+      }
+      return .remote(location)
+    case nil:
+      return nil
+    }
+  }
+
   var body: some ReducerOf<Self> {
     Reduce { state, action in
       switch action {
       case .task:
-        let path = state.projectPath
+        guard let access = Self.repositoryAccess(for: state.project) else { return .none }
+        let path = state.project.path
         let nodes = state.nodes
-        return .run { [gitClient, remoteGitClient] send in
+        return .run { [gitClient, remoteGitClient, access] send in
           do {
             let inspections: [WorktreeInspection]
-            if let location = RemoteProjectLocation.parse(projectPath: path) {
+            switch access {
+            case .remote(let location):
               inspections = try await remoteGitClient.inspectWorktrees(location)
-            } else {
+            case .local:
               inspections = try await gitClient.inspectWorktrees(path)
             }
             await send(.assessmentsLoaded(Self.assessments(inspections, nodes: nodes)))
@@ -113,20 +146,21 @@ struct WorktreeSweepFeature {
         // The rows are on screen; now walk the disk. Bounded, so 38 worktrees is four
         // `du`s at a time rather than 38 — and a prunable entry has no directory to ask.
         let unsized = assessments.filter { $0.facts.sizeBytes == nil && !$0.facts.prunable }
-        let path = state.projectPath
-        guard !unsized.isEmpty else { return .none }
-        return .run { [gitClient, remoteGitClient] send in
-          let location = RemoteProjectLocation.parse(projectPath: path)
+        guard !unsized.isEmpty,
+          let access = Self.repositoryAccess(for: state.project)
+        else { return .none }
+        return .run { [gitClient, remoteGitClient, access] send in
           await withTaskGroup(of: Void.self) { group in
             var iterator = unsized.makeIterator()
             func submit() {
               guard let assessment = iterator.next() else { return }
               group.addTask {
                 let bytes: Int64?
-                if let location {
+                switch access {
+                case .remote(let location):
                   bytes = await remoteGitClient.worktreeSizeBytes(
                     location, assessment.ref.worktreePath)
-                } else {
+                case .local:
                   bytes = await gitClient.worktreeSizeBytes(assessment.ref.worktreePath)
                 }
                 await send(.sizeLoaded(id: assessment.id, bytes: bytes))
@@ -190,13 +224,18 @@ struct WorktreeSweepFeature {
           assessment.facts.locked, !state.unlocking.contains(id)
         else { return .none }
         state.unlocking.insert(id)
-        let repositoryPath = state.projectPath
+        guard let access = Self.repositoryAccess(for: state.project) else {
+          state.unlocking.remove(id)
+          return .none
+        }
+        let repositoryPath = state.project.path
         let worktreePath = assessment.ref.worktreePath
-        return .run { [gitClient, remoteGitClient] send in
+        return .run { [gitClient, remoteGitClient, access] send in
           do {
-            if let location = RemoteProjectLocation.parse(projectPath: repositoryPath) {
+            switch access {
+            case .remote(let location):
               try await remoteGitClient.unlockWorktree(location, worktreePath)
-            } else {
+            case .local:
               try await gitClient.unlockWorktree(repositoryPath, worktreePath)
             }
             await send(.unlockSucceeded(id: id))

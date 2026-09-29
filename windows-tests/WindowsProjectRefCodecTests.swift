@@ -48,6 +48,39 @@ final class WindowsProjectRefCodecTests: XCTestCase {
     XCTAssertFalse(decoded.metadata?.capabilities.interactiveTerminals == true)
   }
 
+  func testFutureAndMalformedMetadataDoNotRejectGraphsOrRecentArrays() throws {
+    let project = ProjectRef(path: "C:\\synthetic\\same", name: "Safe", metadata: .local)
+    let graph = LoopGraph(project: project)
+
+    var graphJSON = try XCTUnwrap(
+      JSONSerialization.jsonObject(with: JSONEncoder().encode(graph)) as? [String: Any])
+    var graphProject = try XCTUnwrap(graphJSON["project"] as? [String: Any])
+    graphProject["metadata"] = [
+      "location": "futureRemote",
+      "capabilities": ["interactiveTerminals": true],
+    ]
+    graphJSON["project"] = graphProject
+    let futureGraph = try JSONDecoder().decode(
+      LoopGraph.self,
+      from: JSONSerialization.data(withJSONObject: graphJSON))
+
+    XCTAssertEqual(futureGraph.project.path, project.path)
+    XCTAssertEqual(futureGraph.project.name, project.name)
+    XCTAssertNil(futureGraph.project.metadata)
+
+    var recentJSON = try XCTUnwrap(
+      JSONSerialization.jsonObject(with: JSONEncoder().encode([project])) as? [[String: Any]])
+    recentJSON[0]["metadata"] = ["location": "ssh", "capabilities": "malformed"]
+    let recent = try JSONDecoder().decode(
+      [ProjectRef].self,
+      from: JSONSerialization.data(withJSONObject: recentJSON))
+
+    XCTAssertEqual(recent.count, 1)
+    XCTAssertEqual(recent[0].path, project.path)
+    XCTAssertEqual(recent[0].name, project.name)
+    XCTAssertNil(recent[0].metadata)
+  }
+
   func testIdenticalLookingPathsRetainAuthoritativeLocationMetadata() throws {
     let path = "C:\\synthetic\\same"
     let local = ProjectRef(path: path, name: "Same", metadata: .local)

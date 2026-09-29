@@ -166,6 +166,68 @@ describe("decodeEnvelope", () => {
     });
   });
 
+  it("keeps graph and recent-project frames when optional metadata is future or malformed", () => {
+    const graph = decodeEnvelope({
+      version: 2,
+      kind: "event",
+      sequence: 17,
+      event: {
+        graphChanged: {
+          id: "future-graph",
+          project: {
+            path: "C:\\same\\project",
+            name: "Future",
+            metadata: {
+              location: "futureRemote",
+              capabilities: { interactiveTerminals: true },
+            },
+          },
+          nodes: [],
+          edges: [],
+        },
+      },
+    });
+    const recents = decodeEnvelope({
+      version: 2,
+      kind: "event",
+      sequence: 18,
+      event: {
+        recentProjectsListed: [
+          {
+            path: "C:\\same\\project",
+            name: "Malformed",
+            metadata: {
+              location: "ssh",
+              capabilities: "malformed",
+            },
+          },
+        ],
+      },
+    });
+
+    if (
+      graph.kind !== "event" ||
+      graph.event.type !== "graphChanged" ||
+      recents.kind !== "event" ||
+      recents.event.type !== "recentProjectsListed"
+    ) {
+      throw new Error("Expected accepted daemon events");
+    }
+    expect(graph.sequence).toBe(17);
+    expect(graph.event.graph.project).toMatchObject({
+      path: "C:\\same\\project",
+      name: "Future",
+    });
+    expect(graph.event.graph.project.metadata).toBeUndefined();
+    expect(recents.sequence).toBe(18);
+    expect(recents.event.projects).toHaveLength(1);
+    expect(recents.event.projects[0]).toMatchObject({
+      path: "C:\\same\\project",
+      name: "Malformed",
+    });
+    expect(recents.event.projects[0].metadata).toBeUndefined();
+  });
+
   it("decodes the shared settings snapshot and application timing", () => {
     const envelope = decodeEnvelope({
       version: 2,

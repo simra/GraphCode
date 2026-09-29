@@ -107,6 +107,10 @@ public struct ProjectRef: Identifiable, Codable, Equatable, Sendable {
 
   public var id: String { path }
 
+  private enum CodingKeys: String, CodingKey {
+    case path, name, lastOpenedAt, metadata
+  }
+
   public init(
     path: String,
     name: String,
@@ -117,5 +121,13 @@ public struct ProjectRef: Identifiable, Codable, Equatable, Sendable {
     self.name = name
     self.lastOpenedAt = lastOpenedAt
     self.metadata = metadata
+  }
+
+  public init(from decoder: Decoder) throws {
+    let container = try decoder.container(keyedBy: CodingKeys.self)
+    path = try container.decode(String.self, forKey: .path)
+    name = try container.decode(String.self, forKey: .name)
+    lastOpenedAt = try container.decode(Date.self, forKey: .lastOpenedAt)
+    metadata = try? container.decodeIfPresent(ProjectMetadata.self, forKey: .metadata)
   }
 }

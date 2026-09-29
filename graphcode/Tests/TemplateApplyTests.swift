@@ -11,7 +11,8 @@ import Testing
 /// `Undo the shape` / ✕ return exactly what they should.
 @Suite
 struct TemplateApplyTests {
-  private static let project = ProjectRef(path: "/tmp/template-apply", name: "apply")
+  private static let project = ProjectRef(
+    path: "/tmp/template-apply", name: "apply", metadata: .local)
 
   private func makeStore(
     _ templates: [PromptTemplate] = [], loopType: LoopType = .sketch,

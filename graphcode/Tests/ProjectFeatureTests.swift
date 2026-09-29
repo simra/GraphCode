@@ -13,7 +13,8 @@ import Testing
 /// own job: reacting to a synced `DaemonEvent` and assigning canvas positions.
 @Suite
 struct ProjectFeatureTests {
-  private static let testProject = ProjectRef(path: "/tmp/test-project", name: "test-project")
+  private static let testProject = ProjectRef(
+    path: "/tmp/test-project", name: "test-project", metadata: .local)
 
   @Test
   @MainActor
@@ -23,6 +24,7 @@ struct ProjectFeatureTests {
     ) {
       ProjectFeature()
     }
+
     store.exhaustivity = .off
 
     let node = LoopNode(title: "Research", checkDescription: "Sound?")
@@ -31,6 +33,43 @@ struct ProjectFeatureTests {
     await store.send(.daemonEvent(.graphChanged(graph)))
     #expect(store.state.graph.nodes.count == 1)
     #expect(store.state.nodePositions[node.id] != nil)
+  }
+
+  @Test
+  @MainActor
+  func identicalLookingRemoteProjectsDoNotProbeLocalWorktreesOrTemplates() async {
+    let path = Self.testProject.path
+    for metadata in [ProjectMetadata.ssh, .codespace] {
+      let worktreeLoads = LockIsolated(0)
+      let templateLoads = LockIsolated(0)
+      let store = TestStore(
+        initialState: ProjectFeature.State(
+          graph: LoopGraph(
+            project: ProjectRef(path: path, name: "remote", metadata: metadata)))
+      ) {
+        ProjectFeature()
+      } withDependencies: {
+        $0.gitClient.listWorktrees = { _ in
+          worktreeLoads.withValue { $0 += 1 }
+          return []
+        }
+        $0.templateLibrary.load = { _ in
+          templateLoads.withValue { $0 += 1 }
+          return []
+        }
+        $0.templateLibrary.watch = { _ in AsyncStream { $0.finish() } }
+      }
+      store.exhaustivity = .off
+
+      await store.send(.addNodeButtonTapped(parentBackend: nil))
+      await store.finish()
+
+      #expect(store.state.showingNewNodeForm)
+      #expect(worktreeLoads.value == 0)
+      #expect(templateLoads.value == 0)
+      #expect(store.state.availableWorktrees.isEmpty)
+      #expect(store.state.templates.library.isEmpty)
+    }
   }
 
   /// An untitled draft is created as "NewNode" immediately, then renamed to whatever

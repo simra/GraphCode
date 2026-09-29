@@ -23,10 +23,12 @@ must not contain SSH users, hosts, ports, commands, repository URLs, Codespace n
 tokens, or credentials. `path` remains the stable project identity and keeps its existing
 canonicalization and duplicate-path behavior.
 
-The registry is authoritative. It retains persisted metadata for a known path and only
-uses `RemoteProjectLocation` to classify a project that has no stored metadata. This
-allows the same display name and path text to represent different synthetic registry
-fixtures without requiring clients to parse path syntax.
+The registry is authoritative. Persisted graph and recent-project metadata is untrusted
+input: it is overwritten from the registry's classifier whenever a graph or recent
+reference is loaded or emitted. Persisted `location: local` or capability booleans can
+therefore never authorize a local operation. Production classification may bootstrap
+from `RemoteProjectLocation`, but clients do not parse path syntax and tests can inject
+different registry classifications for identical display names and path text.
 
 Current daemon capability defaults reflect implemented behavior:
 
@@ -44,6 +46,10 @@ Clients must treat absent metadata or absent capability flags as unsupported. Ol
 clients ignore the additive field and retain their existing behavior. The daemon enriches
 legacy recent entries when it lists them and records the same metadata into subsequent
 open and replayable graph snapshots.
+
+Unknown future locations or malformed metadata discard only the optional `metadata`
+field. The surrounding `ProjectRef`, graph, recent-project list, and daemon envelope
+remain decodable so clients can preserve identity and continue acknowledging frames.
 
 The reserved `graphcode://global` scope is not a project location and does not carry this
 metadata. Its existing interactive terminal and diagnostic operations remain available;

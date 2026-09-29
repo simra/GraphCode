@@ -9,15 +9,23 @@ import Testing
 /// unfilled-token gate that keeps ⌘⏎ and Start honest (PROMPT_TEMPLATES.md § Tests).
 @Suite
 struct TemplatePickerTests {
-  private static let project = ProjectRef(path: "/tmp/template-picker", name: "picker")
+  private static let project = ProjectRef(
+    path: "/tmp/template-picker", name: "picker", metadata: .local)
 
-  private func makeStore(_ templates: [PromptTemplate]) -> TestStoreOf<ProjectFeature> {
-    TestStore(
-      initialState: ProjectFeature.State(graph: LoopGraph(project: Self.project))
+  private func makeStore(
+    _ templates: [PromptTemplate],
+    project: ProjectRef = Self.project,
+    loads: LockIsolated<Int>? = nil
+  ) -> TestStoreOf<ProjectFeature> {
+    return TestStore(
+      initialState: ProjectFeature.State(graph: LoopGraph(project: project))
     ) {
       ProjectFeature()
     } withDependencies: {
-      $0.templateLibrary.load = { _ in templates }
+      $0.templateLibrary.load = { _ in
+        loads?.withValue { $0 += 1 }
+        return templates
+      }
       $0.templateLibrary.watch = { _ in AsyncStream { $0.finish() } }
       $0.templateLibrary.projectIsWritable = { _ in true }
       $0.gitClient.listWorktrees = { _ in [] }
@@ -25,6 +33,34 @@ struct TemplatePickerTests {
       // that means it, and the rest must not record phantom issues.
       $0.orchestratorClient.send = { _ in }
     }
+  }
+
+  @Test
+  @MainActor
+  func identicalLookingProjectsOnlyOpenTemplatesWhenAdvertised() async {
+    let path = Self.project.path
+    let loads = LockIsolated(0)
+    let local = makeStore(
+      [], project: ProjectRef(path: path, name: "local", metadata: .local), loads: loads)
+    let ssh = makeStore(
+      [], project: ProjectRef(path: path, name: "ssh", metadata: .ssh), loads: loads)
+    let codespace = makeStore(
+      [], project: ProjectRef(path: path, name: "codespace", metadata: .codespace), loads: loads)
+    local.exhaustivity = .off
+    ssh.exhaustivity = .off
+    codespace.exhaustivity = .off
+
+    await local.send(.templatesButtonTapped)
+    await ssh.send(.templatesButtonTapped)
+    await codespace.send(.templatesButtonTapped)
+    await local.finish()
+    await ssh.finish()
+    await codespace.finish()
+
+    #expect(local.state.templates.isPickerOpen)
+    #expect(!ssh.state.templates.isPickerOpen)
+    #expect(!codespace.state.templates.isPickerOpen)
+    #expect(loads.value == 1)
   }
 
   private func homeTemplate(

@@ -87,6 +87,7 @@ extension ProjectFeature {
   ) -> Effect<Action> {
     switch action {
     case .templatesButtonTapped:
+      guard state.graph.project.metadata?.capabilities.templates == true else { return .none }
       state.templates.isPickerOpen = true
       state.templates.query = ""
       // The row ⏎ would take is the first one, so the keys work before the mouse
@@ -147,6 +148,7 @@ extension ProjectFeature {
       return .none
 
     case .templateLibraryRequested:
+      guard state.graph.project.metadata?.capabilities.templates == true else { return .none }
       // The empty canvas offers starters, and it is the one surface that needs the
       // library before anybody has opened the New Node dialog.
       let projectPath = state.graph.project.path
@@ -156,6 +158,7 @@ extension ProjectFeature {
       }
 
     case .startFromTemplateTapped(let id):
+      guard state.graph.project.metadata?.capabilities.templates == true else { return .none }
       guard let template = state.templates.library.first(where: { $0.id == id }) else {
         return .none
       }
@@ -173,6 +176,7 @@ extension ProjectFeature {
       return .none
 
     case .templateChosen(let id):
+      guard state.graph.project.metadata?.capabilities.templates == true else { return .none }
       guard let template = state.templates.library.first(where: { $0.id == id }) else {
         return .none
       }
@@ -182,6 +186,7 @@ extension ProjectFeature {
       return countUse(of: template, in: state.graph.project.path)
 
     case .templateLaunched(let id):
+      guard state.graph.project.metadata?.capabilities.templates == true else { return .none }
       guard let template = state.templates.library.first(where: { $0.id == id }) else {
         return .none
       }
@@ -355,7 +360,7 @@ extension ProjectFeature {
     _ state: inout State, settings: TemplateSettings
   ) -> Set<TemplateFieldKey> {
     guard let branch = settings.branch, !branch.isEmpty, !state.graph.isGlobal,
-      RemoteProjectLocation.parse(projectPath: state.graph.project.path) == nil
+      state.graph.project.metadata?.location == .local
     else { return [] }
     state.draftWorktree = .newBranch
     state.draftBranch = branch

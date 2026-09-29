@@ -31,6 +31,13 @@ struct DraftBriefField: View {
         }
       }
       .onDrop(of: [.fileURL, .image], isTargeted: $isTargeted) { providers in
+        guard store.graph.project.metadata?.capabilities.attachments == true else {
+          store.send(
+            .draftAttachment(
+              .rejected(
+                "Images can't be attached because this project did not advertise support.")))
+          return false
+        }
         Task { @MainActor in
           guard let payload = await DraftImageImport.payload(from: providers) else {
             store.send(

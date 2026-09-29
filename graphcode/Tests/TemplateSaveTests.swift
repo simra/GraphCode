@@ -10,7 +10,8 @@ import Testing
 /// Applying lives next door in `TemplateApplyTests`.
 @Suite
 struct TemplateSaveTests {
-  private static let project = ProjectRef(path: "/tmp/template-save", name: "save")
+  private static let project = ProjectRef(
+    path: "/tmp/template-save", name: "save", metadata: .local)
 
   private func makeStore(
     _ templates: [PromptTemplate] = [], loopType: LoopType = .sketch

@@ -23,6 +23,32 @@ struct WorktreeSweepFeatureTests {
   }
 
   @Test
+  func identicalLookingRemoteProjectsNeverFallBackToLocalGit() async {
+    let path = "/repo"
+    for metadata in [ProjectMetadata.ssh, .codespace] {
+      let localCalls = LockIsolated(0)
+      let store = TestStore(
+        initialState: WorktreeSweepFeature.State(
+          project: ProjectRef(path: path, name: "remote", metadata: metadata),
+          nodes: [])
+      ) {
+        WorktreeSweepFeature()
+      } withDependencies: {
+        $0.gitClient.inspectWorktrees = { _ in
+          localCalls.withValue { $0 += 1 }
+          return []
+        }
+      }
+
+      await store.send(.task)
+      await store.finish()
+
+      #expect(localCalls.value == 0)
+      #expect(store.state.assessments == nil)
+    }
+  }
+
+  @Test
   func sizesStreamInAfterTheRowsAppear() async {
     // The rows show in git-time; the disk walk fills sizes in behind them. This is
     // what keeps a 38-worktree backlog from spinning the sheet for half an hour.

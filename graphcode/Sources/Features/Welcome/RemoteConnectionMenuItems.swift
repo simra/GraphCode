@@ -11,14 +11,14 @@ import SwiftUI
 /// entirely. This is where those are answerable without going to a terminal.
 struct RemoteConnectionMenuItems: View {
   let store: StoreOf<AppFeature>
-  let projectPath: String
+  let project: ProjectRef
 
   var body: some View {
     // No ellipsis, unlike the `Project Settings…` above it: nothing is asked of you
     // here, and that pairing is what says which of the two is read-only.
-    if RemoteProjectLocation.parse(projectPath: projectPath) != nil {
+    if let location = project.metadata?.location, location != .local {
       Button("Connection Info") {
-        store.send(.welcome(.remoteConnectionRequested(projectPath: projectPath)))
+        store.send(.welcome(.remoteConnectionRequested(projectPath: project.path)))
       }
     }
   }

@@ -162,7 +162,7 @@ struct AppSidebarView: View {
         }
         // A remote project's folder lives on another machine — offering to trash it
         // locally would be a lie, so the choice narrows to removal.
-        if RemoteProjectLocation.parse(projectPath: project.id) == nil {
+        if project.graph.project.metadata?.location == .local {
           Button("Move Folder to Trash", role: .destructive) {
             store.send(.projectDeleteFromDiskConfirmed(project.id))
             projectPendingDelete = nil
@@ -343,10 +343,10 @@ struct AppSidebarView: View {
       quickChatsGroup
       let folders = store.projects.filter { !$0.graph.isGlobal }
       let localFolders = folders.filter {
-        RemoteProjectLocation.parse(projectPath: $0.id) == nil
+        $0.graph.project.metadata?.location == .local
       }
       let remoteFolders = folders.filter {
-        RemoteProjectLocation.parse(projectPath: $0.id) != nil
+        $0.graph.project.metadata?.location != .local
       }
       if !localFolders.isEmpty {
         sectionHeaderRow(
@@ -509,7 +509,7 @@ extension AppSidebarView {
             localProjectPaths: store.projects
               .filter {
                 !$0.graph.isGlobal
-                  && RemoteProjectLocation.parse(projectPath: $0.id) == nil
+                  && $0.graph.project.metadata?.location == .local
               }
               .map(\.id))))
     } label: {

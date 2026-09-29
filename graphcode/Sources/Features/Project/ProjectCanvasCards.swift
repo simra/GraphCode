@@ -33,7 +33,7 @@ extension ProjectCanvasView {
       node: node,
       reason: reason,
       now: now,
-      isRemote: RemoteProjectLocation.parse(projectPath: store.graph.project.path) != nil,
+      isRemote: store.graph.project.metadata?.location != .local,
       entryRole: role,
       onPrimaryAction: { store.send(.nodeTapped(node.id)) },
       // Starts the same edge drag the hover handle does, from this card.

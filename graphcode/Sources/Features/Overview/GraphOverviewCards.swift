@@ -126,7 +126,12 @@ extension GraphOverviewView {
               path: folder.path,
               name: folder.name,
               metadata: folder.metadata))
-          RemoteConnectionMenuItems(store: store, projectPath: folder.path)
+          RemoteConnectionMenuItems(
+            store: store,
+            project: ProjectRef(
+              path: folder.path,
+              name: folder.name,
+              metadata: folder.metadata))
           Divider()
           Button("Close Folder") { store.send(.projectCloseTapped(folder.path)) }
         }

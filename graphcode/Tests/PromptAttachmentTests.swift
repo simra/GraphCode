@@ -205,7 +205,8 @@ struct DraftImageImportTests {
 /// the human is filling in, and the draft carries the path.
 @Suite
 struct DraftAttachmentReducerTests {
-  private static let project = ProjectRef(path: "/tmp/graphcode-attachment-test", name: "t")
+  private static let project = ProjectRef(
+    path: "/tmp/graphcode-attachment-test", name: "t", metadata: .local)
 
   private static let payload = DraftImageImport.Payload(
     data: Data(
@@ -257,6 +258,26 @@ struct DraftAttachmentReducerTests {
     #expect(paths.count == 2)
     #expect(Set(paths).count == 2)
     #expect(store.state.draftSketchNote == "[image #1] [image #2]")
+  }
+
+  @Test
+  @MainActor
+  func identicalLookingRemoteProjectsCannotWriteAttachmentsLocally() async {
+    let path = Self.project.path
+    for metadata in [ProjectMetadata.ssh, .codespace] {
+      let store = Self.store(ProjectRef(path: path, name: "remote", metadata: metadata))
+
+      await store.send(.draftAttachment(.imageArrived(Self.payload)))
+
+      #expect(store.state.draftAttachments.items.isEmpty)
+      #expect(store.state.draftAttachments.taken == 0)
+      #expect(store.state.draftAttachments.notice?.contains("did not advertise") == true)
+      #expect(
+        !FileManager.default.fileExists(
+          atPath: NodeMemory.attachmentsDirectory(
+            forProjectPath: path, nodeID: store.state.draftID
+          ).path))
+    }
   }
 
   @Test

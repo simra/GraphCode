@@ -207,14 +207,16 @@ struct LoopWorkspaceView: View {
       ToolbarItem(placement: .navigation) {
         ProjectHeader(
           name: store.projectName,
-          isRemote: RemoteProjectLocation.parse(projectPath: store.projectPath) != nil)
+          isRemote: store.graph.project.metadata?.location != .local
+            && !store.graph.isGlobal)
       }
       .sharedBackgroundVisibility(.hidden)
     } else {
       ToolbarItem(placement: .navigation) {
         ProjectHeader(
           name: store.projectName,
-          isRemote: RemoteProjectLocation.parse(projectPath: store.projectPath) != nil)
+          isRemote: store.graph.project.metadata?.location != .local
+            && !store.graph.isGlobal)
       }
     }
   }

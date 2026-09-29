@@ -448,7 +448,8 @@ struct AppFeature {
       case .projectDeleteFromDiskConfirmed(let path):
         // Never the Graph row, and never a remote project — its folder lives on
         // another machine, so "delete from disk" would be a lie about what happened.
-        guard !isGlobal(path), RemoteProjectLocation.parse(projectPath: path) == nil
+        guard !isGlobal(path),
+          state.projects[id: path]?.graph.project.metadata?.location == .local
         else { return .none }
         removeFromSidebar(&state, path: path)
         state.welcome.recentProjects.removeAll { $0.path == path }
@@ -559,7 +560,12 @@ struct AppFeature {
           .projects(.element(id: path, action: .addNodeButtonTapped(parentBackend: parentBackend))))
 
       case .projects(.element(id: let path, action: .nodeTapped(let nodeID))):
-        return .merge(resumeCodespace(path), openNode(nodeID, in: path, &state))
+        guard let graph = state.projects[id: path]?.graph,
+          supportsInteractiveTerminals(graph)
+        else { return .none }
+        return .merge(
+          resumeCodespace(graph.project),
+          openNode(nodeID, in: path, &state))
 
       case .blockedLoopNoticeDismissed:
         state.blockedLoopNotice = nil
@@ -744,6 +750,7 @@ extension AppFeature {
   private func openNode(_ nodeID: UUID, in path: String, _ state: inout State) -> Effect<Action> {
     guard let graph = state.projects[id: path]?.graph, let node = graph.nodes[id: nodeID]
     else { return .none }
+    guard supportsInteractiveTerminals(graph) else { return .none }
     guard node.opensOnHumanTap else {
       state.blockedLoopNotice = BlockedLoopNotice(node: node, graph: graph)
       return .none
@@ -757,6 +764,10 @@ extension AppFeature {
       try? await orchestratorClient.send(
         .graphCommand(projectPath: path, command: .resumeSession(nodeID)))
     }
+  }
+
+  private func supportsInteractiveTerminals(_ graph: LoopGraph) -> Bool {
+    graph.isGlobal || graph.project.metadata?.capabilities.interactiveTerminals == true
   }
 
   /// Steps the open workspace to another loop, in the order the sidebar draws them —
@@ -900,12 +911,12 @@ extension AppFeature {
   private func sameSectionNeighbor(
     from index: Int, direction: Int, in projects: IdentifiedArrayOf<ProjectFeature.State>
   ) -> Int? {
-    let isRemote = RemoteProjectLocation.parse(projectPath: projects[index].id) != nil
+    let isRemote = projects[index].graph.project.metadata?.location != .local
     var candidate = index + direction
     while candidate >= 0 && candidate < projects.count {
       let project = projects[candidate]
       if project.graph.isGlobal { return nil }
-      if (RemoteProjectLocation.parse(projectPath: project.id) != nil) == isRemote {
+      if (project.graph.project.metadata?.location != .local) == isRemote {
         return candidate
       }
       candidate += direction

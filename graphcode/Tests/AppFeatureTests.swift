@@ -17,13 +17,37 @@ struct AppFeatureTests {
   // These have to be spelled the way `ProjectRegistry.canonicalize` leaves them, which
   // for `/tmp` is unchanged: the daemon names a project by its resolved path, and
   // selection now turns on matching that against the path the app asked for.
-  private static let projectA = ProjectRef(path: "/tmp/project-a", name: "project-a")
-  private static let projectB = ProjectRef(path: "/tmp/project-b", name: "project-b")
+  private static let projectA = ProjectRef(
+    path: "/tmp/project-a", name: "project-a", metadata: .local)
+  private static let projectB = ProjectRef(
+    path: "/tmp/project-b", name: "project-b", metadata: .local)
 
   private func makeTerminalLayoutStore() -> TerminalLayoutStore {
     let directory = FileManager.default.temporaryDirectory
       .appendingPathComponent("graphcode-tests-\(UUID().uuidString)", isDirectory: true)
     return TerminalLayoutStore(baseDirectory: directory)
+  }
+
+  @Test
+  @MainActor
+  func identicalLookingUnsupportedProjectsDoNotOpenTerminalWorkspaces() async {
+    let path = "/tmp/project"
+    let node = LoopNode(title: "Remote", checkDescription: "Done?")
+    let unsupportedMetadata: [ProjectMetadata?] = [nil, .ssh, .codespace]
+
+    for metadata in unsupportedMetadata {
+      var state = AppFeature.State()
+      let project = ProjectRef(path: path, name: "project", metadata: metadata)
+      state.projects.append(
+        ProjectFeature.State(graph: LoopGraph(project: project, nodes: [node])))
+      let store = TestStore(initialState: state) {
+        AppFeature()
+      }
+      store.exhaustivity = .off
+
+      await store.send(.projects(.element(id: path, action: .nodeTapped(node.id))))
+      #expect(store.state.openLoop == nil)
+    }
   }
 
   @Test

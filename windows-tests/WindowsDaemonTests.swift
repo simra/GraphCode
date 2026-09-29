@@ -16,7 +16,7 @@ final class WindowsDaemonTests: XCTestCase {
     }
   }
 
-  func testRegistryMetadataStaysAuthoritativeAcrossRecentOpenAndReconnect() async throws {
+  func testRegistryReclassifiesPersistedMetadataAcrossReconnect() async throws {
     let root = FileManager.default.temporaryDirectory
       .appendingPathComponent("graphcode-classification-\(UUID().uuidString)", isDirectory: true)
     let projectDirectory = root.appendingPathComponent("identical-project", isDirectory: true)
@@ -89,7 +89,77 @@ final class WindowsDaemonTests: XCTestCase {
       return XCTFail("Expected reconnected graph snapshot")
     }
     XCTAssertEqual(reconnectedGraph.project.path, projectDirectory.path)
-    XCTAssertEqual(reconnectedGraph.project.metadata, ProjectMetadata.ssh)
+    XCTAssertEqual(reconnectedGraph.project.metadata, ProjectMetadata.local)
+    XCTAssertEqual(
+      ProjectPersistence(baseDirectory: root).loadRecentProjects().first?.metadata,
+      ProjectMetadata.local)
+  }
+
+  func testForgedPersistedMetadataCannotAuthorizeLocalCapabilities() async throws {
+    let root = FileManager.default.temporaryDirectory
+      .appendingPathComponent(
+        "graphcode-forged-classification-\(UUID().uuidString)", isDirectory: true)
+    let projectDirectory = root.appendingPathComponent("identical-project", isDirectory: true)
+    try FileManager.default.createDirectory(
+      at: projectDirectory, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+
+    let persistence = ProjectPersistence(baseDirectory: root)
+    let forged = ProjectRef(
+      path: projectDirectory.path,
+      name: "Forged local",
+      metadata: ProjectMetadata(
+        location: .local,
+        capabilities: ProjectCapabilities(
+          revealInFileManager: true,
+          templates: true,
+          attachments: true,
+          interactiveTerminals: true,
+          diagnostics: true)))
+    let nested = LoopGraph(project: forged)
+    let composite = LoopNode(title: "Nested", loopType: .composite, subGraph: nested)
+    persistence.saveGraph(LoopGraph(project: forged, nodes: [composite]))
+    persistence.recordOpened(forged)
+
+    let registry = ProjectRegistry(
+      persistenceDirectory: root,
+      ensureSession: nil,
+      terminateSession: nil,
+      restartSession: nil,
+      evaluatePredicate: nil,
+      checkPredicate: nil,
+      deliverMessage: nil,
+      captureScript: nil,
+      readUsage: nil,
+      readGoalVerdict: nil,
+      readActivity: nil,
+      readSummary: nil,
+      readPresence: nil,
+      sessionAlive: nil,
+      composeBoard: nil,
+      persistsSynchronously: true,
+      classifyProject: { _ in .ssh })
+    let transport = RecordingDaemonConnection()
+    await registry.addConnection(id: transport.id, connection: transport)
+
+    let opened = await registry.apply(
+      .openProject(path: projectDirectory.path),
+      connectionID: transport.id)
+    guard case .graphChanged(let graph) = opened?.response else {
+      return XCTFail("Expected graph snapshot")
+    }
+    XCTAssertEqual(graph.project.path, projectDirectory.path)
+    XCTAssertEqual(graph.project.metadata, ProjectMetadata.ssh)
+    XCTAssertEqual(graph.nodes.first?.subGraph?.project.metadata, ProjectMetadata.ssh)
+    XCTAssertNotNil(ProjectRegistry.terminalCompatibilityError(project: graph.project))
+
+    let listed = await registry.apply(.listRecentProjects, connectionID: transport.id)
+    guard case .recentProjectsListed(let projects) = listed?.response else {
+      return XCTFail("Expected recent projects")
+    }
+    XCTAssertEqual(projects.first?.metadata, ProjectMetadata.ssh)
+    XCTAssertEqual(persistence.loadGraph(path: projectDirectory.path)?.project.metadata, .ssh)
+    XCTAssertEqual(persistence.loadRecentProjects().first?.metadata, .ssh)
   }
 
   func testGraphcodeSettingsPersistAllProductChoices() throws {
