@@ -3,6 +3,10 @@ import XCTest
 
 @testable import GraphcodeKit
 
+#if canImport(SQLite3)
+  import SQLite3
+#endif
+
 final class TranscriptReadTests: XCTestCase {
   private func fixture(_ name: String) throws -> Data {
     let root = URL(fileURLWithPath: #filePath)
@@ -30,7 +34,10 @@ final class TranscriptReadTests: XCTestCase {
       identity: identity,
       totalBytes: UInt64(data.count),
       offset: UInt64(start),
-      data: data.subdata(in: start..<data.count))
+      data: data.subdata(in: start..<data.count),
+      authenticatedOffset: nextOffset,
+      authenticatedPrefixHash: GraphcodeSHA256.hex(Data(data.prefix(Int(nextOffset)))),
+      completeSource: data)
     return try TranscriptReader.page(
       nodeID: nodeID,
       provider: provider,
@@ -66,8 +73,9 @@ final class TranscriptReadTests: XCTestCase {
       data: fixture("transcript-claude-synthetic.jsonl"), provider: .claudeCode)
     XCTAssertEqual(page.entries[0].text, "[redacted prompt]")
     XCTAssertTrue(page.entries[0].redactions.contains(.prompt))
-    XCTAssertTrue(page.entries[1].text.contains("[redacted path]"))
-    XCTAssertTrue(page.entries[1].text.contains("[redacted secret]"))
+    XCTAssertEqual(
+      page.entries[1].text,
+      "[redacted assistant text]\n[used tool with redacted input]")
     XCTAssertTrue(page.entries[1].redactions.contains(.toolInput))
     XCTAssertTrue(page.entries[1].redactions.contains(.filesystemPath))
     XCTAssertTrue(page.entries[1].redactions.contains(.secret))
@@ -92,7 +100,7 @@ final class TranscriptReadTests: XCTestCase {
         #"{"type":"assistant.message","data":{"content":"third"}}"#.appending("\n").utf8)
     let secondPage = try page(
       data: appended, provider: .copilotCLI, nodeID: nodeID, cursor: cursor)
-    XCTAssertEqual(secondPage.entries.map(\.text), ["second", "third"])
+    XCTAssertEqual(secondPage.entries.map(\.kind), [.assistant, .assistant])
     XCTAssertFalse(secondPage.hasMore)
 
     var rewritten = appended
@@ -107,6 +115,215 @@ final class TranscriptReadTests: XCTestCase {
     }
   }
 
+  func testCursorRejectsEarlierPrefixMutationAndUnchangedAnchorTruncateRegrow() throws {
+    let nodeID = UUID()
+    let original = Data(
+      [
+        #"{"type":"assistant.message","data":{"content":"first"}}"#,
+        #"{"type":"assistant.message","data":{"content":"anchor"}}"#,
+        #"{"type":"assistant.message","data":{"content":"later"}}"#,
+      ].joined(separator: "\n").appending("\n").utf8)
+    let firstPage = try page(
+      data: original, provider: .copilotCLI, nodeID: nodeID, maxEntries: 2)
+    let cursor = try XCTUnwrap(firstPage.nextCursor)
+
+    var earlierMutation = original
+    earlierMutation[20] ^= 1
+    XCTAssertThrowsError(
+      try page(
+        data: earlierMutation, provider: .copilotCLI, nodeID: nodeID, cursor: cursor)
+    ) { error in
+      XCTAssertEqual(error as? TranscriptReadError, .invalidCursor)
+    }
+
+    let regrown = Data(
+      [
+        #"{"type":"assistant.message","data":{"content":"other"}}"#,
+        #"{"type":"assistant.message","data":{"content":"anchor"}}"#,
+        #"{"type":"assistant.message","data":{"content":"later"}}"#,
+      ].joined(separator: "\n").appending("\n").utf8)
+    XCTAssertEqual(regrown.count, original.count)
+    XCTAssertThrowsError(
+      try page(data: regrown, provider: .copilotCLI, nodeID: nodeID, cursor: cursor)
+    ) { error in
+      XCTAssertEqual(error as? TranscriptReadError, .invalidCursor)
+    }
+  }
+
+  func testReplacementDuringReadIsInvalidCursor() {
+    XCTAssertThrowsError(
+      try TranscriptReader.validateStableRead(
+        identityBefore: "same-inode",
+        prefixHashBefore: String(repeating: "a", count: 64),
+        identityAfter: "same-inode",
+        prefixHashAfter: String(repeating: "b", count: 64))
+    ) { error in
+      XCTAssertEqual(error as? TranscriptReadError, .invalidCursor)
+    }
+  }
+
+  func testStreamingPrefixDigestMatchesInMemorySHA256() throws {
+    let data = Data((0..<(200 * 1024 + 37)).map { UInt8(truncatingIfNeeded: $0) })
+    let url = FileManager.default.temporaryDirectory
+      .appendingPathComponent("transcript-prefix-\(UUID()).bin")
+    try data.write(to: url)
+    defer { try? FileManager.default.removeItem(at: url) }
+    let handle = try FileHandle(forReadingFrom: url)
+    defer { try? handle.close() }
+
+    XCTAssertEqual(
+      try GraphcodeSHA256.hex(reading: handle, through: UInt64(data.count)),
+      GraphcodeSHA256.hex(data))
+  }
+
+  func testAdversarialProviderStringsNeverReachEncodedPage() throws {
+    let forbidden = [
+      "AKIAIOSFODNN7EXAMPLE",
+      "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+      "IQoJb3JpZ2luX2VjEExampleSessionToken",
+      "Bearer " + "abcdefghijklmnopqrstuvwxyz",
+      "Basic dXNlcjpwYXNz",
+      "https://" + "user:password@example.test/private",
+      "eyJhbGciOiJIUzI1NiJ9." + "eyJzdWIiOiIxMjM0NTY3ODkwIn0.signaturevalue",
+      "-----BEGIN PRIVATE KEY-----\nsecret\n-----END PRIVATE KEY-----",
+      "ghp_abcdefghijklmnopqrstuvwxyz123456",
+      "github_pat_abcdefghijklmnopqrstuvwxyz123456",
+      "azure_token_abcdefghijklmnopqrstuvwxyz123456",
+      "sk-abcdefghijklmnopqrstuvwxyz123456",
+      #"C:\Users\Synthetic User\private file.txt"#,
+      "/Users/Synthetic User/private file.txt",
+    ]
+    let records = try forbidden.flatMap { literal -> [Data] in
+      [
+        try JSONSerialization.data(
+          withJSONObject: [
+            "type": "assistant.message",
+            "timestamp": "not-safe-\(literal)",
+            "data": ["content": literal],
+          ]),
+        try JSONSerialization.data(
+          withJSONObject: [
+            "type": "tool.execution_start",
+            "data": ["toolName": literal, "arguments": ["value": literal]],
+          ]),
+      ]
+    }
+    let source = records.reduce(into: Data()) {
+      $0.append($1)
+      $0.append(0x0a)
+    }
+    let result = try page(data: source, provider: .copilotCLI)
+    let encoded = String(decoding: try JSONEncoder().encode(result), as: UTF8.self)
+    for literal in forbidden {
+      XCTAssertFalse(encoded.contains(literal), "encoded page leaked \(literal)")
+    }
+    XCTAssertTrue(
+      result.entries.filter { $0.kind == .toolUse }.allSatisfy {
+        $0.toolName == "tool" && $0.text == "Used tool with redacted input"
+      })
+    XCTAssertTrue(
+      result.entries.filter { $0.kind == .assistant }.allSatisfy {
+        $0.text == "[redacted assistant text]" && $0.timestamp == nil
+      })
+  }
+
+  func testCodexProviderResolutionUsesExactBankedRolloutForSameCWDNodes() throws {
+    let root = FileManager.default.temporaryDirectory
+      .appendingPathComponent("transcript-codex-exact-\(UUID())", isDirectory: true)
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+
+    let firstNode = UUID()
+    let secondNode = UUID()
+    let firstThread = UUID().uuidString.lowercased()
+    let secondThread = UUID().uuidString.lowercased()
+    let firstRollout = root.appendingPathComponent(
+      "rollout-2026-01-01T00-00-00-\(firstThread).jsonl")
+    let secondRollout = root.appendingPathComponent(
+      "rollout-2026-01-01T00-00-01-\(secondThread).jsonl")
+    let sameCWD = #"{"type":"session_meta","payload":{"cwd":"C:\\same\\project"}}"#
+    try sameCWD.write(to: firstRollout, atomically: true, encoding: .utf8)
+    try sameCWD.write(to: secondRollout, atomically: true, encoding: .utf8)
+    let rollouts = [secondRollout, firstRollout]
+
+    XCTAssertEqual(
+      TranscriptReader.codexLocalURL(
+        nodeID: firstNode, banked: firstThread, database: nil, rollouts: rollouts),
+      firstRollout)
+    XCTAssertEqual(
+      TranscriptReader.codexLocalURL(
+        nodeID: secondNode, banked: secondThread, database: nil, rollouts: rollouts),
+      secondRollout)
+    XCTAssertNil(
+      TranscriptReader.codexLocalURL(
+        nodeID: firstNode, banked: UUID().uuidString, database: nil, rollouts: rollouts))
+
+    var node = LoopNode(
+      id: firstNode, title: "Codex", loopType: .turnBased, firstInstruction: "test")
+    node.backend = .codex
+    let remote = TranscriptReader.remoteFind(
+      node: node,
+      location: RemoteProjectLocation(host: "synthetic", remotePath: "/same/project"))
+    XCTAssertTrue(remote.contains(firstNode.uuidString))
+    XCTAssertTrue(remote.contains("SELECT id FROM threads WHERE id="))
+    XCTAssertTrue(remote.contains("rollout-*-$T.jsonl"))
+    XCTAssertFalse(remote.contains(#""cwd":"#))
+  }
+
+  #if canImport(SQLite3)
+    func testCodexProviderResolutionBindsTwoSameCWDNodesToExactRollouts() throws {
+      let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("transcript-codex-resolution-\(UUID())", isDirectory: true)
+      try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+      defer { try? FileManager.default.removeItem(at: root) }
+
+      let firstNode = UUID()
+      let secondNode = UUID()
+      let firstThread = UUID().uuidString.lowercased()
+      let secondThread = UUID().uuidString.lowercased()
+      let firstRollout = root.appendingPathComponent(
+        "rollout-2026-01-01T00-00-00-\(firstThread).jsonl")
+      let secondRollout = root.appendingPathComponent(
+        "rollout-2026-01-01T00-00-01-\(secondThread).jsonl")
+      let sameCWD = #"{"type":"session_meta","payload":{"cwd":"C:\\same\\project"}}"#
+      try sameCWD.write(to: firstRollout, atomically: true, encoding: .utf8)
+      try sameCWD.write(to: secondRollout, atomically: true, encoding: .utf8)
+
+      let database = root.appendingPathComponent("state_1.sqlite")
+      var handle: OpaquePointer?
+      XCTAssertEqual(sqlite3_open(database.path, &handle), SQLITE_OK)
+      defer { sqlite3_close(handle) }
+      sqlite3_exec(
+        handle,
+        "CREATE TABLE threads (id TEXT PRIMARY KEY, first_user_message TEXT, created_at_ms INTEGER)",
+        nil, nil, nil)
+      sqlite3_exec(
+        handle,
+        "INSERT INTO threads VALUES ('\(firstThread)', '/goal \(firstNode.uuidString)', 1)",
+        nil, nil, nil)
+      sqlite3_exec(
+        handle,
+        "INSERT INTO threads VALUES ('\(secondThread)', '/goal \(secondNode.uuidString)', 2)",
+        nil, nil, nil)
+
+      let rollouts = [secondRollout, firstRollout]
+      XCTAssertEqual(
+        TranscriptReader.codexLocalURL(
+          nodeID: firstNode, banked: UUID().uuidString, database: database,
+          rollouts: rollouts),
+        firstRollout)
+      XCTAssertEqual(
+        TranscriptReader.codexLocalURL(
+          nodeID: secondNode, banked: UUID().uuidString, database: database,
+          rollouts: rollouts),
+        secondRollout)
+      XCTAssertNil(
+        TranscriptReader.codexLocalURL(
+          nodeID: UUID(), banked: UUID().uuidString, database: database,
+          rollouts: rollouts))
+    }
+  #endif
+
   func testEntryAndByteBoundsAreStrict() throws {
     XCTAssertThrowsError(
       try TranscriptQuery(nodeID: UUID(), maxEntries: 0).validated()
@@ -116,7 +333,7 @@ final class TranscriptReadTests: XCTestCase {
 
     let huge = Data(
       (#"{"type":"assistant.message","data":{"content":""#
-        + String(repeating: "x", count: TranscriptReader.maximumEntryBytes + 1)
+        + String(repeating: "x", count: TranscriptReader.maximumSourceRecordBytes + 1)
         + "\"}}\n").utf8)
     XCTAssertThrowsError(try page(data: huge, provider: .copilotCLI)) { error in
       XCTAssertEqual(error as? TranscriptReadError, .oversized)
@@ -181,6 +398,7 @@ final class TranscriptReadTests: XCTestCase {
         if query.cursor == "missing" { return .failure(.missing) }
         if query.cursor == "corrupt" { return .failure(.corrupt) }
         if query.cursor == "oversized" { return .failure(.oversized) }
+        if query.cursor == "invalid" { return .failure(.invalidCursor) }
         return .success(
           TranscriptPage(
             nodeID: node.id,
@@ -236,6 +454,7 @@ final class TranscriptReadTests: XCTestCase {
       ("missing", DaemonWireErrorCode.transcriptMissing),
       ("corrupt", .transcriptCorrupt),
       ("oversized", .transcriptOversized),
+      ("invalid", .transcriptInvalidCursor),
     ] {
       let failure = await registry.apply(
         .transcript(

@@ -120,6 +120,9 @@ struct TranscriptSourceChunk: Equatable, Sendable {
   var totalBytes: UInt64
   var offset: UInt64
   var data: Data
+  var authenticatedOffset: UInt64
+  var authenticatedPrefixHash: String
+  var completeSource: Data? = nil
 }
 struct TranscriptCursor: Codable, Equatable, Sendable {
   var version: Int
@@ -127,6 +130,7 @@ struct TranscriptCursor: Codable, Equatable, Sendable {
   var provider: CLISessionBackendKind
   var sourceIdentity: String
   var nextOffset: UInt64
+  var prefixHash: String
   var anchorLength: Int
   var anchorHash: String
 
@@ -143,7 +147,8 @@ struct TranscriptCursor: Codable, Equatable, Sendable {
     base64 += String(repeating: "=", count: (4 - base64.count % 4) % 4)
     guard let data = Data(base64Encoded: base64),
       let cursor = try? JSONDecoder().decode(Self.self, from: data),
-      cursor.version == 1,
+      cursor.version == 2,
+      cursor.prefixHash.count == 64,
       cursor.anchorLength >= 0,
       cursor.anchorLength <= TranscriptReader.maximumSourceRecordBytes
     else {
@@ -186,18 +191,38 @@ public enum TranscriptReader {
       let chunk: TranscriptSourceChunk
       if let projectPath, let location = RemoteProjectLocation.parse(projectPath: projectPath) {
         chunk = try await remoteChunk(
-          node: node, location: location, offset: readOffset, count: readCount)
+          node: node, location: location, offset: readOffset, count: readCount,
+          authenticatedOffset: nextOffset)
       } else {
         chunk = try localChunk(
-          node: node, projectPath: projectPath, offset: readOffset, count: readCount)
+          node: node, projectPath: projectPath, offset: readOffset, count: readCount,
+          authenticatedOffset: nextOffset)
       }
-      return .success(
-        try page(
-          nodeID: node.id,
-          provider: node.backend,
-          query: query,
-          cursor: cursor,
-          chunk: chunk))
+      let draft = try pageDraft(
+        nodeID: node.id,
+        provider: node.backend,
+        query: query,
+        cursor: cursor,
+        chunk: chunk)
+      let prefixHash: String?
+      if draft.hasMore {
+        if draft.nextOffset == chunk.authenticatedOffset {
+          prefixHash = chunk.authenticatedPrefixHash
+        } else if let projectPath,
+          let location = RemoteProjectLocation.parse(projectPath: projectPath)
+        {
+          prefixHash = try await remotePrefixHash(
+            node: node, location: location, offset: draft.nextOffset,
+            expectedIdentity: chunk.identity)
+        } else {
+          prefixHash = try localPrefixHash(
+            node: node, projectPath: projectPath, offset: draft.nextOffset,
+            expectedIdentity: chunk.identity)
+        }
+      } else {
+        prefixHash = nil
+      }
+      return .success(try finalize(draft, prefixHash: prefixHash))
     } catch let error as TranscriptReadError {
       return .failure(error)
     } catch {
@@ -212,8 +237,41 @@ public enum TranscriptReader {
     cursor: TranscriptCursor?,
     chunk: TranscriptSourceChunk
   ) throws -> TranscriptPage {
+    let draft = try pageDraft(
+      nodeID: nodeID, provider: provider, query: query, cursor: cursor, chunk: chunk)
+    let prefixHash =
+      draft.hasMore
+      ? chunk.completeSource.map {
+        GraphcodeSHA256.hex(Data($0.prefix(Int(clamping: draft.nextOffset))))
+      }
+      : nil
+    return try finalize(draft, prefixHash: prefixHash)
+  }
+
+  private struct PageDraft {
+    var nodeID: UUID
+    var provider: CLISessionBackendKind
+    var entries: [TranscriptEntry]
+    var hasMore: Bool
+    var nextOffset: UInt64
+    var sourceIdentity: String
+    var lastRecord: Data
+  }
+
+  private static func pageDraft(
+    nodeID: UUID,
+    provider: CLISessionBackendKind,
+    query: TranscriptQuery,
+    cursor: TranscriptCursor?,
+    chunk: TranscriptSourceChunk
+  ) throws -> PageDraft {
     guard chunk.offset <= chunk.totalBytes,
       cursor?.sourceIdentity == nil || cursor?.sourceIdentity == chunk.identity
+    else {
+      throw TranscriptReadError.invalidCursor
+    }
+    guard chunk.authenticatedOffset == cursor?.nextOffset ?? 0,
+      cursor?.prefixHash == nil || cursor?.prefixHash == chunk.authenticatedPrefixHash
     else {
       throw TranscriptReadError.invalidCursor
     }
@@ -272,33 +330,49 @@ public enum TranscriptReader {
 
     let nextOffset = (cursor?.nextOffset ?? 0) + UInt64(consumed)
     let hasMore = stoppedForBound || nextOffset < chunk.totalBytes
+    return PageDraft(
+      nodeID: nodeID,
+      provider: provider,
+      entries: entries,
+      hasMore: hasMore,
+      nextOffset: nextOffset,
+      sourceIdentity: chunk.identity,
+      lastRecord: lastRecord)
+  }
+
+  private static func finalize(_ draft: PageDraft, prefixHash: String?) throws -> TranscriptPage {
     let nextCursor: String?
-    if hasMore {
+    if draft.hasMore {
+      guard let prefixHash, prefixHash.count == 64 else {
+        throw TranscriptReadError.invalidCursor
+      }
       nextCursor = try TranscriptCursor(
-        version: 1,
-        nodeID: nodeID,
-        provider: provider,
-        sourceIdentity: chunk.identity,
-        nextOffset: nextOffset,
-        anchorLength: lastRecord.count,
-        anchorHash: hash(lastRecord)
+        version: 2,
+        nodeID: draft.nodeID,
+        provider: draft.provider,
+        sourceIdentity: draft.sourceIdentity,
+        nextOffset: draft.nextOffset,
+        prefixHash: prefixHash,
+        anchorLength: draft.lastRecord.count,
+        anchorHash: hash(draft.lastRecord)
       ).encoded()
     } else {
       nextCursor = nil
     }
     return TranscriptPage(
-      nodeID: nodeID,
-      provider: provider,
-      entries: entries,
+      nodeID: draft.nodeID,
+      provider: draft.provider,
+      entries: draft.entries,
       nextCursor: nextCursor,
-      hasMore: hasMore)
+      hasMore: draft.hasMore)
   }
 
   private static func localChunk(
     node: LoopNode,
     projectPath: String?,
     offset: UInt64,
-    count: Int
+    count: Int,
+    authenticatedOffset: UInt64
   ) throws -> TranscriptSourceChunk {
     let url = try localURL(node: node, projectPath: projectPath)
     let attributes: [FileAttributeKey: Any]
@@ -320,21 +394,31 @@ public enum TranscriptReader {
     defer { try? handle.close() }
     do {
       try handle.seek(toOffset: offset)
+      let prefixHash = try sha256Prefix(of: handle, through: authenticatedOffset)
+      try handle.seek(toOffset: offset)
       let data = try handle.read(upToCount: count) ?? Data()
+      let finalPrefixHash = try sha256Prefix(of: handle, through: authenticatedOffset)
       let finalAttributes = try FileManager.default.attributesOfItem(atPath: url.path)
       let identity = localIdentity(
         node: node, url: url, attributes: attributes)
-      guard identity == localIdentity(node: node, url: url, attributes: finalAttributes),
-        let finalSize = (finalAttributes[.size] as? NSNumber)?.uint64Value,
+      let finalIdentity = localIdentity(node: node, url: url, attributes: finalAttributes)
+      try validateStableRead(
+        identityBefore: identity,
+        prefixHashBefore: prefixHash,
+        identityAfter: finalIdentity,
+        prefixHashAfter: finalPrefixHash)
+      guard let finalSize = (finalAttributes[.size] as? NSNumber)?.uint64Value,
         offset <= finalSize
-      else {
-        throw TranscriptReadError.invalidCursor
-      }
+      else { throw TranscriptReadError.invalidCursor }
       return TranscriptSourceChunk(
         identity: identity,
         totalBytes: finalSize,
         offset: offset,
-        data: data)
+        data: data,
+        authenticatedOffset: authenticatedOffset,
+        authenticatedPrefixHash: prefixHash)
+    } catch let error as TranscriptReadError {
+      throw error
     } catch {
       throw TranscriptReadError.transportFailure
     }
@@ -356,6 +440,49 @@ public enum TranscriptReader {
     return hash(Data(parts.joined(separator: "|").utf8))
   }
 
+  static func validateStableRead(
+    identityBefore: String,
+    prefixHashBefore: String,
+    identityAfter: String,
+    prefixHashAfter: String
+  ) throws {
+    guard identityBefore == identityAfter, prefixHashBefore == prefixHashAfter else {
+      throw TranscriptReadError.invalidCursor
+    }
+  }
+
+  private static func sha256Prefix(of handle: FileHandle, through offset: UInt64) throws -> String {
+    try GraphcodeSHA256.hex(reading: handle, through: offset)
+  }
+
+  private static func localPrefixHash(
+    node: LoopNode,
+    projectPath: String?,
+    offset: UInt64,
+    expectedIdentity: String
+  ) throws -> String {
+    let url = try localURL(node: node, projectPath: projectPath)
+    let before = try FileManager.default.attributesOfItem(atPath: url.path)
+    guard localIdentity(node: node, url: url, attributes: before) == expectedIdentity,
+      let size = (before[.size] as? NSNumber)?.uint64Value,
+      offset <= size
+    else { throw TranscriptReadError.invalidCursor }
+    let handle = try FileHandle(forReadingFrom: url)
+    defer { try? handle.close() }
+    let digest = try sha256Prefix(of: handle, through: offset)
+    let finalDigest = try sha256Prefix(of: handle, through: offset)
+    let after = try FileManager.default.attributesOfItem(atPath: url.path)
+    try validateStableRead(
+      identityBefore: expectedIdentity,
+      prefixHashBefore: digest,
+      identityAfter: localIdentity(node: node, url: url, attributes: after),
+      prefixHashAfter: finalDigest)
+    guard let finalSize = (after[.size] as? NSNumber)?.uint64Value,
+      offset <= finalSize
+    else { throw TranscriptReadError.invalidCursor }
+    return digest
+  }
+
   private static func localURL(node: LoopNode, projectPath: String?) throws -> URL {
     switch node.backend {
     case .claudeCode:
@@ -370,10 +497,11 @@ public enum TranscriptReader {
       }
       return directory.appendingPathComponent("events.jsonl")
     case .codex:
-      guard
-        let directory = ZmxSessionLauncher.workingDirectory(
-          forNode: node, projectPath: projectPath),
-        let rollout = CodexSessionLog.rollout(forWorkingDirectory: directory)
+      guard let banked = SessionIDStore.load(forNodeID: node.id),
+        let rollout = codexLocalURL(
+          nodeID: node.id,
+          banked: banked,
+          database: CodexThreadResolver.stateDatabase())
       else { throw TranscriptReadError.missing }
       return rollout
     case .openCode, .pi:
@@ -381,11 +509,27 @@ public enum TranscriptReader {
     }
   }
 
+  static func codexLocalURL(
+    nodeID: UUID,
+    banked: String?,
+    database: URL?,
+    rollouts: [URL]? = nil
+  ) -> URL? {
+    guard let banked else { return nil }
+    let threadID =
+      database.map {
+        CodexThreadResolver.threadID(forNodeID: nodeID, banked: banked, database: $0)
+      } ?? banked
+    guard let threadID else { return nil }
+    return CodexSessionLog.rollout(forThreadID: threadID, among: rollouts)
+  }
+
   private static func remoteChunk(
     node: LoopNode,
     location: RemoteProjectLocation,
     offset: UInt64,
-    count: Int
+    count: Int,
+    authenticatedOffset: UInt64
   ) async throws -> TranscriptSourceChunk {
     let find = remoteFind(node: node, location: location)
     let script = [
@@ -395,11 +539,16 @@ public enum TranscriptReader {
       "N=$(wc -c < \"$F\" 2>/dev/null | tr -d ' ')",
       "if [ -z \"$I\" ] || [ -z \"$N\" ]; then echo '\(remoteMarker) corrupt'; exit 0; fi",
       "if [ \(offset) -gt \"$N\" ]; then echo '\(remoteMarker) cursor'; exit 0; fi",
+      "if [ \(authenticatedOffset) -gt \"$N\" ]; then echo '\(remoteMarker) cursor'; exit 0; fi",
+      remoteHashFunction,
+      "P=$(hash_prefix \"$F\" \(authenticatedOffset)) || { echo '\(remoteMarker) corrupt'; exit 0; }",
       "D=$(dd if=\"$F\" bs=1 skip=\(offset) count=\(count) 2>/dev/null | base64 | tr -d '\\r\\n')",
       "I2=$(stat -c '%d:%i' \"$F\" 2>/dev/null || stat -f '%d:%i' \"$F\" 2>/dev/null)",
       "N2=$(wc -c < \"$F\" 2>/dev/null | tr -d ' ')",
-      "if [ \"$I\" != \"$I2\" ] || [ -z \"$N2\" ]; then echo '\(remoteMarker) cursor'; exit 0; fi",
-      "echo \"\(remoteMarker) data $I2 $N2 $D\"",
+      "P2=$(hash_prefix \"$F\" \(authenticatedOffset)) || { echo '\(remoteMarker) corrupt'; exit 0; }",
+      "if [ \"$I\" != \"$I2\" ] || [ -z \"$N2\" ] || [ \"$P\" != \"$P2\" ]; then "
+        + "echo '\(remoteMarker) cursor'; exit 0; fi",
+      "echo \"\(remoteMarker) data $I2 $N2 $P $D\"",
     ].joined(separator: "; ")
     let invocation = location.sshInvocation(
       remoteCommand: location.remoteLoginShellCommand(script))
@@ -411,27 +560,30 @@ public enum TranscriptReader {
     guard let marker = lines.last(where: { $0.hasPrefix(remoteMarker) }) else {
       throw TranscriptReadError.transportFailure
     }
-    let fields = marker.dropFirst(remoteMarker.count).split(separator: " ", maxSplits: 4)
+    let fields = marker.dropFirst(remoteMarker.count).split(separator: " ", maxSplits: 5)
       .map(String.init)
     switch fields.first {
     case "missing": throw TranscriptReadError.missing
     case "corrupt": throw TranscriptReadError.corrupt
     case "cursor": throw TranscriptReadError.invalidCursor
     case "data":
-      guard fields.count == 4, let total = UInt64(fields[2]),
-        let data = Data(base64Encoded: fields[3])
+      guard fields.count == 5, let total = UInt64(fields[2]),
+        fields[3].count == 64,
+        let data = Data(base64Encoded: fields[4])
       else { throw TranscriptReadError.corrupt }
       return TranscriptSourceChunk(
         identity: hash(Data("\(node.backend.rawValue)|\(node.id)|\(fields[1])".utf8)),
         totalBytes: total,
         offset: offset,
-        data: data)
+        data: data,
+        authenticatedOffset: authenticatedOffset,
+        authenticatedPrefixHash: fields[3])
     default:
       throw TranscriptReadError.transportFailure
     }
   }
 
-  private static func remoteFind(node: LoopNode, location: RemoteProjectLocation) -> String {
+  static func remoteFind(node: LoopNode, location: RemoteProjectLocation) -> String {
     switch node.backend {
     case .claudeCode:
       let idFile = PresenceHooks.remoteSessionIDExpression(forNodeID: node.id)
@@ -445,15 +597,80 @@ public enum TranscriptReader {
         + "if grep -qx 'name: \(name)' \"$HOME/.copilot/session-state/$d/workspace.yaml\" 2>/dev/null; "
         + "then F=\"$HOME/.copilot/session-state/$d/events.jsonl\"; break; fi; done"
     case .codex:
-      let directory = node.worktreeBinding?.worktreePath ?? location.remotePath
-      let quoted = RemoteProjectLocation.shellQuoted(directory)
+      let idFile = PresenceHooks.remoteSessionIDExpression(forNodeID: node.id)
+      let nodeID = node.id.uuidString
       return
-        "W=\(quoted); F=''; "
-        + "for f in $(ls -t \"$HOME\"/.codex/sessions/*/*/*/rollout-*.jsonl 2>/dev/null | head -40); do "
-        + "if head -c 65536 \"$f\" 2>/dev/null | grep -Fq \"\\\"cwd\\\":\\\"$W\\\"\"; "
-        + "then F=\"$f\"; break; fi; done"
+        "S=$(cat \(idFile) 2>/dev/null | tr -d '\\r\\n'); F=''; T=''; "
+        + "case \"$S\" in ????????-????-????-????-????????????) ;; *) S='';; esac; "
+        + "DB=''; V=-1; for d in \"$HOME\"/.codex/state_*.sqlite; do [ -f \"$d\" ] || continue; "
+        + "B=${d##*/}; X=${B#state_}; X=${X%.sqlite}; "
+        + "case \"$X\" in ''|*[!0-9]*) continue;; esac; "
+        + "if [ \"$X\" -gt \"$V\" ]; then V=\"$X\"; DB=\"$d\"; fi; done; "
+        + "if [ -n \"$S\" ] && [ -n \"$DB\" ] && command -v sqlite3 >/dev/null 2>&1; then "
+        + "T=$(sqlite3 \"$DB\" \"SELECT id FROM threads WHERE id='$S' LIMIT 1\" 2>/dev/null); "
+        + "if [ -z \"$T\" ]; then T=$(sqlite3 \"$DB\" "
+        + "\"SELECT id FROM threads WHERE first_user_message LIKE '%\(nodeID)%' "
+        + "ORDER BY created_at_ms DESC LIMIT 1\" 2>/dev/null); fi; "
+        + "elif [ -n \"$S\" ]; then T=\"$S\"; fi; "
+        + "case \"$T\" in ????????-????-????-????-????????????) ;; *) T='';; esac; "
+        + "if [ -n \"$T\" ]; then F=$(find \"$HOME/.codex/sessions\" -type f "
+        + "-name \"rollout-*-$T.jsonl\" -print -quit 2>/dev/null); fi"
     case .openCode, .pi:
       return "F=''"
+    }
+  }
+
+  private static let remoteHashFunction =
+    "hash_prefix() { F=\"$1\"; N=\"$2\"; "
+    + "if command -v sha256sum >/dev/null 2>&1; then "
+    + "head -c \"$N\" \"$F\" | sha256sum | awk '{print $1}'; "
+    + "elif command -v shasum >/dev/null 2>&1; then "
+    + "head -c \"$N\" \"$F\" | shasum -a 256 | awk '{print $1}'; "
+    + "elif command -v openssl >/dev/null 2>&1; then "
+    + "head -c \"$N\" \"$F\" | openssl dgst -sha256 -r | awk '{print $1}'; "
+    + "else return 1; fi; }"
+
+  private static func remotePrefixHash(
+    node: LoopNode,
+    location: RemoteProjectLocation,
+    offset: UInt64,
+    expectedIdentity: String
+  ) async throws -> String {
+    let find = remoteFind(node: node, location: location)
+    let script = [
+      find,
+      "if [ -z \"$F\" ] || [ ! -f \"$F\" ]; then echo '\(remoteMarker) missing'; exit 0; fi",
+      "I=$(stat -c '%d:%i' \"$F\" 2>/dev/null || stat -f '%d:%i' \"$F\" 2>/dev/null)",
+      "N=$(wc -c < \"$F\" 2>/dev/null | tr -d ' ')",
+      "if [ -z \"$I\" ] || [ -z \"$N\" ] || [ \(offset) -gt \"$N\" ]; then "
+        + "echo '\(remoteMarker) cursor'; exit 0; fi",
+      remoteHashFunction,
+      "P=$(hash_prefix \"$F\" \(offset)) || { echo '\(remoteMarker) corrupt'; exit 0; }",
+      "I2=$(stat -c '%d:%i' \"$F\" 2>/dev/null || stat -f '%d:%i' \"$F\" 2>/dev/null)",
+      "P2=$(hash_prefix \"$F\" \(offset)) || { echo '\(remoteMarker) corrupt'; exit 0; }",
+      "if [ \"$I\" != \"$I2\" ] || [ \"$P\" != \"$P2\" ]; then "
+        + "echo '\(remoteMarker) cursor'; exit 0; fi",
+      "echo \"\(remoteMarker) hash $I2 $P\"",
+    ].joined(separator: "; ")
+    let invocation = location.sshInvocation(
+      remoteCommand: location.remoteLoginShellCommand(script))
+    let result = await ZmxSessionLauncher.collectRemoteOutput(invocation, location: location)
+    guard result.succeeded else { throw TranscriptReadError.transportFailure }
+    let marker = result.output.split(whereSeparator: \.isNewline)
+      .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+      .last(where: { $0.hasPrefix(remoteMarker) })
+    guard let marker else { throw TranscriptReadError.transportFailure }
+    let fields = marker.dropFirst(remoteMarker.count).split(separator: " ").map(String.init)
+    switch fields.first {
+    case "missing": throw TranscriptReadError.missing
+    case "cursor": throw TranscriptReadError.invalidCursor
+    case "corrupt": throw TranscriptReadError.corrupt
+    case "hash":
+      guard fields.count == 3, fields[2].count == 64,
+        hash(Data("\(node.backend.rawValue)|\(node.id)|\(fields[1])".utf8)) == expectedIdentity
+      else { throw TranscriptReadError.invalidCursor }
+      return fields[2]
+    default: throw TranscriptReadError.transportFailure
     }
   }
 
@@ -496,7 +713,7 @@ enum TranscriptNormalizer {
     guard record["isSidechain"] as? Bool != true,
       let type = record["type"] as? String
     else { return nil }
-    let timestamp = record["timestamp"] as? String
+    let timestamp = sanitizedTimestamp(record["timestamp"])
     let message = record["message"] as? [String: Any] ?? [:]
     switch type {
     case "user":
@@ -521,17 +738,17 @@ enum TranscriptNormalizer {
         return block["text"] as? String
       }.joined(separator: "\n")
       if !text.isEmpty {
-        let redacted = redact(text)
-        var reasons = redacted.reasons
+        var reasons = redact(text).reasons
         if !tools.isEmpty { reasons.append(.toolInput) }
         if message["model"] != nil || record["model"] != nil {
           reasons.append(.modelMetadata)
         }
-        let suffix =
-          tools.isEmpty ? "" : "\n[used \(tools.joined(separator: ", ")) with redacted input]"
         return TranscriptEntry(
           sourceOffset: sourceOffset, timestamp: timestamp, kind: .assistant,
-          text: redacted.text + suffix, redactions: reasons)
+          text: tools.isEmpty
+            ? "[redacted assistant text]"
+            : "[redacted assistant text]\n[used tool with redacted input]",
+          redactions: reasons + [.filesystemPath, .secret])
       }
       guard let tool = tools.first else { return nil }
       return toolEntry(tool, sourceOffset: sourceOffset, timestamp: timestamp)
@@ -545,21 +762,23 @@ enum TranscriptNormalizer {
   ) throws -> TranscriptEntry? {
     guard let type = record["type"] as? String else { return nil }
     let data = record["data"] as? [String: Any] ?? [:]
-    let timestamp = (record["timestamp"] ?? data["timestamp"]) as? String
+    let timestamp = sanitizedTimestamp(record["timestamp"] ?? data["timestamp"])
     switch type {
     case "user.message":
       return TranscriptEntry(
         sourceOffset: sourceOffset, timestamp: timestamp, kind: .prompt,
         text: "[redacted prompt]", redactions: [.prompt])
     case "assistant.message":
-      let redacted = redact(data["content"] as? String ?? "")
+      let content = data["content"] as? String ?? ""
+      let redacted = redact(content)
       let reasons =
         data["model"] == nil ? redacted.reasons : redacted.reasons + [.modelMetadata]
-      return redacted.text.isEmpty
+      return content.isEmpty
         ? nil
         : TranscriptEntry(
           sourceOffset: sourceOffset, timestamp: timestamp, kind: .assistant,
-          text: redacted.text, redactions: reasons)
+          text: "[redacted assistant text]",
+          redactions: reasons + [.filesystemPath, .secret])
     case "tool.execution_start":
       guard let name = data["toolName"] as? String else {
         throw TranscriptReadError.corrupt
@@ -584,7 +803,7 @@ enum TranscriptNormalizer {
   ) throws -> TranscriptEntry? {
     guard let type = record["type"] as? String else { return nil }
     let payload = record["payload"] as? [String: Any] ?? [:]
-    let timestamp = record["timestamp"] as? String
+    let timestamp = sanitizedTimestamp(record["timestamp"])
     switch type {
     case "event_msg":
       switch payload["type"] as? String {
@@ -593,14 +812,16 @@ enum TranscriptNormalizer {
           sourceOffset: sourceOffset, timestamp: timestamp, kind: .prompt,
           text: "[redacted prompt]", redactions: [.prompt])
       case "agent_message", "agent_reasoning":
-        let redacted = redact(payload["text"] as? String ?? "")
+        let content = payload["text"] as? String ?? ""
+        let redacted = redact(content)
         let reasons =
           payload["model"] == nil ? redacted.reasons : redacted.reasons + [.modelMetadata]
-        return redacted.text.isEmpty
+        return content.isEmpty
           ? nil
           : TranscriptEntry(
             sourceOffset: sourceOffset, timestamp: timestamp, kind: .assistant,
-            text: redacted.text, redactions: reasons)
+            text: "[redacted assistant text]",
+            redactions: reasons + [.filesystemPath, .secret])
       case "task_complete":
         return TranscriptEntry(
           sourceOffset: sourceOffset, timestamp: timestamp, kind: .status,
@@ -631,7 +852,7 @@ enum TranscriptNormalizer {
   private static func toolEntry(
     _ name: String, sourceOffset: UInt64, timestamp: String?
   ) -> TranscriptEntry {
-    let safeName = name.isEmpty ? "tool" : name
+    let safeName = sanitizedToolName(name)
     return TranscriptEntry(
       sourceOffset: sourceOffset, timestamp: timestamp, kind: .toolUse,
       text: "Used \(safeName) with redacted input",
@@ -651,17 +872,43 @@ enum TranscriptNormalizer {
       }
     }
     replace(
-      #"(authorization\s*[:=]\s*(?:bearer\s+)?|(?:api[_-]?key|token|secret|password)\s*[:=]\s*)[^\s,;]+"#,
-      with: "$1[redacted secret]",
-      reason: .secret)
-    replace(
-      #"\b(?:gh[pousr]_[A-Za-z0-9_]{12,}|github_pat_[A-Za-z0-9_]{12,}|sk-[A-Za-z0-9_-]{12,})\b"#,
+      #"-----BEGIN(?: [A-Z0-9]+)? PRIVATE KEY-----[\s\S]*?-----END(?: [A-Z0-9]+)? PRIVATE KEY-----"#,
       with: "[redacted secret]",
       reason: .secret)
     replace(
-      #"(?:[A-Za-z]:\\(?:[^\\\r\n\t ]+\\)*[^\\\r\n\t ]+|~[/\\][^\s\"']+|/(?:[^/\s\"']+/)*[^/\s\"']+)"#,
+      #"(authorization\s*[:=]\s*(?:bearer|basic)?\s*|(?:api[_-]?key|access[_-]?key|secret(?:[_-]?access)?[_-]?key|session[_-]?token|token|secret|password)\s*[:=]\s*)[\"']?[^\s,;\"']+"#,
+      with: "$1[redacted secret]",
+      reason: .secret)
+    replace(
+      #"\b(?:AKIA|ASIA)[A-Z0-9]{16}\b|\b(?:gh[pousr]_[A-Za-z0-9_]{12,}|github_pat_[A-Za-z0-9_]{12,}|sk-[A-Za-z0-9_-]{12,}|(?:azd|ado|azure)[_-]?[A-Za-z0-9_-]{20,})\b|\b[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\b"#,
+      with: "[redacted secret]",
+      reason: .secret)
+    replace(
+      #"(?i)\b[a-z][a-z0-9+.-]*://[^/\s:@]+:[^@\s/]+@"#,
+      with: "[redacted secret]@",
+      reason: .secret)
+    replace(
+      #"(?:(?:\"[A-Za-z]:\\[^\"\r\n]+\")|(?:'[A-Za-z]:\\[^'\r\n]+')|(?:[A-Za-z]:\\(?:[^\\\r\n]+\\)*[^\\\r\n]+)|(?:\"/(?:[^\"\r\n]+)\")|(?:'/(?:[^'\r\n]+)')|(?:~[/\\][^\r\n,;]+)|(?:/(?:[^/\r\n]+/)+[^/\r\n,;]+))"#,
       with: "[redacted path]",
       reason: .filesystemPath)
     return (text, Array(Set(reasons)).sorted { $0.rawValue < $1.rawValue })
+  }
+
+  private static func sanitizedTimestamp(_ value: Any?) -> String? {
+    guard let value = value as? String,
+      value.range(
+        of: #"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$"#,
+        options: .regularExpression) != nil
+    else { return nil }
+    return value
+  }
+
+  private static func sanitizedToolName(_ value: String) -> String {
+    let allowed = Set([
+      "Read", "Write", "Edit", "Glob", "Grep", "Bash", "Task", "WebFetch", "WebSearch",
+      "view", "shell", "shell_command", "local_shell", "container.exec", "read_file",
+      "update_plan", "apply_patch", "web_search",
+    ])
+    return allowed.contains(value) ? value : "tool"
   }
 }

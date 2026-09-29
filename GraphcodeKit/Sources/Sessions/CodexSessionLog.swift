@@ -89,6 +89,18 @@ public enum CodexSessionLog {
     }
   }
 
+  /// The rollout whose filename carries an exact Codex thread id.
+  ///
+  /// Transcript reads use this identity-bound lookup rather than the summary reader's
+  /// working-directory heuristic. Multiple Codex nodes can share one directory, so CWD
+  /// can never prove which node owns a rollout.
+  static func rollout(forThreadID threadID: String, among rollouts: [URL]? = nil) -> URL? {
+    guard UUID(uuidString: threadID) != nil else { return nil }
+    return (rollouts ?? recentRollouts()).first {
+      SessionTransplant.rolloutUUID(in: $0.lastPathComponent) == threadID
+    }
+  }
+
   /// What one tool-call record is doing, in the same voice as the other two backends.
   static func phrase(forRecord payload: [String: Any]) -> String? {
     func trimmed(_ value: Any?) -> String? {

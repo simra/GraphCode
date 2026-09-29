@@ -308,60 +308,107 @@ internal enum GraphcodeSHA256 {
 
     var hash = initial
     for chunkStart in stride(from: 0, to: message.count, by: 64) {
-      var schedule = [UInt32](repeating: 0, count: 64)
-      for index in 0..<16 {
-        let offset = chunkStart + index * 4
-        schedule[index] =
-          UInt32(message[offset]) << 24
-          | UInt32(message[offset + 1]) << 16
-          | UInt32(message[offset + 2]) << 8
-          | UInt32(message[offset + 3])
-      }
-      for index in 16..<64 {
-        let s0 =
-          rotateRight(schedule[index - 15], by: 7)
-          ^ rotateRight(schedule[index - 15], by: 18)
-          ^ (schedule[index - 15] >> 3)
-        let s1 =
-          rotateRight(schedule[index - 2], by: 17)
-          ^ rotateRight(schedule[index - 2], by: 19)
-          ^ (schedule[index - 2] >> 10)
-        schedule[index] = schedule[index - 16] &+ s0 &+ schedule[index - 7] &+ s1
-      }
+      compress(Array(message[chunkStart..<(chunkStart + 64)]), into: &hash)
+    }
 
-      var working = hash
-      for index in 0..<64 {
-        let s1 =
-          rotateRight(working[4], by: 6)
-          ^ rotateRight(working[4], by: 11)
-          ^ rotateRight(working[4], by: 25)
-        let choice = (working[4] & working[5]) ^ (~working[4] & working[6])
-        let temporary1 = working[7] &+ s1 &+ choice &+ constants[index] &+ schedule[index]
-        let s0 =
-          rotateRight(working[0], by: 2)
-          ^ rotateRight(working[0], by: 13)
-          ^ rotateRight(working[0], by: 22)
-        let majority =
-          (working[0] & working[1])
-          ^ (working[0] & working[2])
-          ^ (working[1] & working[2])
-        let temporary2 = s0 &+ majority
+    return hex(hash)
+  }
 
-        working[7] = working[6]
-        working[6] = working[5]
-        working[5] = working[4]
-        working[4] = working[3] &+ temporary1
-        working[3] = working[2]
-        working[2] = working[1]
-        working[1] = working[0]
-        working[0] = temporary1 &+ temporary2
+  static func hex(reading handle: FileHandle, through byteCount: UInt64) throws -> String {
+    try handle.seek(toOffset: 0)
+    var remaining = byteCount
+    var buffered: [UInt8] = []
+    var hash = initial
+    while remaining > 0 {
+      let count = Int(min(remaining, 64 * 1024))
+      guard let data = try handle.read(upToCount: count), !data.isEmpty else {
+        throw CocoaError(.fileReadCorruptFile)
       }
-      for index in 0..<8 {
-        hash[index] = hash[index] &+ working[index]
+      remaining -= UInt64(data.count)
+      buffered.append(contentsOf: data)
+      while buffered.count >= 64 {
+        compress(Array(buffered.prefix(64)), into: &hash)
+        buffered.removeFirst(64)
       }
     }
 
-    return hash.map { word in
+    let bitLength = byteCount &* 8
+    buffered.append(0x80)
+    while buffered.count % 64 != 56 {
+      buffered.append(0)
+    }
+    buffered.append(contentsOf: [
+      UInt8(truncatingIfNeeded: bitLength >> 56),
+      UInt8(truncatingIfNeeded: bitLength >> 48),
+      UInt8(truncatingIfNeeded: bitLength >> 40),
+      UInt8(truncatingIfNeeded: bitLength >> 32),
+      UInt8(truncatingIfNeeded: bitLength >> 24),
+      UInt8(truncatingIfNeeded: bitLength >> 16),
+      UInt8(truncatingIfNeeded: bitLength >> 8),
+      UInt8(truncatingIfNeeded: bitLength),
+    ])
+    for chunkStart in stride(from: 0, to: buffered.count, by: 64) {
+      compress(Array(buffered[chunkStart..<(chunkStart + 64)]), into: &hash)
+    }
+    return hex(hash)
+  }
+
+  private static func compress(_ block: [UInt8], into hash: inout [UInt32]) {
+    var schedule = [UInt32](repeating: 0, count: 64)
+    for index in 0..<16 {
+      let offset = index * 4
+      schedule[index] =
+        UInt32(block[offset]) << 24
+        | UInt32(block[offset + 1]) << 16
+        | UInt32(block[offset + 2]) << 8
+        | UInt32(block[offset + 3])
+    }
+    for index in 16..<64 {
+      let s0 =
+        rotateRight(schedule[index - 15], by: 7)
+        ^ rotateRight(schedule[index - 15], by: 18)
+        ^ (schedule[index - 15] >> 3)
+      let s1 =
+        rotateRight(schedule[index - 2], by: 17)
+        ^ rotateRight(schedule[index - 2], by: 19)
+        ^ (schedule[index - 2] >> 10)
+      schedule[index] = schedule[index - 16] &+ s0 &+ schedule[index - 7] &+ s1
+    }
+
+    var working = hash
+    for index in 0..<64 {
+      let s1 =
+        rotateRight(working[4], by: 6)
+        ^ rotateRight(working[4], by: 11)
+        ^ rotateRight(working[4], by: 25)
+      let choice = (working[4] & working[5]) ^ (~working[4] & working[6])
+      let temporary1 = working[7] &+ s1 &+ choice &+ constants[index] &+ schedule[index]
+      let s0 =
+        rotateRight(working[0], by: 2)
+        ^ rotateRight(working[0], by: 13)
+        ^ rotateRight(working[0], by: 22)
+      let majority =
+        (working[0] & working[1])
+        ^ (working[0] & working[2])
+        ^ (working[1] & working[2])
+      let temporary2 = s0 &+ majority
+
+      working[7] = working[6]
+      working[6] = working[5]
+      working[5] = working[4]
+      working[4] = working[3] &+ temporary1
+      working[3] = working[2]
+      working[2] = working[1]
+      working[1] = working[0]
+      working[0] = temporary1 &+ temporary2
+    }
+    for index in 0..<8 {
+      hash[index] = hash[index] &+ working[index]
+    }
+  }
+
+  private static func hex(_ hash: [UInt32]) -> String {
+    hash.map { word in
       let hex = String(word, radix: 16)
       return String(repeating: "0", count: max(0, 8 - hex.count)) + hex
     }.joined()
