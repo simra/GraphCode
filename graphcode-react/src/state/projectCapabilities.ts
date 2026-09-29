@@ -12,6 +12,7 @@ const capabilityLabels: Record<ProjectCapability, string> = {
   attachments: "Attachments",
   interactiveTerminals: "Interactive terminals",
   diagnostics: "Diagnostics",
+  memoryReads: "Memory history",
 };
 
 const unsupportedPhrases: Record<ProjectCapability, string> = {
@@ -20,6 +21,7 @@ const unsupportedPhrases: Record<ProjectCapability, string> = {
   attachments: "Attachments are not supported",
   interactiveTerminals: "Interactive terminals are not supported",
   diagnostics: "Diagnostics are not supported",
+  memoryReads: "Memory history is not supported",
 };
 
 const locationLabels: Record<ProjectLocationKind, string> = {

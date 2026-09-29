@@ -79,6 +79,9 @@ cancellation, backpressure, and non-reading peers.
 - Transcript pages use this correlated response path exclusively. They are bounded and
   redacted by the daemon and never enter graph snapshots, subscription broadcasts, or
   replay history; see `transcript-read.md`.
+- Node memory and playbook pages use the same response-only rule, with their own
+  newest-to-older frozen cursor and authoritative project capability gate; see
+  `node-resource-read.md`.
 - A rejected graph command returns its correlated error and never a successful response
   snapshot.
 - Before a v2 graph mutation is applied, the daemon preflights both its correlated response

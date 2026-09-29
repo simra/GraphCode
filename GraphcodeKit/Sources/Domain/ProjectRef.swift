@@ -12,23 +12,26 @@ public struct ProjectCapabilities: Codable, Equatable, Sendable {
   public var attachments: Bool
   public var interactiveTerminals: Bool
   public var diagnostics: Bool
+  public var memoryReads: Bool
 
   public init(
     revealInFileManager: Bool = false,
     templates: Bool = false,
     attachments: Bool = false,
     interactiveTerminals: Bool = false,
-    diagnostics: Bool = false
+    diagnostics: Bool = false,
+    memoryReads: Bool = false
   ) {
     self.revealInFileManager = revealInFileManager
     self.templates = templates
     self.attachments = attachments
     self.interactiveTerminals = interactiveTerminals
     self.diagnostics = diagnostics
+    self.memoryReads = memoryReads
   }
 
   private enum CodingKeys: String, CodingKey {
-    case revealInFileManager, templates, attachments, interactiveTerminals, diagnostics
+    case revealInFileManager, templates, attachments, interactiveTerminals, diagnostics, memoryReads
   }
 
   public init(from decoder: Decoder) throws {
@@ -40,6 +43,7 @@ public struct ProjectCapabilities: Codable, Equatable, Sendable {
     interactiveTerminals =
       try container.decodeIfPresent(Bool.self, forKey: .interactiveTerminals) ?? false
     diagnostics = try container.decodeIfPresent(Bool.self, forKey: .diagnostics) ?? false
+    memoryReads = try container.decodeIfPresent(Bool.self, forKey: .memoryReads) ?? false
   }
 }
 
@@ -71,15 +75,16 @@ public struct ProjectMetadata: Codable, Equatable, Sendable {
       templates: true,
       attachments: true,
       interactiveTerminals: true,
-      diagnostics: true))
+      diagnostics: true,
+      memoryReads: true))
 
   public static let ssh = ProjectMetadata(
     location: .ssh,
-    capabilities: ProjectCapabilities(diagnostics: true))
+    capabilities: ProjectCapabilities(diagnostics: true, memoryReads: true))
 
   public static let codespace = ProjectMetadata(
     location: .codespace,
-    capabilities: ProjectCapabilities(diagnostics: true))
+    capabilities: ProjectCapabilities(diagnostics: true, memoryReads: true))
 
   public static func inferred(fromProjectPath path: String) -> ProjectMetadata {
     guard let remote = RemoteProjectLocation.parse(projectPath: path) else { return .local }

@@ -46,6 +46,7 @@ final class WindowsProjectRefCodecTests: XCTestCase {
     XCTAssertFalse(decoded.metadata?.capabilities.templates == true)
     XCTAssertFalse(decoded.metadata?.capabilities.attachments == true)
     XCTAssertFalse(decoded.metadata?.capabilities.interactiveTerminals == true)
+    XCTAssertFalse(decoded.metadata?.capabilities.memoryReads == true)
   }
 
   func testFutureAndMalformedMetadataDoNotRejectGraphsOrRecentArrays() throws {

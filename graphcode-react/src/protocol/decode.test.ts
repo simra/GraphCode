@@ -163,6 +163,7 @@ describe("decodeEnvelope", () => {
       attachments: false,
       interactiveTerminals: false,
       diagnostics: true,
+      memoryReads: false,
     });
   });
 
@@ -518,6 +519,48 @@ describe("decodeEnvelope", () => {
       throw new Error("Expected transcriptPage response");
     }
     expect(envelope.event.page.entries[0].redactions).toEqual(["prompt"]);
+    expect(envelope.event.page.nextCursor).toBe("opaque");
+  });
+
+  it("decodes a correlated bounded node resource page", () => {
+    const envelope = decodeEnvelope({
+      version: 2,
+      kind: "response",
+      requestID: "memory-request",
+      event: {
+        nodeResourcePage: {
+          _0: {
+            nodeID: "11111111-1111-4111-8111-111111111111",
+            resource: "playbookHistory",
+            entries: [
+              {
+                sequence: 42,
+                timestamp: "2026-09-29T00:00:00Z",
+                kind: "rollback",
+                content: "Safe method",
+                redactions: ["secret"],
+                rollbackAvailable: false,
+              },
+            ],
+            nextCursor: "opaque",
+            hasMore: true,
+          },
+        },
+      },
+    });
+
+    expect(envelope.kind).toBe("response");
+    if (
+      envelope.kind !== "response" ||
+      envelope.event?.type !== "nodeResourcePage"
+    ) {
+      throw new Error("Expected nodeResourcePage response");
+    }
+    expect(envelope.event.page.resource).toBe("playbookHistory");
+    expect(envelope.event.page.entries[0]).toMatchObject({
+      kind: "rollback",
+      rollbackAvailable: false,
+    });
     expect(envelope.event.page.nextCursor).toBe("opaque");
   });
 

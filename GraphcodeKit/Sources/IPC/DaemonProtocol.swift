@@ -60,6 +60,10 @@ public enum DaemonCommand: Codable, Sendable, Equatable {
   /// and answered on the requesting connection; transcript content never enters graph
   /// snapshots or the replay/broadcast stream.
   case transcript(projectPath: String, query: TranscriptQuery)
+  /// Read daemon-owned durable node memory, current playbook state, or the bounded
+  /// refinement/rollback audit history. Version-2 only and response-scoped: content
+  /// never enters graph snapshots, broadcasts, or replay.
+  case nodeResource(projectPath: String, query: NodeResourceQuery)
   /// Read the project's Mailroom — the whole room, one loop's unread slice of it, or
   /// one post — answered on this connection alone with a `.mailbox`. This is the read
   /// path the room has instead of riding every `.graphChanged`: a snapshot carries only
@@ -100,7 +104,8 @@ extension DaemonEvent {
   public var requiredCapability: ClientCapability? {
     switch self {
     case .recentProjectsListed, .graphChanged, .errorOccurred, .mailbox, .transcriptPage,
-      .quickChatsListed, .quickChatChanged, .quickChatDeleted, .quickChatActivity:
+      .nodeResourcePage, .quickChatsListed, .quickChatChanged, .quickChatDeleted,
+      .quickChatActivity:
       return nil
     case .nodesChanged: return .nodesChanged
     case .settingsChanged: return .settingsChanged
@@ -302,6 +307,9 @@ public enum DaemonEvent: Codable, Sendable, Equatable {
   /// The correlated answer to `DaemonCommand.transcript`. It is never broadcast or
   /// retained for replay.
   case transcriptPage(TranscriptPage)
+  /// The correlated answer to `DaemonCommand.nodeResource`. It is never broadcast,
+  /// sequenced, retained for replay, or projected into a graph snapshot.
+  case nodeResourcePage(NodeResourcePage)
   /// The presence poll's broadcast: only the loops whose reading, activity, summary or
   /// board changed on this tick, as whole `LoopNode` values, instead of the whole graph
   /// every fifteen seconds (issue #288's background load — on a busy graph something

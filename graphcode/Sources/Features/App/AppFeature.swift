@@ -327,7 +327,7 @@ struct AppFeature {
           state.welcome.recentProjects = projects
           return .none
 
-        case .transcriptPage:
+        case .transcriptPage, .nodeResourcePage:
           return .none
 
         case .graphChanged(let graph):

@@ -36,6 +36,8 @@ on a daemon-focused branch and must preserve v1/v2 compatibility.
 
 ### DT-001 — Bounded node memory and playbook reads
 
+**Decision record:** `investigation/contracts/node-resource-read.md`
+
 **Problem**
 
 The inspector must show durable node memory, playbook state, and refinement history.

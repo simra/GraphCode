@@ -12,7 +12,8 @@ reference and every `LoopGraph.project` snapshot.
       "templates": true,
       "attachments": true,
       "interactiveTerminals": true,
-      "diagnostics": true
+      "diagnostics": true,
+      "memoryReads": true
     }
   }
 }
@@ -38,14 +39,16 @@ writeback, and again before persistence, replay insertion, or broadcast.
 
 Current daemon capability defaults reflect implemented behavior:
 
-| Location  | Reveal | Templates | Attachments | Interactive terminals | Diagnostics |
-| --------- | ------ | --------- | ----------- | --------------------- | ----------- |
-| Local     | Yes    | Yes       | Yes         | Yes                   | Yes         |
-| SSH       | No     | No        | No          | No                    | Yes         |
-| Codespace | No     | No        | No          | No                    | Yes         |
+| Location  | Reveal | Templates | Attachments | Interactive terminals | Diagnostics | Memory reads |
+| --------- | ------ | --------- | ----------- | --------------------- | ----------- | ------------ |
+| Local     | Yes    | Yes       | Yes         | Yes                   | Yes         | Yes          |
+| SSH       | No     | No        | No          | No                    | Yes         | Yes          |
+| Codespace | No     | No        | No          | No                    | Yes         | Yes          |
 
 Remote diagnostics cover the existing daemon-owned remote usage, presence, summary, and
-transcript reads. Remote template resolution, attachment staging, local file-manager
+transcript reads. Memory reads are location-independent because the daemon-owned durable
+memory store remains local even for remote sessions; see `node-resource-read.md`. Remote
+template resolution, attachment staging, local file-manager
 reveal, and Tauri terminal streaming are not advertised.
 
 Clients must treat absent metadata or absent capability flags as unsupported. Older

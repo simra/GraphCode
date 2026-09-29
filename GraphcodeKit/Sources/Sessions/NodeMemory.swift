@@ -28,6 +28,7 @@ public enum NodeMemory {
   public static let logFileName = "LOG.txt"
   public static let wakeFileName = "WAKE.md"
   public static let promptFileName = "PROMPT.md"
+  public static let playbookHistoryFileName = "PLAYBOOK-HISTORY.jsonl"
   /// The node's refinable supplemental prompt — the continual-harness half of memory.
   /// The log records what *happened*; the playbook is what the loop has distilled about
   /// *how to do this job*, rewritten whole by `graphcode node refine` and carried into
@@ -55,15 +56,29 @@ public enum NodeMemory {
   /// small, evidence-backed steps; five steps of undo covers a bad session's worth.
   public static let playbookSnapshotLimit = 5
 
-  /// One directory per (project, node). The project component reuses
-  /// `SessionBriefing.slug` so a human browsing `~/.graphcode/memory` can tell which
-  /// project a log belongs to.
+  private static let storageLock = NSRecursiveLock()
+
+  static func withStorageLock<T>(_ operation: () throws -> T) rethrows -> T {
+    storageLock.lock()
+    defer { storageLock.unlock() }
+    return try operation()
+  }
+
+  /// One directory per (project, node). The readable prefix helps a human browsing
+  /// `~/.graphcode/memory`, while the full identity hash prevents different canonical
+  /// project strings that flatten to the same slug from sharing durable state.
+  public static func projectStorageKey(for projectPath: String) -> String {
+    let readable = String(SessionBriefing.slug(for: projectPath).prefix(48))
+    let identity = GraphcodeSHA256.hex(Data(projectPath.utf8))
+    return readable.isEmpty ? identity : "\(readable)--\(identity)"
+  }
+
   public static func directory(
     forProjectPath projectPath: String, nodeID: UUID, baseURL: URL = SupportDirectory.url
   ) -> URL {
     baseURL
       .appendingPathComponent("memory", isDirectory: true)
-      .appendingPathComponent(SessionBriefing.slug(for: projectPath), isDirectory: true)
+      .appendingPathComponent(projectStorageKey(for: projectPath), isDirectory: true)
       .appendingPathComponent(nodeID.uuidString, isDirectory: true)
   }
 
@@ -97,6 +112,14 @@ public enum NodeMemory {
   /// operation that tried to record something would trade a note for a loop.
   public static func append(
     _ entry: String, projectPath: String, nodeID: UUID, baseURL: URL = SupportDirectory.url
+  ) {
+    withStorageLock {
+      appendUnlocked(entry, projectPath: projectPath, nodeID: nodeID, baseURL: baseURL)
+    }
+  }
+
+  private static func appendUnlocked(
+    _ entry: String, projectPath: String, nodeID: UUID, baseURL: URL
   ) {
     let flattened =
       entry
@@ -219,6 +242,13 @@ public enum NodeMemory {
       .appendingPathComponent(playbookFileName)
   }
 
+  public static func playbookHistoryURL(
+    forProjectPath projectPath: String, nodeID: UUID, baseURL: URL = SupportDirectory.url
+  ) -> URL {
+    directory(forProjectPath: projectPath, nodeID: nodeID, baseURL: baseURL)
+      .appendingPathComponent(playbookHistoryFileName)
+  }
+
   /// The playbook's current text, or `nil` when the node has never refined one — the
   /// wake digest uses the distinction to omit the section entirely rather than show an
   /// empty heading.
@@ -243,19 +273,33 @@ public enum NodeMemory {
   public static func refinePlaybook(
     _ text: String, projectPath: String, nodeID: UUID, baseURL: URL = SupportDirectory.url
   ) -> Bool {
-    let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-    guard !trimmed.isEmpty, trimmed.utf8.count <= maxPlaybookBytes else { return false }
-    let url = playbookURL(forProjectPath: projectPath, nodeID: nodeID, baseURL: baseURL)
-    do {
-      try FileManager.default.createDirectory(
-        at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-      if FileManager.default.fileExists(atPath: url.path) {
-        try snapshotPlaybook(at: url)
+    withStorageLock {
+      let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+      guard !trimmed.isEmpty, trimmed.utf8.count <= maxPlaybookBytes else { return false }
+      let url = playbookURL(forProjectPath: projectPath, nodeID: nodeID, baseURL: baseURL)
+      do {
+        try FileManager.default.createDirectory(
+          at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let historyAppend = try appendPlaybookHistory(
+          kind: .refinement,
+          content: trimmed,
+          rollbackAvailable: FileManager.default.fileExists(atPath: url.path),
+          projectPath: projectPath,
+          nodeID: nodeID,
+          baseURL: baseURL)
+        do {
+          if FileManager.default.fileExists(atPath: url.path) {
+            try snapshotPlaybook(at: url)
+          }
+          try (trimmed + "\n").write(to: url, atomically: true, encoding: .utf8)
+        } catch {
+          rollbackPlaybookHistoryAppend(historyAppend)
+          throw error
+        }
+        return true
+      } catch {
+        return false
       }
-      try (trimmed + "\n").write(to: url, atomically: true, encoding: .utf8)
-      return true
-    } catch {
-      return false
     }
   }
 
@@ -265,17 +309,94 @@ public enum NodeMemory {
   public static func rollbackPlaybook(
     projectPath: String, nodeID: UUID, baseURL: URL = SupportDirectory.url
   ) -> Bool {
-    let url = playbookURL(forProjectPath: projectPath, nodeID: nodeID, baseURL: baseURL)
-    guard let newest = playbookSnapshots(besidePlaybookAt: url).last else { return false }
-    do {
-      if FileManager.default.fileExists(atPath: url.path) {
-        try FileManager.default.removeItem(at: url)
+    withStorageLock {
+      let url = playbookURL(forProjectPath: projectPath, nodeID: nodeID, baseURL: baseURL)
+      guard let newest = playbookSnapshots(besidePlaybookAt: url).last,
+        let restored = try? String(contentsOf: newest, encoding: .utf8)
+          .trimmingCharacters(in: .whitespacesAndNewlines),
+        !restored.isEmpty
+      else { return false }
+      do {
+        let historyAppend = try appendPlaybookHistory(
+          kind: .rollback,
+          content: restored,
+          rollbackAvailable: playbookSnapshots(besidePlaybookAt: url).count > 1,
+          projectPath: projectPath,
+          nodeID: nodeID,
+          baseURL: baseURL)
+        let previous = url.deletingLastPathComponent()
+          .appendingPathComponent(".PLAYBOOK.previous-\(UUID().uuidString).md")
+        var movedPrevious = false
+        do {
+          if FileManager.default.fileExists(atPath: url.path) {
+            try FileManager.default.moveItem(at: url, to: previous)
+            movedPrevious = true
+          }
+          try FileManager.default.moveItem(at: newest, to: url)
+          try? FileManager.default.removeItem(at: previous)
+        } catch {
+          if movedPrevious {
+            try? FileManager.default.removeItem(at: url)
+            try? FileManager.default.moveItem(at: previous, to: url)
+          }
+          rollbackPlaybookHistoryAppend(historyAppend)
+          throw error
+        }
+        return true
+      } catch {
+        return false
       }
-      try FileManager.default.moveItem(at: newest, to: url)
-      return true
-    } catch {
-      return false
     }
+  }
+
+  private static func appendPlaybookHistory(
+    kind: NodeResourceEntryKind,
+    content: String,
+    rollbackAvailable: Bool,
+    projectPath: String,
+    nodeID: UUID,
+    baseURL: URL
+  ) throws -> (url: URL, originalSize: UInt64, existed: Bool) {
+    let record = PlaybookHistoryRecord(
+      version: 1,
+      timestamp: Date().ISO8601Format(),
+      kind: kind,
+      content: content,
+      rollbackAvailable: rollbackAvailable)
+    var data = try JSONEncoder().encode(record)
+    guard data.count <= NodeResourceReader.maximumEntryBytes else {
+      throw NodeResourceReadError.oversized
+    }
+    data.append(0x0a)
+    let url = playbookHistoryURL(
+      forProjectPath: projectPath, nodeID: nodeID, baseURL: baseURL)
+    try FileManager.default.createDirectory(
+      at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+    let existed = FileManager.default.fileExists(atPath: url.path)
+    let originalSize =
+      ((try? FileManager.default.attributesOfItem(atPath: url.path)[.size]) as? NSNumber)?
+      .uint64Value ?? 0
+    if !existed {
+      try data.write(to: url, options: .atomic)
+      return (url, originalSize, existed)
+    }
+    let handle = try FileHandle(forWritingTo: url)
+    defer { try? handle.close() }
+    try handle.seekToEnd()
+    try handle.write(contentsOf: data)
+    return (url, originalSize, existed)
+  }
+
+  private static func rollbackPlaybookHistoryAppend(
+    _ append: (url: URL, originalSize: UInt64, existed: Bool)
+  ) {
+    guard append.existed else {
+      try? FileManager.default.removeItem(at: append.url)
+      return
+    }
+    guard let handle = try? FileHandle(forWritingTo: append.url) else { return }
+    defer { try? handle.close() }
+    try? handle.truncate(atOffset: append.originalSize)
   }
 
   /// Copies the current playbook aside as `PLAYBOOK.<sequence>.md` and prunes the
@@ -302,6 +423,16 @@ public enum NodeMemory {
       contents
       .filter { snapshotSequence($0) != nil }
       .sorted { (snapshotSequence($0) ?? 0) < (snapshotSequence($1) ?? 0) }
+  }
+
+  static func playbookSnapshotURLs(
+    forProjectPath projectPath: String,
+    nodeID: UUID,
+    baseURL: URL = SupportDirectory.url
+  ) throws -> [URL] {
+    playbookSnapshots(
+      besidePlaybookAt: playbookURL(
+        forProjectPath: projectPath, nodeID: nodeID, baseURL: baseURL))
   }
 
   private static func snapshotSequence(_ url: URL) -> Int? {
@@ -399,7 +530,9 @@ public enum NodeMemory {
   public static func remove(
     projectPath: String, nodeID: UUID, baseURL: URL = SupportDirectory.url
   ) {
-    try? FileManager.default.removeItem(
-      at: directory(forProjectPath: projectPath, nodeID: nodeID, baseURL: baseURL))
+    withStorageLock {
+      try? FileManager.default.removeItem(
+        at: directory(forProjectPath: projectPath, nodeID: nodeID, baseURL: baseURL))
+    }
   }
 }

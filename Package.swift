@@ -40,6 +40,7 @@ import PackageDescription
       "SupportDirectory.swift",
       "Sessions/MessageBus.swift",
       "Sessions/NodeMemory.swift",
+      "Sessions/NodeResourceRead.swift",
       "GraphcodeSettingsStore.swift",
       "Sessions/AgentEnvironment.swift",
       "Sessions/CLISessionBackend.swift",

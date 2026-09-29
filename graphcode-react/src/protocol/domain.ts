@@ -6,6 +6,7 @@ export interface ProjectCapabilities {
   attachments: boolean;
   interactiveTerminals: boolean;
   diagnostics: boolean;
+  memoryReads?: boolean;
 }
 
 export interface ProjectMetadata {
@@ -289,6 +290,37 @@ export interface TranscriptPage {
   hasMore: boolean;
 }
 
+export type NodeResourceKind =
+  "memory" | "playbookCurrent" | "playbookHistory" | string;
+
+export type NodeResourceEntryKind = "memory" | "refinement" | "rollback";
+
+export type NodeResourceRedaction = "filesystemPath" | "secret";
+
+export interface NodeResourceEntry {
+  sequence: number;
+  timestamp: string;
+  kind: NodeResourceEntryKind;
+  content: string;
+  redactions: NodeResourceRedaction[];
+  rollbackAvailable?: boolean;
+}
+
+export interface CurrentPlaybookState {
+  content?: string;
+  redactions: NodeResourceRedaction[];
+  rollbackAvailable: boolean;
+}
+
+export interface NodeResourcePage {
+  nodeID: string;
+  resource: NodeResourceKind;
+  entries: NodeResourceEntry[];
+  currentPlaybook?: CurrentPlaybookState;
+  nextCursor?: string;
+  hasMore: boolean;
+}
+
 export type DaemonEvent =
   | { type: "recentProjectsListed"; projects: ProjectRef[] }
   | { type: "graphChanged"; graph: LoopGraph }
@@ -300,6 +332,7 @@ export type DaemonEvent =
   | { type: "mailbox"; projectPath: string; mailbox: Mailbox }
   | { type: "settingsChanged"; snapshot: SettingsSnapshot }
   | { type: "transcriptPage"; page: TranscriptPage }
+  | { type: "nodeResourcePage"; page: NodeResourcePage }
   | { type: "errorOccurred"; message: string }
   | { type: "unsupported"; name: string; payload: unknown };
 

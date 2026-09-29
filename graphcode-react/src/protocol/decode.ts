@@ -27,6 +27,7 @@ const projectMetadataSchema = z.object({
       attachments: z.boolean().default(false),
       interactiveTerminals: z.boolean().default(false),
       diagnostics: z.boolean().default(false),
+      memoryReads: z.boolean().default(false),
     })
     .default({
       revealInFileManager: false,
@@ -34,6 +35,7 @@ const projectMetadataSchema = z.object({
       attachments: false,
       interactiveTerminals: false,
       diagnostics: false,
+      memoryReads: false,
     }),
 });
 
@@ -414,6 +416,32 @@ const transcriptPageSchema = z.object({
   hasMore: z.boolean(),
 });
 
+const nodeResourceRedactionSchema = z.enum(["filesystemPath", "secret"]);
+
+const nodeResourceEntrySchema = z.object({
+  sequence: z.number().int().nonnegative(),
+  timestamp: z.string().min(1),
+  kind: z.enum(["memory", "refinement", "rollback"]),
+  content: z.string(),
+  redactions: z.array(nodeResourceRedactionSchema).default([]),
+  rollbackAvailable: optional(z.boolean()),
+});
+
+const currentPlaybookSchema = z.object({
+  content: optional(z.string()),
+  redactions: z.array(nodeResourceRedactionSchema).default([]),
+  rollbackAvailable: z.boolean(),
+});
+
+const nodeResourcePageSchema = z.object({
+  nodeID: uuidLike,
+  resource: z.string().min(1),
+  entries: z.array(nodeResourceEntrySchema).default([]),
+  currentPlaybook: optional(currentPlaybookSchema),
+  nextCursor: optional(z.string()),
+  hasMore: z.boolean(),
+});
+
 function decodeEvent(raw: Record<string, unknown>): DaemonEvent {
   const entries = Object.entries(raw);
   if (entries.length !== 1) {
@@ -481,6 +509,11 @@ function decodeEvent(raw: Record<string, unknown>): DaemonEvent {
       return {
         type: name,
         page: transcriptPageSchema.parse(singleAssociatedValue(payload)),
+      };
+    case "nodeResourcePage":
+      return {
+        type: name,
+        page: nodeResourcePageSchema.parse(singleAssociatedValue(payload)),
       };
     case "errorOccurred":
       return {

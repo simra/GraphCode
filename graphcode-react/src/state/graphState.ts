@@ -172,6 +172,7 @@ function applyDaemonEvent(state: AppState, event: DaemonEvent): AppState {
       };
     }
     case "transcriptPage":
+    case "nodeResourcePage":
       return state;
     case "quickChatsListed": {
       const selectedQuickChatId = event.chats.some(

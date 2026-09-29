@@ -92,6 +92,10 @@ public actor ProjectRegistry {
     @Sendable (LoopNode, String?, TranscriptQuery) async -> Result<
       TranscriptPage, TranscriptReadError
     >
+  private let readNodeResource:
+    @Sendable (LoopNode, String, NodeResourceQuery) -> Result<
+      NodeResourcePage, NodeResourceReadError
+    >
   /// Non-nil only while at least one client is attached — see `startPresencePolling`.
   private var presencePoller: Task<Void, Never>?
   /// Runs only while the sleep assertion is held — see `refreshAwakeAssertion`.
@@ -170,6 +174,12 @@ public actor ProjectRegistry {
       ) async -> Result<TranscriptPage, TranscriptReadError> = { node, path, query in
         await TranscriptReader.read(node: node, projectPath: path, query: query)
       },
+    readNodeResource:
+      @escaping @Sendable (
+        LoopNode, String, NodeResourceQuery
+      ) -> Result<NodeResourcePage, NodeResourceReadError> = { node, path, query in
+        NodeResourceReader.read(node: node, projectPath: path, query: query)
+      },
     reapCondemnedSessions: Bool = false,
     persistsSynchronously: Bool = false,
     startQuickChat: (
@@ -219,6 +229,7 @@ public actor ProjectRegistry {
     self.sessionAlive = sessionAlive
     self.composeBoard = composeBoard
     self.readTranscript = readTranscript
+    self.readNodeResource = readNodeResource
     self.startQuickChat =
       startQuickChat ?? { node, path in
         let result = await CLISessionBackend.backend(for: node).startResult(node, path)
@@ -838,6 +849,54 @@ public actor ProjectRegistry {
           errorCode: .transcriptUnauthorized)
       }
 
+    case .nodeResource(let path, let query):
+      guard case .v2 = channel.mode else {
+        return ProjectRegistryCommandResult(
+          error: "node memory reads require daemon protocol v2",
+          errorCode: .nodeResourceUnauthorized)
+      }
+      switch routing(for: path, isSidebar: sidebarConnections.contains(connectionID)) {
+      case .project(let canonicalPath):
+        guard connectionProjectPaths[connectionID]?.contains(canonicalPath) == true,
+          let store = stores[canonicalPath]
+        else {
+          return ProjectRegistryCommandResult(
+            error: NodeResourceReadError.unauthorized.message,
+            errorCode: .nodeResourceUnauthorized)
+        }
+        let graph = await store.graph
+        guard graph.project.metadata?.capabilities.memoryReads == true,
+          graph.project.path == canonicalPath,
+          let node = graph.nodesAtAnyDepth.first(where: { $0.id == query.nodeID })
+        else {
+          return ProjectRegistryCommandResult(
+            error: NodeResourceReadError.unauthorized.message,
+            errorCode: .nodeResourceUnauthorized)
+        }
+        switch readNodeResource(node, canonicalPath, query) {
+        case .success(let page):
+          let event = DaemonEvent.nodeResourcePage(page)
+          guard
+            let encoded = try? JSONEncoder().encode(
+              DaemonWireEnvelope.response(id: UUID(), event: event)),
+            encoded.count <= FramedMessageIO.v2MaxPayloadBytes
+          else {
+            return ProjectRegistryCommandResult(
+              error: NodeResourceReadError.oversized.message,
+              errorCode: .nodeResourceOversized)
+          }
+          response = event
+        case .failure(let failure):
+          return ProjectRegistryCommandResult(
+            error: failure.message,
+            errorCode: Self.wireCode(for: failure))
+        }
+      case .refused:
+        return ProjectRegistryCommandResult(
+          error: NodeResourceReadError.unauthorized.message,
+          errorCode: .nodeResourceUnauthorized)
+      }
+
     case .announce(let capabilities):
       // Reaches every store this connection has already joined too: the app's launch
       // sends its joins and its announcement together, and which lands first must not
@@ -923,7 +982,7 @@ public actor ProjectRegistry {
         return nil
       }
       return .graphChanged(await store.graph)
-    case .announce, .mailbox, .transcript:
+    case .announce, .mailbox, .transcript, .nodeResource:
       return nil
     }
   }
@@ -962,6 +1021,19 @@ public actor ProjectRegistry {
     case .invalidCursor: return .transcriptInvalidCursor
     case .unsupportedProvider: return .transcriptUnsupportedProvider
     case .transportFailure: return .transcriptTransportFailure
+    }
+  }
+
+  private static func wireCode(for error: NodeResourceReadError) -> DaemonWireErrorCode {
+    switch error {
+    case .unauthorized: return .nodeResourceUnauthorized
+    case .missing: return .nodeResourceMissing
+    case .corrupt: return .nodeResourceCorrupt
+    case .oversized: return .nodeResourceOversized
+    case .invalidBounds: return .nodeResourceInvalidBounds
+    case .invalidCursor: return .nodeResourceInvalidCursor
+    case .unsupportedResource: return .nodeResourceUnsupportedResource
+    case .transportFailure: return .nodeResourceTransportFailure
     }
   }
 

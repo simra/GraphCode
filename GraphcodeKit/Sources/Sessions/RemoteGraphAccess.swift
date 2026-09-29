@@ -86,7 +86,7 @@ public enum RemoteGraphAccess {
   /// digest is delivered there — the log itself stays on the Mac, where the daemon
   /// appends to it; the digest is the budgeted, rebuildable view of it.
   public static func memoryDirectory(forProjectPath projectPath: String, nodeID: UUID) -> String {
-    "~/.graphcode/memory/\(SessionBriefing.slug(for: projectPath))/\(nodeID.uuidString)"
+    "~/.graphcode/memory/\(NodeMemory.projectStorageKey(for: projectPath))/\(nodeID.uuidString)"
   }
 
   public static func wakePath(forProjectPath projectPath: String, nodeID: UUID) -> String {
