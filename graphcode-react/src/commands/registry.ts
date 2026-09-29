@@ -798,7 +798,13 @@ export function createCommandRegistry(
       label: "New Shell Tab",
       description: "Open a persistent local shell tab in this loop workspace",
       category: "Terminal",
-      shortcut: { key: "t", ctrl: true, label: "Ctrl+T", global: true },
+      shortcut: {
+        key: "t",
+        ctrl: true,
+        shift: true,
+        label: "Ctrl+Shift+T",
+        global: true,
+      },
       surfaces: [],
       ...(actions.newTerminalTab
         ? { enabled: true, execute: actions.newTerminalTab }
@@ -812,7 +818,13 @@ export function createCommandRegistry(
       label: "Close Pane",
       description: "Close the focused pane without ending the loop session",
       category: "Terminal",
-      shortcut: { key: "w", ctrl: true, label: "Ctrl+W", global: true },
+      shortcut: {
+        key: "w",
+        ctrl: true,
+        shift: true,
+        label: "Ctrl+Shift+W",
+        global: true,
+      },
       surfaces: [],
       ...(actions.closeTerminalPane
         ? { enabled: true, execute: actions.closeTerminalPane }
@@ -839,7 +851,13 @@ export function createCommandRegistry(
       label: "Split Right",
       description: "Split the focused pane with a persistent local shell",
       category: "Terminal",
-      shortcut: { key: "d", ctrl: true, label: "Ctrl+D", global: true },
+      shortcut: {
+        key: "e",
+        ctrl: true,
+        shift: true,
+        label: "Ctrl+Shift+E",
+        global: true,
+      },
       surfaces: [],
       ...(actions.splitTerminalRight
         ? { enabled: true, execute: actions.splitTerminalRight }
@@ -854,10 +872,10 @@ export function createCommandRegistry(
       description: "Split the focused pane vertically with a local shell",
       category: "Terminal",
       shortcut: {
-        key: "d",
+        key: "o",
         ctrl: true,
         shift: true,
-        label: "Ctrl+Shift+D",
+        label: "Ctrl+Shift+O",
         global: true,
       },
       surfaces: [],
@@ -874,9 +892,9 @@ export function createCommandRegistry(
       description: "Select the next terminal tab",
       category: "Terminal",
       shortcut: {
-        key: "ArrowRight",
+        key: "PageDown",
         ctrl: true,
-        label: "Ctrl+→",
+        label: "Ctrl+PageDown",
         global: true,
       },
       surfaces: [],
@@ -893,9 +911,9 @@ export function createCommandRegistry(
       description: "Select the previous terminal tab",
       category: "Terminal",
       shortcut: {
-        key: "ArrowLeft",
+        key: "PageUp",
         ctrl: true,
-        label: "Ctrl+←",
+        label: "Ctrl+PageUp",
         global: true,
       },
       surfaces: [],
@@ -911,7 +929,11 @@ export function createCommandRegistry(
       label: "Focus Next Pane",
       description: "Move keyboard focus to the next split pane",
       category: "Terminal",
-      shortcut: { key: "]", ctrl: true, label: "Ctrl+]", global: true },
+      shortcut: {
+        key: "F6",
+        label: "F6",
+        global: true,
+      },
       surfaces: [],
       ...(actions.focusNextTerminalPane && actions.terminalIsSplit
         ? { enabled: true, execute: actions.focusNextTerminalPane }
@@ -929,7 +951,12 @@ export function createCommandRegistry(
       label: "Focus Previous Pane",
       description: "Move keyboard focus to the previous split pane",
       category: "Terminal",
-      shortcut: { key: "[", ctrl: true, label: "Ctrl+[", global: true },
+      shortcut: {
+        key: "F6",
+        shift: true,
+        label: "Shift+F6",
+        global: true,
+      },
       surfaces: [],
       ...(actions.focusPreviousTerminalPane && actions.terminalIsSplit
         ? { enabled: true, execute: actions.focusPreviousTerminalPane }

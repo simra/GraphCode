@@ -4,6 +4,7 @@ import {
   closeTab,
   createTerminalLayout,
   focusRelativePane,
+  resizeSplit,
   selectRelativeTab,
   splitFocusedPane,
   type TerminalLayout,
@@ -43,12 +44,16 @@ describe("terminal layout", () => {
 
     expect(layout.tabs[0].root).toEqual({
       kind: "split",
+      id: `split-${ids[1]}`,
       direction: "horizontal",
+      sizes: [0.5, 0.5],
       children: [
         { kind: "leaf", surface: { id: nodeId, kind: "node" } },
         {
           kind: "split",
+          id: `split-${ids[2]}`,
           direction: "vertical",
+          sizes: [0.5, 0.5],
           children: [
             { kind: "leaf", surface: { id: ids[1], kind: "shell" } },
             { kind: "leaf", surface: { id: ids[2], kind: "shell" } },
@@ -65,7 +70,7 @@ describe("terminal layout", () => {
     layout = focusRelativePane(layout, 1);
     expect(layout.tabs[0].focusedSurfaceId).toBe(nodeId);
 
-    layout = closePane(layout, layout.tabs[0].id, ids[1]);
+    layout = closePane(layout, layout.tabs[0].id, ids[1], nodeId);
     layout = {
       ...layout,
       tabs: [
@@ -86,17 +91,49 @@ describe("terminal layout", () => {
     expect(layout.selectedTabId).toBe(layout.tabs[0].id);
   });
 
-  it("collapses a split and never removes the final tab", () => {
+  it("collapses a split and restores the node when the final shell closes", () => {
     let layout = createTerminalLayout(nodeId, () => ids[0]);
     const tabId = layout.tabs[0].id;
     layout = split(layout, "horizontal", ids[1]);
-    layout = closePane(layout, tabId, nodeId);
+    layout = closePane(layout, tabId, nodeId, nodeId);
 
     expect(layout.tabs[0].root).toEqual({
       kind: "leaf",
       surface: { id: ids[1], kind: "shell" },
     });
     expect(layout.tabs[0].focusedSurfaceId).toBe(ids[1]);
-    expect(closeTab(layout, tabId)).toBe(layout);
+    expect(closePane(layout, tabId, ids[1], nodeId).tabs[0]).toMatchObject({
+      id: tabId,
+      root: {
+        kind: "leaf",
+        surface: { id: nodeId, kind: "node" },
+      },
+      focusedSurfaceId: nodeId,
+    });
+    expect(closeTab(layout, tabId, nodeId).tabs[0]).toMatchObject({
+      root: {
+        kind: "leaf",
+        surface: { id: nodeId, kind: "node" },
+      },
+      focusedSurfaceId: nodeId,
+    });
+  });
+
+  it("persists bounded adjacent split sizes", () => {
+    let layout = createTerminalLayout(nodeId, () => ids[0]);
+    layout = split(layout, "horizontal", ids[1]);
+    const splitId = `split-${ids[1]}`;
+
+    layout = resizeSplit(layout, layout.tabs[0].id, splitId, 0, 0.2);
+    expect(layout.tabs[0].root.kind).toBe("split");
+    if (layout.tabs[0].root.kind !== "split") return;
+    expect(layout.tabs[0].root.sizes[0]).toBeCloseTo(0.7);
+    expect(layout.tabs[0].root.sizes[1]).toBeCloseTo(0.3);
+
+    layout = resizeSplit(layout, layout.tabs[0].id, splitId, 0, 1);
+    expect(layout.tabs[0].root.kind).toBe("split");
+    if (layout.tabs[0].root.kind !== "split") return;
+    expect(layout.tabs[0].root.sizes[0]).toBeCloseTo(0.9);
+    expect(layout.tabs[0].root.sizes[1]).toBeCloseTo(0.1);
   });
 });

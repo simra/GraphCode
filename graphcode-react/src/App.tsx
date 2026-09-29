@@ -139,6 +139,7 @@ import {
   closeTab,
   createTerminalLayout,
   focusRelativePane,
+  resizeSplit,
   selectRelativeTab,
   selectedTerminalTab,
   splitFocusedPane,
@@ -513,7 +514,7 @@ export default function App() {
     async (nodeId: string, tabId: string, surface: TerminalSurface) => {
       await closeTerminalSurfaces([surface]);
       updateTerminalLayout(nodeId, (layout) =>
-        closePane(layout, tabId, surface.id),
+        closePane(layout, tabId, surface.id, nodeId),
       );
     },
     [closeTerminalSurfaces, updateTerminalLayout],
@@ -521,7 +522,9 @@ export default function App() {
   const closeTerminalTab = useCallback(
     async (nodeId: string, tab: TerminalTab) => {
       await closeTerminalSurfaces(terminalSurfaces(tab.root));
-      updateTerminalLayout(nodeId, (layout) => closeTab(layout, tab.id));
+      updateTerminalLayout(nodeId, (layout) =>
+        closeTab(layout, tab.id, nodeId),
+      );
     },
     [closeTerminalSurfaces, updateTerminalLayout],
   );
@@ -1858,6 +1861,11 @@ export default function App() {
                     error instanceof Error ? error.message : String(error),
                   );
                 },
+              )
+            }
+            onResizeSplit={(tabId, splitId, dividerIndex, delta) =>
+              updateTerminalLayout(terminalNode.id, (layout) =>
+                resizeSplit(layout, tabId, splitId, dividerIndex, delta),
               )
             }
             onBack={() => {

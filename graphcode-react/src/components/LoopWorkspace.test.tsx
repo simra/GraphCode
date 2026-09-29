@@ -7,6 +7,7 @@ import type { LoopGraph, LoopNode } from "../protocol/domain";
 import {
   closePane,
   createTerminalLayout,
+  resizeSplit,
   type TerminalLayout,
   type TerminalSurface,
 } from "../state/terminalLayout";
@@ -80,9 +81,14 @@ import { LoopWorkspace } from "./LoopWorkspace";
 ).IS_REACT_ACT_ENVIRONMENT = true;
 
 class ResizeObserverStub {
+  constructor(private readonly callback: ResizeObserverCallback) {
+    resizeObservers.push(callback);
+  }
   observe() {}
   disconnect() {}
 }
+
+let resizeObservers: ResizeObserverCallback[] = [];
 
 const node: LoopNode = {
   id: "11111111-1111-4111-8111-111111111111",
@@ -105,6 +111,7 @@ beforeEach(() => {
   xterm.instance = undefined;
   xterm.proposedRows = 24;
   xterm.resize.mockClear();
+  resizeObservers = [];
   bridge.openTerminal.mockReset();
   bridge.handlers = undefined;
   bridge.openTerminal.mockImplementation(
@@ -152,6 +159,7 @@ describe("LoopWorkspace", () => {
           onLayoutChange={() => undefined}
           onClosePane={() => undefined}
           onCloseTab={() => undefined}
+          onResizeSplit={() => undefined}
           onBack={() => undefined}
           onSummarySeen={() => undefined}
           onExecuteCommand={() => undefined}
@@ -220,6 +228,7 @@ describe("LoopWorkspace", () => {
           onLayoutChange={() => undefined}
           onClosePane={() => undefined}
           onCloseTab={() => undefined}
+          onResizeSplit={() => undefined}
           onBack={() => undefined}
           onSummarySeen={() => undefined}
           onExecuteCommand={() => undefined}
@@ -237,7 +246,7 @@ describe("LoopWorkspace", () => {
     });
   });
 
-  it("mounts node and shell panes with independent stable targets", async () => {
+  it("mounts stable panes and resizes them through an accessible divider", async () => {
     const container = document.createElement("div");
     document.body.append(container);
     const root = createRoot(container);
@@ -260,9 +269,16 @@ describe("LoopWorkspace", () => {
           layout={layout}
           onLayoutChange={setLayout}
           onClosePane={(tabId: string, surface: TerminalSurface) =>
-            setLayout((current) => closePane(current, tabId, surface.id))
+            setLayout((current) =>
+              closePane(current, tabId, surface.id, node.id),
+            )
           }
           onCloseTab={() => undefined}
+          onResizeSplit={(tabId, splitId, dividerIndex, delta) =>
+            setLayout((current) =>
+              resizeSplit(current, tabId, splitId, dividerIndex, delta),
+            )
+          }
           onBack={() => undefined}
           onSummarySeen={() => undefined}
           onExecuteCommand={() => undefined}
@@ -307,6 +323,64 @@ describe("LoopWorkspace", () => {
       24,
       expect.any(Object),
     );
+
+    const divider = container.querySelector<HTMLElement>(
+      '[role="separator"][aria-orientation="vertical"]',
+    );
+    expect(divider).not.toBeNull();
+    await act(async () => {
+      divider?.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }),
+      );
+    });
+    expect(
+      Array.from(
+        container.querySelectorAll<HTMLElement>(".terminal-pane-position"),
+      ).map((pane) =>
+        Number.parseFloat(pane.style.getPropertyValue("--pane-width")),
+      ),
+    ).toEqual([55.00000000000001, 44.99999999999999]);
+
+    const panel = divider?.parentElement as HTMLElement;
+    panel.getBoundingClientRect = () =>
+      ({
+        width: 1000,
+        height: 500,
+      }) as DOMRect;
+    await act(async () => {
+      divider?.dispatchEvent(
+        new MouseEvent("pointerdown", {
+          bubbles: true,
+          clientX: 500,
+          clientY: 0,
+        }),
+      );
+      window.dispatchEvent(
+        new MouseEvent("pointermove", {
+          bubbles: true,
+          clientX: 600,
+          clientY: 0,
+        }),
+      );
+      window.dispatchEvent(new MouseEvent("pointerup", { bubbles: true }));
+    });
+    expect(
+      Array.from(
+        container.querySelectorAll<HTMLElement>(".terminal-pane-position"),
+      ).map((pane) =>
+        Number.parseFloat(pane.style.getPropertyValue("--pane-width")),
+      ),
+    ).toEqual([65, 35]);
+
+    bridge.resize.mockClear();
+    xterm.resize.mockClear();
+    xterm.proposedRows = 30;
+    resizeObservers.forEach((callback) => callback([], {} as ResizeObserver));
+    await act(async () => {
+      await new Promise((resolve) => window.setTimeout(resolve, 110));
+    });
+    expect(xterm.resize).toHaveBeenCalledTimes(2);
+    expect(bridge.resize).toHaveBeenCalledTimes(2);
 
     await act(async () => {
       root.unmount();

@@ -7,8 +7,10 @@ export type SplitNode =
   | { kind: "leaf"; surface: TerminalSurface }
   | {
       kind: "split";
+      id: string;
       direction: SplitDirection;
       children: SplitNode[];
+      sizes: number[];
     };
 
 export interface TerminalTab {
@@ -142,6 +144,7 @@ export function closePane(
   layout: TerminalLayout,
   tabId: string,
   surfaceId: string,
+  nodeId: string,
 ): TerminalLayout {
   const tab = layout.tabs.find((candidate) => candidate.id === tabId);
   if (!tab) return layout;
@@ -149,7 +152,7 @@ export function closePane(
   const closedIndex = before.findIndex((surface) => surface.id === surfaceId);
   if (closedIndex < 0) return layout;
   const root = removeSurface(tab.root, surfaceId);
-  if (!root) return closeTab(layout, tabId);
+  if (!root) return closeTab(layout, tabId, nodeId);
   const survivors = terminalSurfaces(root);
   return updateTab(layout, tabId, (current) => ({
     ...current,
@@ -164,10 +167,30 @@ export function closePane(
 export function closeTab(
   layout: TerminalLayout,
   tabId: string,
+  nodeId: string,
 ): TerminalLayout {
-  if (layout.tabs.length === 1) return layout;
   const index = layout.tabs.findIndex((tab) => tab.id === tabId);
   if (index < 0) return layout;
+  if (layout.tabs.length === 1) {
+    const tab = layout.tabs[0];
+    if (
+      tab.root.kind === "leaf" &&
+      tab.root.surface.kind === "node" &&
+      tab.root.surface.id === nodeId
+    ) {
+      return layout;
+    }
+    return {
+      tabs: [
+        {
+          ...tab,
+          root: { kind: "leaf", surface: { id: nodeId, kind: "node" } },
+          focusedSurfaceId: nodeId,
+        },
+      ],
+      selectedTabId: tab.id,
+    };
+  }
   const tabs = layout.tabs.filter((tab) => tab.id !== tabId);
   return {
     tabs,
@@ -176,6 +199,19 @@ export function closeTab(
         ? tabs[Math.min(index, tabs.length - 1)].id
         : layout.selectedTabId,
   };
+}
+
+export function resizeSplit(
+  layout: TerminalLayout,
+  tabId: string,
+  splitId: string,
+  dividerIndex: number,
+  delta: number,
+): TerminalLayout {
+  return updateTab(layout, tabId, (tab) => {
+    const root = resizeSplitNode(tab.root, splitId, dividerIndex, delta);
+    return root === tab.root ? tab : { ...tab, root };
+  });
 }
 
 function updateTab(
@@ -203,8 +239,10 @@ function splitNode(
     return node.surface.id === targetId
       ? {
           kind: "split",
+          id: `split-${addition.id}`,
           direction,
           children: [node, { kind: "leaf", surface: addition }],
+          sizes: [0.5, 0.5],
         }
       : node;
   }
@@ -215,7 +253,11 @@ function splitNode(
     if (index >= 0) {
       const children = [...node.children];
       children.splice(index + 1, 0, { kind: "leaf", surface: addition });
-      return { ...node, children };
+      const sizes = [...node.sizes];
+      const targetSize = sizes[index];
+      sizes[index] = targetSize / 2;
+      sizes.splice(index + 1, 0, targetSize / 2);
+      return { ...node, children, sizes };
     }
   }
   return {
@@ -230,10 +272,55 @@ function removeSurface(node: SplitNode, surfaceId: string): SplitNode | null {
   if (node.kind === "leaf") {
     return node.surface.id === surfaceId ? null : node;
   }
-  const children = node.children
-    .map((child) => removeSurface(child, surfaceId))
-    .filter((child): child is SplitNode => child !== null);
+  const children: SplitNode[] = [];
+  const sizes: number[] = [];
+  node.children.forEach((child, index) => {
+    const next = removeSurface(child, surfaceId);
+    if (!next) return;
+    children.push(next);
+    sizes.push(node.sizes[index]);
+  });
   if (!children.length) return null;
   if (children.length === 1) return children[0];
-  return { ...node, children };
+  return { ...node, children, sizes: normalizeSizes(sizes) };
+}
+
+function resizeSplitNode(
+  node: SplitNode,
+  splitId: string,
+  dividerIndex: number,
+  delta: number,
+): SplitNode {
+  if (node.kind === "leaf") return node;
+  if (
+    node.id === splitId &&
+    dividerIndex >= 0 &&
+    dividerIndex < node.children.length - 1
+  ) {
+    const pairSize = node.sizes[dividerIndex] + node.sizes[dividerIndex + 1];
+    const minimum = Math.min(0.1, pairSize / 3);
+    const first = Math.min(
+      pairSize - minimum,
+      Math.max(minimum, node.sizes[dividerIndex] + delta),
+    );
+    if (first === node.sizes[dividerIndex]) return node;
+    const sizes = [...node.sizes];
+    sizes[dividerIndex] = first;
+    sizes[dividerIndex + 1] = pairSize - first;
+    return { ...node, sizes };
+  }
+  let changed = false;
+  const children = node.children.map((child) => {
+    const next = resizeSplitNode(child, splitId, dividerIndex, delta);
+    changed ||= next !== child;
+    return next;
+  });
+  return changed ? { ...node, children } : node;
+}
+
+function normalizeSizes(sizes: number[]): number[] {
+  const total = sizes.reduce((sum, size) => sum + size, 0);
+  return total > 0
+    ? sizes.map((size) => size / total)
+    : sizes.map(() => 1 / sizes.length);
 }

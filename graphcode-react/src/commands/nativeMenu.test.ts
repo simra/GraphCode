@@ -45,6 +45,22 @@ describe("native menu projection", () => {
         enabled: true,
         execute: () => undefined,
       },
+      {
+        id: "terminal.newTab",
+        label: "New Shell Tab",
+        description: "Open a shell",
+        category: "Terminal",
+        shortcut: {
+          key: "t",
+          ctrl: true,
+          shift: true,
+          label: "Ctrl+Shift+T",
+          global: true,
+        },
+        surfaces: [],
+        enabled: true,
+        execute: () => undefined,
+      },
     ];
 
     expect(nativeMenuProjection(commands)).toEqual([
@@ -68,6 +84,13 @@ describe("native menu projection", () => {
         category: "Navigation",
         enabled: true,
         accelerator: "Ctrl+Alt+Left",
+      },
+      {
+        id: "terminal.newTab",
+        label: "New Shell Tab",
+        category: "Terminal",
+        enabled: true,
+        accelerator: "Ctrl+Shift+T",
       },
     ]);
   });

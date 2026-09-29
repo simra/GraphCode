@@ -34,7 +34,10 @@ of the React app. Node panes attach the daemon-owned node session; shell tabs an
 split panes use their own UUID-named zmx sessions, detach on navigation, and
 reattach without losing layout or scrollback. The shared command registry projects
 new-tab, close, split, tab traversal, and pane-focus actions into both the command
-palette and Tauri's native Terminal menu. This is unit/build evidence only: live
+palette and Tauri's native Terminal menu using terminal-safe accelerators. Split
+weights persist in the in-run layout and accessible dividers support pointer and
+keyboard adjustment; app shutdown kills only client-owned local shell sessions.
+This is unit/build evidence only: live
 multi-pane rendering and keyboard behavior remain part of the final parity gate.
 
 ## Goals

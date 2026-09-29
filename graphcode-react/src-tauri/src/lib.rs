@@ -234,8 +234,13 @@ async fn close_terminal(state: State<'_, BridgeState>, handle: String) -> Result
 }
 
 #[tauri::command]
-async fn kill_terminal_session(surface_id: String) -> Result<(), BridgeError> {
-    terminal::kill_session(&surface_id)
+async fn kill_terminal_session(
+    state: State<'_, BridgeState>,
+    surface_id: String,
+) -> Result<(), BridgeError> {
+    state
+        .terminal
+        .kill_owned_shell(&surface_id)
         .await
         .map_err(Into::into)
 }
@@ -492,8 +497,10 @@ pub fn run() {
                 api.prevent_exit();
                 let app_handle = app_handle.clone();
                 tauri::async_runtime::spawn(async move {
-                    app_handle.state::<BridgeState>().terminal.close_all();
-                    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                    if let Err(error) = app_handle.state::<BridgeState>().terminal.shutdown().await
+                    {
+                        eprintln!("failed to clean up local shell sessions: {error}");
+                    }
                     app_handle.exit(code.unwrap_or(0));
                 });
             }

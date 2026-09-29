@@ -1,6 +1,12 @@
 import type { AppCommand } from "../commands/registry";
 import type { LoopGraph, LoopNode, Mailbox } from "../protocol/domain";
-import { useEffect, type CSSProperties } from "react";
+import {
+  useEffect,
+  useRef,
+  type CSSProperties,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type PointerEvent as ReactPointerEvent,
+} from "react";
 import {
   addShellTab,
   closePane,
@@ -104,34 +110,151 @@ interface PaneBounds {
   height: number;
 }
 
-function paneBounds(
+interface DividerBounds {
+  id: string;
+  splitId: string;
+  dividerIndex: number;
+  direction: SplitDirection;
+  left: number;
+  top: number;
+  length: number;
+  value: number;
+}
+
+interface TerminalGeometry {
+  panes: PaneBounds[];
+  dividers: DividerBounds[];
+}
+
+function terminalGeometry(
   node: SplitNode,
   left = 0,
   top = 0,
   width = 100,
   height = 100,
-): PaneBounds[] {
+): TerminalGeometry {
   if (node.kind === "leaf") {
-    return [{ surface: node.surface, left, top, width, height }];
+    return {
+      panes: [{ surface: node.surface, left, top, width, height }],
+      dividers: [],
+    };
   }
-  return node.children.flatMap((child, index) => {
-    const share = 1 / node.children.length;
-    return node.direction === "horizontal"
-      ? paneBounds(
-          child,
-          left + width * share * index,
-          top,
-          width * share,
-          height,
-        )
-      : paneBounds(
-          child,
-          left,
-          top + height * share * index,
-          width,
-          height * share,
-        );
+  const panes: PaneBounds[] = [];
+  const dividers: DividerBounds[] = [];
+  let offset = 0;
+  node.children.forEach((child, index) => {
+    const share = node.sizes[index];
+    const childGeometry =
+      node.direction === "horizontal"
+        ? terminalGeometry(
+            child,
+            left + width * offset,
+            top,
+            width * share,
+            height,
+          )
+        : terminalGeometry(
+            child,
+            left,
+            top + height * offset,
+            width,
+            height * share,
+          );
+    panes.push(...childGeometry.panes);
+    dividers.push(...childGeometry.dividers);
+    offset += share;
+    if (index < node.children.length - 1) {
+      const pairSize = share + node.sizes[index + 1];
+      dividers.push({
+        id: `${node.id}:${index}`,
+        splitId: node.id,
+        dividerIndex: index,
+        direction: node.direction,
+        left: node.direction === "horizontal" ? left + width * offset : left,
+        top: node.direction === "vertical" ? top + height * offset : top,
+        length: node.direction === "horizontal" ? height : width,
+        value: pairSize > 0 ? Math.round((share / pairSize) * 100) : 50,
+      });
+    }
   });
+  return { panes, dividers };
+}
+
+function SplitDivider({
+  divider,
+  onResize,
+}: {
+  divider: DividerBounds;
+  onResize(delta: number): void;
+}) {
+  const lastPointerPosition = useRef(0);
+
+  const onPointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    const panel = event.currentTarget.parentElement;
+    if (!panel) return;
+    const dimension =
+      divider.direction === "horizontal"
+        ? panel.getBoundingClientRect().width
+        : panel.getBoundingClientRect().height;
+    if (dimension <= 0) return;
+    lastPointerPosition.current =
+      divider.direction === "horizontal" ? event.clientX : event.clientY;
+    const onPointerMove = (moveEvent: PointerEvent) => {
+      const position =
+        divider.direction === "horizontal"
+          ? moveEvent.clientX
+          : moveEvent.clientY;
+      const delta = (position - lastPointerPosition.current) / dimension;
+      if (delta === 0) return;
+      lastPointerPosition.current = position;
+      onResize(delta);
+    };
+    const onPointerUp = () => {
+      window.removeEventListener("pointermove", onPointerMove);
+      window.removeEventListener("pointerup", onPointerUp);
+    };
+    window.addEventListener("pointermove", onPointerMove);
+    window.addEventListener("pointerup", onPointerUp, { once: true });
+  };
+
+  const onKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+    const decrease =
+      divider.direction === "horizontal"
+        ? event.key === "ArrowLeft"
+        : event.key === "ArrowUp";
+    const increase =
+      divider.direction === "horizontal"
+        ? event.key === "ArrowRight"
+        : event.key === "ArrowDown";
+    if (!decrease && !increase) return;
+    event.preventDefault();
+    onResize(increase ? 0.05 : -0.05);
+  };
+
+  return (
+    <div
+      role="separator"
+      tabIndex={0}
+      aria-label={`Resize ${divider.direction === "horizontal" ? "left and right" : "upper and lower"} terminal panes`}
+      aria-orientation={
+        divider.direction === "horizontal" ? "vertical" : "horizontal"
+      }
+      aria-valuemin={10}
+      aria-valuemax={90}
+      aria-valuenow={divider.value}
+      className={`terminal-split-divider terminal-split-divider-${divider.direction}`}
+      style={
+        {
+          "--divider-left": `${divider.left}%`,
+          "--divider-top": `${divider.top}%`,
+          "--divider-length": `${divider.length}%`,
+        } as CSSProperties
+      }
+      onPointerDown={onPointerDown}
+      onKeyDown={onKeyDown}
+    />
+  );
 }
 
 function tabLabel(tab: TerminalTab, nodeId: string): string {
@@ -155,6 +278,7 @@ export function LoopWorkspace({
   onLayoutChange,
   onClosePane,
   onCloseTab,
+  onResizeSplit,
   onBack,
   onSummarySeen,
   onExecuteCommand,
@@ -172,6 +296,12 @@ export function LoopWorkspace({
   onLayoutChange(layout: TerminalLayout): void;
   onClosePane(tabId: string, surface: TerminalSurface): void;
   onCloseTab(tab: TerminalTab): void;
+  onResizeSplit(
+    tabId: string,
+    splitId: string,
+    dividerIndex: number,
+    delta: number,
+  ): void;
   onBack(): void;
   onSummarySeen(beatId: string): void;
   onExecuteCommand(command: AppCommand): void;
@@ -245,7 +375,10 @@ export function LoopWorkspace({
                     <span>{tabLabel(tab, node.id)}</span>
                     <kbd>Ctrl+{index + 1}</kbd>
                   </button>
-                  {layout.tabs.length > 1 ? (
+                  {layout.tabs.length > 1 ||
+                  !terminalSurfaces(tab.root).some(
+                    (surface) => surface.kind === "node",
+                  ) ? (
                     <button
                       type="button"
                       className="terminal-tab-close"
@@ -280,6 +413,7 @@ export function LoopWorkspace({
             {layout.tabs.map((tab) => {
               const selected = tab.id === layout.selectedTabId;
               const surfaces = terminalSurfaces(tab.root);
+              const geometry = terminalGeometry(tab.root);
               return (
                 <div
                   key={tab.id}
@@ -287,7 +421,7 @@ export function LoopWorkspace({
                   hidden={!selected}
                   className="terminal-tab-panel"
                 >
-                  {paneBounds(tab.root).map(
+                  {geometry.panes.map(
                     ({ surface, left, top, width, height }) => (
                       <div
                         className="terminal-pane-position"
@@ -316,7 +450,7 @@ export function LoopWorkspace({
                           onClose={() => onClosePane(tab.id, surface)}
                           onShellExit={() =>
                             onLayoutChange(
-                              closePane(layout, tab.id, surface.id),
+                              closePane(layout, tab.id, surface.id, node.id),
                             )
                           }
                           onSessionExit={onSessionExit}
@@ -324,6 +458,20 @@ export function LoopWorkspace({
                       </div>
                     ),
                   )}
+                  {geometry.dividers.map((divider) => (
+                    <SplitDivider
+                      key={divider.id}
+                      divider={divider}
+                      onResize={(delta) =>
+                        onResizeSplit(
+                          tab.id,
+                          divider.splitId,
+                          divider.dividerIndex,
+                          delta,
+                        )
+                      }
+                    />
+                  ))}
                 </div>
               );
             })}

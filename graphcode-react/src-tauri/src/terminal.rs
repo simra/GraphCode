@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     path::{Path, PathBuf},
     process::Stdio,
     sync::{Arc, Mutex},
@@ -67,6 +67,8 @@ pub enum TerminalError {
     ChannelClosed,
     #[error("terminal history exceeded the 16 MiB safety limit")]
     HistoryTooLarge,
+    #[error("the requested session is not an app-owned local shell")]
+    NotOwnedShell,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -116,6 +118,41 @@ pub enum TerminalTarget {
     },
 }
 
+struct TargetIdentity {
+    surface_id: Uuid,
+    session_name: String,
+    working_directory: Option<PathBuf>,
+    owns_session: bool,
+}
+
+impl TerminalTarget {
+    fn into_identity(self) -> Result<TargetIdentity, TerminalError> {
+        match self {
+            Self::Node { node_id } => {
+                let surface_id = parse_node_id(&node_id)?;
+                Ok(TargetIdentity {
+                    surface_id,
+                    session_name: session_name(surface_id),
+                    working_directory: None,
+                    owns_session: false,
+                })
+            }
+            Self::Shell {
+                surface_id,
+                working_directory,
+            } => {
+                let surface_id = parse_node_id(&surface_id)?;
+                Ok(TargetIdentity {
+                    surface_id,
+                    session_name: session_name(surface_id),
+                    working_directory: working_directory.map(PathBuf::from),
+                    owns_session: true,
+                })
+            }
+        }
+    }
+}
+
 enum TerminalCommand {
     Write(Vec<u8>),
     Resize { columns: u16, rows: u16 },
@@ -131,6 +168,7 @@ struct ActiveTerminal {
 #[derive(Clone, Default)]
 pub struct TerminalManager {
     sessions: Arc<Mutex<HashMap<Uuid, ActiveTerminal>>>,
+    owned_shells: Arc<Mutex<HashSet<Uuid>>>,
 }
 
 impl TerminalManager {
@@ -142,24 +180,8 @@ impl TerminalManager {
         on_event: Channel<TerminalEvent>,
     ) -> Result<TerminalOpenResult, TerminalError> {
         validate_dimensions(columns, rows)?;
-        let (surface_id, session_name, working_directory, shell) = match target {
-            TerminalTarget::Node { node_id } => {
-                let node_id = parse_node_id(&node_id)?;
-                (node_id, session_name(node_id), None, false)
-            }
-            TerminalTarget::Shell {
-                surface_id,
-                working_directory,
-            } => {
-                let surface_id = parse_node_id(&surface_id)?;
-                (
-                    surface_id,
-                    session_name(surface_id),
-                    working_directory.map(PathBuf::from),
-                    true,
-                )
-            }
-        };
+        let target = target.into_identity()?;
+        let surface_id = target.surface_id;
         let handle = Uuid::new_v4();
         let (sender, receiver) = mpsc::channel(64);
         {
@@ -182,8 +204,15 @@ impl TerminalManager {
                 );
             }
         }
+        let newly_owned = self.remember_owned_target(&target);
+        let TargetIdentity {
+            session_name,
+            working_directory,
+            owns_session,
+            ..
+        } = target;
 
-        let prepared = if shell {
+        let prepared = if owns_session {
             prepare_shell_attach(&session_name, working_directory.as_deref(), columns, rows).await
         } else {
             prepare_attach(&session_name, columns, rows).await
@@ -192,12 +221,16 @@ impl TerminalManager {
             Ok(prepared) => prepared,
             Err(error) => {
                 self.remove(handle);
+                if newly_owned {
+                    self.forget_owned_shell(surface_id);
+                }
                 return Err(error);
             }
         };
         let sessions = Arc::clone(&self.sessions);
         let actor_handle = handle;
         let actor_session_name = session_name.clone();
+        let owned_shells = Arc::clone(&self.owned_shells);
         tauri::async_runtime::spawn(async move {
             let result = run_terminal(
                 &zmx,
@@ -210,6 +243,7 @@ impl TerminalManager {
                 &on_event,
             )
             .await;
+            let session_exited = matches!(&result, Ok(TerminalEnd::Exited));
             if let Err(error) = result {
                 let _ = on_event.send(TerminalEvent::Error {
                     message: error.to_string(),
@@ -220,6 +254,12 @@ impl TerminalManager {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .remove(&actor_handle);
+            if owns_session && session_exited {
+                owned_shells
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .remove(&surface_id);
+            }
         });
 
         Ok(TerminalOpenResult {
@@ -279,6 +319,29 @@ impl TerminalManager {
         }
     }
 
+    pub async fn kill_owned_shell(&self, surface_id: &str) -> Result<(), TerminalError> {
+        let surface_id = parse_node_id(surface_id)?;
+        if !self.owns_shell(surface_id) {
+            return Err(TerminalError::NotOwnedShell);
+        }
+        kill_session_id(surface_id).await?;
+        self.forget_owned_shell(surface_id);
+        Ok(())
+    }
+
+    pub async fn shutdown(&self) -> Result<(), TerminalError> {
+        self.close_all();
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        let owned_shells = self.take_owned_shells();
+        let mut first_error = None;
+        for surface_id in owned_shells {
+            if let Err(error) = kill_session_id(surface_id).await {
+                first_error.get_or_insert(error);
+            }
+        }
+        first_error.map_or(Ok(()), Err)
+    }
+
     async fn send(&self, handle: &str, command: TerminalCommand) -> Result<(), TerminalError> {
         let handle = Uuid::parse_str(handle).map_err(|_| TerminalError::NotOpen)?;
         let sender = self
@@ -299,6 +362,37 @@ impl TerminalManager {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(&handle);
+    }
+
+    fn forget_owned_shell(&self, surface_id: Uuid) {
+        self.owned_shells
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&surface_id);
+    }
+
+    fn remember_owned_target(&self, target: &TargetIdentity) -> bool {
+        target.owns_session
+            && self
+                .owned_shells
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(target.surface_id)
+    }
+
+    fn owns_shell(&self, surface_id: Uuid) -> bool {
+        self.owned_shells
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains(&surface_id)
+    }
+
+    fn take_owned_shells(&self) -> Vec<Uuid> {
+        self.owned_shells
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .drain()
+            .collect()
     }
 }
 
@@ -346,8 +440,7 @@ pub async fn history(node_id: &str, max_bytes: usize) -> Result<TerminalHistory,
     })
 }
 
-pub async fn kill_session(surface_id: &str) -> Result<(), TerminalError> {
-    let surface_id = parse_node_id(surface_id)?;
+async fn kill_session_id(surface_id: Uuid) -> Result<(), TerminalError> {
     let session_name = session_name(surface_id);
     let zmx = zmx_binary()?;
     let output = run_command(&zmx, ["kill", &session_name]).await?;
@@ -358,6 +451,12 @@ pub async fn kill_session(surface_id: &str) -> Result<(), TerminalError> {
             "terminal session could not be closed".into(),
         ))
     }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum TerminalEnd {
+    Detached,
+    Exited,
 }
 
 type PreparedAttach = (
@@ -550,7 +649,7 @@ async fn run_terminal(
     mut stderr: tokio::process::ChildStderr,
     mut receiver: mpsc::Receiver<TerminalCommand>,
     on_event: &Channel<TerminalEvent>,
-) -> Result<(), TerminalError> {
+) -> Result<TerminalEnd, TerminalError> {
     let mut output_buffer = vec![0u8; OUTPUT_CHUNK_BYTES];
     let mut error_buffer = vec![0u8; 4096];
     let mut stderr_open = true;
@@ -566,7 +665,7 @@ async fn run_terminal(
                     let status = child.wait().await.map_err(|error| TerminalError::Stream(error.to_string()))?;
                     on_event.send(TerminalEvent::Exit { code: status.code() })
                         .map_err(|_| TerminalError::ChannelClosed)?;
-                    return Ok(());
+                    return Ok(TerminalEnd::Exited);
                 }
                 let sequence = output_window.record(count);
                 on_event
@@ -622,7 +721,7 @@ async fn run_terminal(
                             .map_err(|error| TerminalError::Stream(error.to_string()))?;
                         child.wait().await
                             .map_err(|error| TerminalError::Stream(error.to_string()))?;
-                        return Ok(());
+                        return Ok(TerminalEnd::Detached);
                     }
                 }
             }
@@ -875,6 +974,43 @@ mod tests {
             } if surface_id == "5d375c15-b26f-4b4f-b742-e915da84e2b1"
                 && working_directory == "C:\\work"
         ));
+    }
+
+    #[test]
+    fn shutdown_ownership_tracks_shells_but_never_node_sessions() {
+        let node = TerminalTarget::Node {
+            node_id: "2e527087-b363-48b9-883b-ffd255f01675".into(),
+        }
+        .into_identity()
+        .unwrap();
+        let shell = TerminalTarget::Shell {
+            surface_id: "5d375c15-b26f-4b4f-b742-e915da84e2b1".into(),
+            working_directory: Some("C:\\work".into()),
+        }
+        .into_identity()
+        .unwrap();
+        let manager = TerminalManager::default();
+
+        assert!(!manager.remember_owned_target(&node));
+        assert!(manager.remember_owned_target(&shell));
+        assert!(!manager.owns_shell(node.surface_id));
+        assert!(manager.owns_shell(shell.surface_id));
+        assert_eq!(manager.take_owned_shells(), vec![shell.surface_id]);
+    }
+
+    #[test]
+    fn forgetting_a_closed_shell_removes_it_from_shutdown_cleanup() {
+        let shell = TerminalTarget::Shell {
+            surface_id: "5d375c15-b26f-4b4f-b742-e915da84e2b1".into(),
+            working_directory: None,
+        }
+        .into_identity()
+        .unwrap();
+        let manager = TerminalManager::default();
+
+        assert!(manager.remember_owned_target(&shell));
+        manager.forget_owned_shell(shell.surface_id);
+        assert!(manager.take_owned_shells().is_empty());
     }
 
     #[test]

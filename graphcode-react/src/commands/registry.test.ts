@@ -142,6 +142,33 @@ describe("command registry", () => {
     }
     commands.find((command) => command.id === "terminal.splitRight")?.execute();
     expect(actions.splitTerminalRight).toHaveBeenCalledOnce();
+    expect(
+      Object.fromEntries(
+        commands
+          .filter((command) => command.category === "Terminal")
+          .map((command) => [command.id, command.shortcut?.label]),
+      ),
+    ).toMatchObject({
+      "terminal.newTab": "Ctrl+Shift+T",
+      "terminal.closePane": "Ctrl+Shift+W",
+      "terminal.splitRight": "Ctrl+Shift+E",
+      "terminal.splitDown": "Ctrl+Shift+O",
+      "terminal.nextTab": "Ctrl+PageDown",
+      "terminal.previousTab": "Ctrl+PageUp",
+      "terminal.focusNextPane": "F6",
+      "terminal.focusPreviousPane": "Shift+F6",
+    });
+    for (const shortcut of commands
+      .filter((command) => command.category === "Terminal")
+      .map((command) => command.shortcut)
+      .filter((shortcut) => shortcut !== undefined)) {
+      expect(shortcut).not.toMatchObject({
+        ctrl: true,
+        shift: undefined,
+        alt: undefined,
+        key: expect.stringMatching(/^[twd]$/i),
+      });
+    }
 
     const closed = createCommandRegistry(stateWithSelectedNode(), {
       openPalette: vi.fn(),
