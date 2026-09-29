@@ -206,7 +206,7 @@ impl StableDirectory {
         use std::os::windows::ffi::OsStrExt;
         use windows_sys::Win32::Foundation::{GetLastError, INVALID_HANDLE_VALUE};
         use windows_sys::Win32::Storage::FileSystem::{
-            CreateFileW, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+            CreateFileW, DELETE, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
             FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
             OPEN_EXISTING,
         };
@@ -219,7 +219,7 @@ impl StableDirectory {
         unsafe {
             let handle = CreateFileW(
                 wide.as_ptr(),
-                FILE_READ_ATTRIBUTES,
+                FILE_READ_ATTRIBUTES | DELETE,
                 FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                 std::ptr::null(),
                 OPEN_EXISTING,
@@ -298,6 +298,89 @@ impl StableDirectory {
 
     fn confirmation_token(&self) -> String {
         self.identity.confirmation_token()
+    }
+
+    fn rename_to(&self, destination: &Path) -> Result<(), WorkspaceError> {
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::Foundation::GetLastError;
+        use windows_sys::Win32::Storage::FileSystem::{
+            FileRenameInfo, SetFileInformationByHandle, FILE_RENAME_INFO,
+        };
+
+        let destination_text = destination.to_str().ok_or_else(|| {
+            WorkspaceError::RecoveryUncertain(format!(
+                "{} cannot be represented as a Windows recovery path",
+                destination.display()
+            ))
+        })?;
+        let destination_nt = if let Some(path) = destination_text.strip_prefix(r"\\") {
+            format!(r"\??\UNC\{path}")
+        } else {
+            format!(r"\??\{destination_text}")
+        };
+        let destination_wide: Vec<u16> = std::ffi::OsStr::new(&destination_nt)
+            .encode_wide()
+            .collect();
+        let file_name_offset = std::mem::offset_of!(FILE_RENAME_INFO, FileName);
+        let file_name_bytes = destination_wide
+            .len()
+            .checked_mul(std::mem::size_of::<u16>())
+            .ok_or_else(|| {
+                WorkspaceError::RecoveryUncertain(
+                    "the recovery destination is too long to encode safely".into(),
+                )
+            })?;
+        let byte_length = std::mem::size_of::<FILE_RENAME_INFO>()
+            .checked_add(file_name_bytes)
+            .ok_or_else(|| {
+                WorkspaceError::RecoveryUncertain("the recovery rename request is too large".into())
+            })?;
+        let word_length = byte_length.div_ceil(std::mem::size_of::<usize>());
+        let mut storage = vec![0usize; word_length];
+        let rename = storage.as_mut_ptr().cast::<FILE_RENAME_INFO>();
+        unsafe {
+            (*rename).Anonymous.ReplaceIfExists = false;
+            (*rename).RootDirectory = std::ptr::null_mut();
+            (*rename).FileNameLength = u32::try_from(file_name_bytes).map_err(|_| {
+                WorkspaceError::RecoveryUncertain(
+                    "the recovery destination is too long to encode safely".into(),
+                )
+            })?;
+            std::ptr::copy_nonoverlapping(
+                destination_wide.as_ptr(),
+                storage
+                    .as_mut_ptr()
+                    .cast::<u8>()
+                    .add(file_name_offset)
+                    .cast::<u16>(),
+                destination_wide.len(),
+            );
+            if SetFileInformationByHandle(
+                self.handle,
+                FileRenameInfo,
+                rename.cast(),
+                u32::try_from(byte_length).map_err(|_| {
+                    WorkspaceError::RecoveryUncertain(
+                        "the recovery rename request is too large".into(),
+                    )
+                })?,
+            ) == 0
+            {
+                let error = GetLastError();
+                if error == windows_sys::Win32::Foundation::ERROR_ACCESS_DENIED {
+                    return Err(WorkspaceError::PermissionDenied(format!(
+                        "could not move the verified workspace handle to {}",
+                        destination.display()
+                    )));
+                }
+                return Err(WorkspaceError::RecoveryUncertain(format!(
+                    "could not move the verified workspace handle to {} (Windows error {})",
+                    destination.display(),
+                    error
+                )));
+            }
+        }
+        Ok(())
     }
 }
 
@@ -2006,44 +2089,8 @@ fn move_to_recovery(
     destination: &Path,
     stable: &StableDirectory,
 ) -> Result<Option<String>, WorkspaceError> {
-    use std::os::windows::ffi::OsStrExt;
-    use windows_sys::Win32::Foundation::GetLastError;
-    use windows_sys::Win32::Storage::FileSystem::{MoveFileExW, MOVEFILE_WRITE_THROUGH};
-
     stable.verify_path(source)?;
-    let source_wide: Vec<u16> = source
-        .as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect();
-    let destination_wide: Vec<u16> = destination
-        .as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect();
-    unsafe {
-        if MoveFileExW(
-            source_wide.as_ptr(),
-            destination_wide.as_ptr(),
-            MOVEFILE_WRITE_THROUGH,
-        ) == 0
-        {
-            let error = GetLastError();
-            if error == windows_sys::Win32::Foundation::ERROR_ACCESS_DENIED {
-                return Err(WorkspaceError::PermissionDenied(format!(
-                    "could not move {} to {}",
-                    source.display(),
-                    destination.display()
-                )));
-            }
-            return Err(WorkspaceError::RecoveryUncertain(format!(
-                "could not move {} to {} (Windows error {})",
-                source.display(),
-                destination.display(),
-                error
-            )));
-        }
-    }
+    stable.rename_to(destination)?;
     let mut warnings = Vec::new();
     if let Err(error) = stable.verify_path(destination) {
         warnings.push(format!(
@@ -2195,6 +2242,60 @@ mod tests {
             Err(WorkspaceError::PathUncertain(_))
         ));
 
+        drop(stable);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn handle_rename_moves_verified_directory_not_path_replacement() {
+        let root = std::env::temp_dir().join(format!("graphcode-handle-rename-{}", Uuid::new_v4()));
+        let source = root.join("workspace");
+        let displaced = root.join("workspace-displaced");
+        let recovery = root.join("recovery");
+        let destination = recovery.join("workspace-recovered");
+        fs::create_dir_all(&source).unwrap();
+        fs::create_dir(&recovery).unwrap();
+        fs::write(source.join("verified-object"), b"verified").unwrap();
+        let stable = StableDirectory::open(&source).unwrap();
+        stable.verify_path(&source).unwrap();
+
+        fs::rename(&source, &displaced).unwrap();
+        fs::create_dir(&source).unwrap();
+        fs::write(source.join("replacement-object"), b"replacement").unwrap();
+
+        stable.rename_to(&destination).unwrap();
+
+        assert!(source.join("replacement-object").is_file());
+        assert!(!source.join("verified-object").exists());
+        assert!(destination.join("verified-object").is_file());
+        assert!(!destination.join("replacement-object").exists());
+        stable.verify_path(&destination).unwrap();
+        drop(stable);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn handle_rename_refuses_recovery_destination_collision() {
+        let root =
+            std::env::temp_dir().join(format!("graphcode-handle-collision-{}", Uuid::new_v4()));
+        let source = root.join("workspace");
+        let recovery = root.join("recovery");
+        let destination = recovery.join("workspace-recovered");
+        fs::create_dir_all(&source).unwrap();
+        fs::create_dir(&recovery).unwrap();
+        fs::create_dir(&destination).unwrap();
+        fs::write(source.join("verified-object"), b"verified").unwrap();
+        fs::write(destination.join("existing-object"), b"existing").unwrap();
+        let stable = StableDirectory::open(&source).unwrap();
+
+        assert!(matches!(
+            stable.rename_to(&destination),
+            Err(WorkspaceError::RecoveryUncertain(_))
+        ));
+        assert!(source.join("verified-object").is_file());
+        assert!(destination.join("existing-object").is_file());
         drop(stable);
         fs::remove_dir_all(root).unwrap();
     }
