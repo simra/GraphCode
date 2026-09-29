@@ -227,9 +227,13 @@ extension AppFeature {
 
   /// Puts a loop's workspace on screen — what a history step and a restart's remount
   /// share, minus the recording and the blocked-loop gate, which are `openNode`'s.
+  @discardableResult
   func mountWorkspace(
     node: LoopNode, graph: LoopGraph, projectPath: String, _ state: inout State
-  ) {
+  ) -> Bool {
+    guard graph.project.path == projectPath, supportsInteractiveTerminals(graph) else {
+      return false
+    }
     let layout = TerminalLayout.opening(
       forNode: node.id, saved: terminalLayoutStore.load(forNode: node.id))
     state.openLoop = LoopWorkspaceFeature.State(
@@ -241,6 +245,7 @@ extension AppFeature {
     state.openLoop?.seenMailroomPostID =
       LoopWorkspaceRail.loadSeenMailroomPost(forProjectPath: projectPath)
     state.selectedProjectPath = projectPath
+    return true
   }
 }
 

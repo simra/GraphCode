@@ -30,6 +30,12 @@ therefore never authorize a local operation. Production classification may boots
 from `RemoteProjectLocation`, but clients do not parse path syntax and tests can inject
 different registry classifications for identical display names and path text.
 
+Every graph held by a project `GraphStore`, including every recursively nested composite
+subgraph, carries the canonical root project path and classification. Nested graph names
+remain available for display, but nested synthetic paths and metadata are never
+authority. The invariant is applied on load, draft/import/template ingress, child-store
+writeback, and again before persistence, replay insertion, or broadcast.
+
 Current daemon capability defaults reflect implemented behavior:
 
 | Location  | Reveal | Templates | Attachments | Interactive terminals | Diagnostics |

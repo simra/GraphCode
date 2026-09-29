@@ -97,6 +97,35 @@ final class WindowsProjectRefCodecTests: XCTestCase {
     XCTAssertFalse(codespace.metadata?.capabilities.interactiveTerminals == true)
   }
 
+  func testRootInvariantPreservesNestedDisplayAndNonGlobalScope() throws {
+    let nested = LoopGraph(
+      project: ProjectRef(path: "", name: "Nested display", metadata: .local))
+    let node = LoopNode(title: "Composite", loopType: .composite, subGraph: nested)
+    let remoteRoot = ProjectRef(
+      path: "C:\\synthetic\\same",
+      name: "Root display",
+      metadata: .ssh)
+    let normalized = LoopGraph(project: remoteRoot, nodes: [node])
+      .enforcingRootProject(remoteRoot)
+    let normalizedNested = try XCTUnwrap(normalized.nodes.first?.subGraph)
+
+    XCTAssertEqual(normalizedNested.project.path, remoteRoot.path)
+    XCTAssertEqual(normalizedNested.project.name, "Nested display")
+    XCTAssertEqual(normalizedNested.project.metadata, .ssh)
+    XCTAssertFalse(normalizedNested.isGlobal)
+
+    let globalRoot = ProjectRef(path: LoopGraphScope.globalPath, name: "Global")
+    let globalNormalized = LoopGraph(scope: .global, nodes: [node])
+      .enforcingRootProject(globalRoot)
+    let globalNested = try XCTUnwrap(globalNormalized.nodes.first?.subGraph)
+
+    XCTAssertTrue(globalNormalized.isGlobal)
+    XCTAssertFalse(globalNested.isGlobal)
+    XCTAssertEqual(globalNested.project.path, LoopGraphScope.globalPath)
+    XCTAssertEqual(globalNested.project.name, "Nested display")
+    XCTAssertNil(globalNested.project.metadata)
+  }
+
   func testEncodedMetadataContainsNoConnectionDetails() throws {
     let location = RemoteProjectLocation(
       user: "sensitive-user",

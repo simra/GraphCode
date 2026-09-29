@@ -52,6 +52,71 @@ struct AppFeatureTests {
 
   @Test
   @MainActor
+  func historyCannotReopenAProjectThatLostTerminalCapability() async {
+    let path = "/tmp/project"
+    let previous = LoopNode(title: "Previous", checkDescription: "Done?")
+    let current = LoopNode(title: "Current", checkDescription: "Done?")
+    let unsupportedMetadata: [ProjectMetadata?] = [nil, .ssh]
+
+    for metadata in unsupportedMetadata {
+      var state = AppFeature.State()
+      let project = ProjectRef(path: path, name: "project", metadata: metadata)
+      state.projects.append(
+        ProjectFeature.State(
+          graph: LoopGraph(project: project, nodes: [previous, current])))
+      state.loopHistory.record(.loop(projectPath: path, nodeID: previous.id))
+      state.loopHistory.record(.loop(projectPath: path, nodeID: current.id))
+      let store = TestStore(initialState: state) {
+        AppFeature()
+      }
+      store.exhaustivity = .off
+
+      await store.send(.historyBackTapped)
+
+      #expect(store.state.openLoop == nil)
+      #expect(store.state.loopHistory.current == .loop(projectPath: path, nodeID: current.id))
+    }
+  }
+
+  @Test
+  @MainActor
+  func restartDoesNotRemountAfterProjectLosesTerminalCapability() async {
+    let node = LoopNode(title: "Worker", checkDescription: "Done?")
+    var state = AppFeature.State()
+    state.projects.append(
+      ProjectFeature.State(graph: LoopGraph(project: Self.projectA, nodes: [node])))
+    state.selectedProjectPath = Self.projectA.path
+    state.openLoop = LoopWorkspaceFeature.State(
+      node: node,
+      layout: .defaultLayout(forNode: node.id),
+      projectPath: Self.projectA.path,
+      projectName: Self.projectA.name)
+    let store = TestStore(initialState: state) {
+      AppFeature()
+    } withDependencies: {
+      $0.orchestratorClient.send = { _ in }
+    }
+    store.exhaustivity = .off
+
+    await store.send(.sessionRestart(.openLoopTapped))
+    #expect(store.state.openLoop == nil)
+    #expect(store.state.sessionRestart.pendingReopen?.nodeID == node.id)
+
+    var restarted = node
+    restarted.sessionRestarts = 1
+    let remote = ProjectRef(
+      path: Self.projectA.path,
+      name: Self.projectA.name,
+      metadata: .ssh)
+    await store.send(
+      .daemonEvent(.graphChanged(LoopGraph(project: remote, nodes: [restarted]))))
+
+    #expect(store.state.sessionRestart.pendingReopen == nil)
+    #expect(store.state.openLoop == nil)
+  }
+
+  @Test
+  @MainActor
   func openingTwoDifferentProjectsAddsBothAndAutoSelectsTheSecond() async {
     let sentCommands = SentCommandsBox()
     let store = TestStore(initialState: AppFeature.State()) {

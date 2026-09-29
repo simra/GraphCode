@@ -105,6 +105,38 @@ public struct LoopGraph: Identifiable, Codable, Equatable, Sendable {
       edges: edges)
   }
 
+  /// Returns this graph tree with every scope bound to the daemon-authoritative root
+  /// project. A nested graph's own path is presentation/editing input, never an
+  /// authority boundary: sessions, persistence, and capabilities all belong to the
+  /// project whose `GraphStore` owns the tree.
+  public func enforcingRootProject(
+    _ rootProject: ProjectRef,
+    preservingCurrentDisplayName: Bool = false
+  ) -> LoopGraph {
+    var copy = self
+    let currentProject = copy.project
+    let boundProject =
+      preservingCurrentDisplayName
+      ? ProjectRef(
+        path: rootProject.path,
+        name: currentProject.name,
+        lastOpenedAt: currentProject.lastOpenedAt,
+        metadata: rootProject.metadata)
+      : rootProject
+    if preservingCurrentDisplayName, rootProject.path == LoopGraphScope.globalPath {
+      copy.scope = .project(boundProject)
+    } else {
+      copy.project = boundProject
+    }
+    for index in copy.nodes.indices {
+      guard let subGraph = copy.nodes[index].subGraph else { continue }
+      copy.nodes[index].subGraph = subGraph.enforcingRootProject(
+        rootProject,
+        preservingCurrentDisplayName: true)
+    }
+    return copy
+  }
+
   /// Whether this graph holds `nodeID` anywhere beneath it, composites' contents
   /// included.
   ///

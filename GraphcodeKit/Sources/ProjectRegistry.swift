@@ -1215,9 +1215,14 @@ public actor ProjectRegistry {
       path: path,
       name: Self.displayName(for: path),
       metadata: metadata)
-    let graph = graphByApplyingAuthoritativeProjectMetadata(
-      persistedGraph ?? LoopGraph(project: reference),
-      canonicalRootPath: path)
+    let loadedGraph = persistedGraph ?? LoopGraph(project: reference)
+    let loadedProject = loadedGraph.project
+    let authoritativeProject = ProjectRef(
+      path: path,
+      name: loadedProject.name,
+      lastOpenedAt: loadedProject.lastOpenedAt,
+      metadata: path == LoopGraphScope.globalPath ? nil : metadata)
+    let graph = loadedGraph.enforcingRootProject(authoritativeProject)
     if let persistedGraph, persistedGraph != graph {
       writer.save(graph)
       if persistsSynchronously { writer.flush() }
@@ -1234,6 +1239,7 @@ public actor ProjectRegistry {
     }
     let newStore = GraphStore(
       graph: graph,
+      authoritativeProject: authoritativeProject,
       onGraphChanged: { [weak self, writer, persistsSynchronously] updatedGraph in
         // Handed to the writer and done: this closure runs on the store's actor, and a
         // write of the whole graph held it for as long as the disk took (#307).
@@ -1311,28 +1317,6 @@ public actor ProjectRegistry {
     // reboots on its own schedule, so its loops need a repeating check as well.
     if RemoteProjectLocation.parse(projectPath: path) != nil { startRemoteLivenessSweep() }
     return newStore
-  }
-
-  private func graphByApplyingAuthoritativeProjectMetadata(
-    _ graph: LoopGraph,
-    canonicalRootPath: String? = nil
-  ) -> LoopGraph {
-    var copy = graph
-    if !copy.isGlobal {
-      let project = copy.project
-      let path =
-        canonicalRootPath ?? Self.canonicalize(project.path, platformPaths: platformPaths)
-      copy.project = ProjectRef(
-        path: path,
-        name: project.name,
-        lastOpenedAt: project.lastOpenedAt,
-        metadata: classifyProject(path))
-    }
-    for index in copy.nodes.indices {
-      guard let subGraph = copy.nodes[index].subGraph else { continue }
-      copy.nodes[index].subGraph = graphByApplyingAuthoritativeProjectMetadata(subGraph)
-    }
-    return copy
   }
 
   private func authoritativeRecentProjects() -> [ProjectRef] {

@@ -755,7 +755,9 @@ extension AppFeature {
       state.blockedLoopNotice = BlockedLoopNotice(node: node, graph: graph)
       return .none
     }
-    mountWorkspace(node: node, graph: graph, projectPath: path, &state)
+    guard mountWorkspace(node: node, graph: graph, projectPath: path, &state) else {
+      return .none
+    }
     recordVisit(.loop(projectPath: path, nodeID: nodeID), &state)
     // A finished loop's session may have been ended to free the machine. The daemon brings
     // the conversation back — the pane of a Codex, remote, or unbanked loop waits for it.
@@ -766,7 +768,7 @@ extension AppFeature {
     }
   }
 
-  private func supportsInteractiveTerminals(_ graph: LoopGraph) -> Bool {
+  func supportsInteractiveTerminals(_ graph: LoopGraph) -> Bool {
     graph.isGlobal || graph.project.metadata?.capabilities.interactiveTerminals == true
   }
 

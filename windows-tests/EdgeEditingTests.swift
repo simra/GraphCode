@@ -31,8 +31,12 @@ final class EdgeEditingTests: XCTestCase {
     LoopGraph(
       project: ProjectRef(path: "edge-edit-root", name: "Root"),
       nodes: IdentifiedArrayOf(uniqueElements: [
-        LoopNode(id: parent, title: "Parent", loopType: .composite, subGraph: child, state: child.aggregateState),
-        LoopNode(id: sibling, title: "Sibling", loopType: .composite, subGraph: child, state: child.aggregateState),
+        LoopNode(
+          id: parent, title: "Parent", loopType: .composite, subGraph: child,
+          state: child.aggregateState),
+        LoopNode(
+          id: sibling, title: "Sibling", loopType: .composite, subGraph: child,
+          state: child.aggregateState),
       ]))
   }
 
@@ -76,7 +80,8 @@ final class EdgeEditingTests: XCTestCase {
     var initial = graph(count: 0)
     initial.edges.append(LoopEdge(from: source, to: target, kind: .message))
     let store = GraphStore(graph: initial)
-    rejected(await store.handle(command(EdgeSpec(), EdgeSpec(kind: .message))), containing: "duplicate")
+    rejected(
+      await store.handle(command(EdgeSpec(), EdgeSpec(kind: .message))), containing: "duplicate")
     let afterDuplicate = await store.graph
     XCTAssertEqual(afterDuplicate.edges, initial.edges)
     var changed = EdgeSpec()
@@ -92,13 +97,19 @@ final class EdgeEditingTests: XCTestCase {
     var missingTarget = graph()
     missingTarget.nodes.remove(id: target)
     let endpointStore = GraphStore(graph: missingTarget)
-    rejected(await endpointStore.handle(command(EdgeSpec(), EdgeSpec(kind: .spawn))), containing: "endpoints")
+    rejected(
+      await endpointStore.handle(command(EdgeSpec(), EdgeSpec(kind: .spawn))),
+      containing: "endpoints")
     let store = GraphStore(graph: graph())
-    rejected(await store.handle(.updateEdge(
-      id: edgeID, from: target, to: source, expectedSpec: EdgeSpec(), spec: EdgeSpec())),
+    rejected(
+      await store.handle(
+        .updateEdge(
+          id: edgeID, from: target, to: source, expectedSpec: EdgeSpec(), spec: EdgeSpec())),
       containing: "changed")
-    rejected(await store.handle(.updateEdge(
-      id: parent, from: source, to: target, expectedSpec: EdgeSpec(), spec: EdgeSpec())),
+    rejected(
+      await store.handle(
+        .updateEdge(
+          id: parent, from: source, to: target, expectedSpec: EdgeSpec(), spec: EdgeSpec())),
       containing: "no edge")
   }
 
@@ -115,7 +126,8 @@ final class EdgeEditingTests: XCTestCase {
         XCTAssertEqual(blocked.edges[id: edgeID]?.fireCount, count)
         _ = await store.handle(command(EdgeSpec(kind: .handoff), EdgeSpec(kind: .spawn)))
         let unblocked = await store.graph
-        XCTAssertEqual(unblocked.nodes[id: target]?.state,
+        XCTAssertEqual(
+          unblocked.nodes[id: target]?.state,
           (state == .idle || state == .blocked) ? .idle : state)
         XCTAssertEqual(unblocked.edges[id: edgeID]?.fireCount, count)
       }
@@ -158,40 +170,54 @@ final class EdgeEditingTests: XCTestCase {
     let initial = nested(child)
     let snapshots = EdgeEditSnapshots()
     let store = GraphStore(graph: initial, onGraphChanged: { snapshots.append($0) })
-    _ = await store.handle(.subGraphCommand(nodeID: parent,
-      command: command(EdgeSpec(), EdgeSpec(kind: .message))))
+    _ = await store.handle(
+      .subGraphCommand(
+        nodeID: parent,
+        command: command(EdgeSpec(), EdgeSpec(kind: .message))))
     let updated = await store.graph
     XCTAssertEqual(updated.nodes[id: parent]?.subGraph?.edges[id: edgeID]?.kind, .message)
     XCTAssertEqual(updated.nodes[id: parent]?.subGraph?.nodes[id: target]?.state, .idle)
     XCTAssertEqual(updated.nodes[id: parent]?.state, .idle)
-    XCTAssertEqual(updated.nodes[id: sibling], initial.nodes[id: sibling])
+    let normalized = initial.enforcingRootProject(initial.project)
+    XCTAssertEqual(updated.nodes[id: sibling], normalized.nodes[id: sibling])
     XCTAssertEqual(snapshots.values.count, 1)
     XCTAssertEqual(snapshots.values.first?.project.path, "edge-edit-root")
-    XCTAssertEqual(snapshots.values.first?.nodes[id: parent]?.subGraph?.edges[id: edgeID]?.kind, .message)
+    XCTAssertEqual(
+      snapshots.values.first?.nodes[id: parent]?.subGraph?.edges[id: edgeID]?.kind, .message)
   }
 
   func testWrongAndDeeperEditScopesRejectWithoutLegacyFallback() async {
     let initial = nested(graph())
     let store = GraphStore(graph: initial)
-    rejected(await store.handle(command(EdgeSpec(), EdgeSpec(kind: .message))), containing: "no edge")
-    rejected(await store.handle(.subGraphCommand(nodeID: target,
-      command: command(EdgeSpec(), EdgeSpec()))), containing: "direct composite")
-    rejected(await store.handle(.subGraphCommand(nodeID: parent,
-      command: .subGraphCommand(nodeID: sibling, command: command(EdgeSpec(), EdgeSpec())))),
+    rejected(
+      await store.handle(command(EdgeSpec(), EdgeSpec(kind: .message))), containing: "no edge")
+    rejected(
+      await store.handle(
+        .subGraphCommand(
+          nodeID: target,
+          command: command(EdgeSpec(), EdgeSpec()))), containing: "direct composite")
+    rejected(
+      await store.handle(
+        .subGraphCommand(
+          nodeID: parent,
+          command: .subGraphCommand(nodeID: sibling, command: command(EdgeSpec(), EdgeSpec())))),
       containing: "one direct composite")
     let updated = await store.graph
-    XCTAssertEqual(updated.nodes, initial.nodes)
+    XCTAssertEqual(updated.nodes, initial.enforcingRootProject(initial.project).nodes)
   }
 
   func testV2PreviewRejectsBeforeMutationOrPublication() async {
     let initial = nested(graph())
     let snapshots = EdgeEditSnapshots()
     let store = GraphStore(graph: initial, onGraphChanged: { snapshots.append($0) })
-    rejected(await store.handle(.subGraphCommand(nodeID: parent,
-      command: command(EdgeSpec(), EdgeSpec(kind: .message))), v2PayloadLimit: 1),
+    rejected(
+      await store.handle(
+        .subGraphCommand(
+          nodeID: parent,
+          command: command(EdgeSpec(), EdgeSpec(kind: .message))), v2PayloadLimit: 1),
       containing: "payload limit")
     let updated = await store.graph
-    XCTAssertEqual(updated.nodes, initial.nodes)
+    XCTAssertEqual(updated.nodes, initial.enforcingRootProject(initial.project).nodes)
     XCTAssertTrue(snapshots.values.isEmpty)
   }
 
@@ -220,7 +246,8 @@ final class EdgeEditingTests: XCTestCase {
     }
     await fulfillment(of: [entered], timeout: 5)
     let pending = Task {
-      await store.handle(.subGraphCommand(nodeID: parentID, command: edit), v2PayloadLimit: 1_000_000)
+      await store.handle(
+        .subGraphCommand(nodeID: parentID, command: edit), v2PayloadLimit: 1_000_000)
     }
     let clock = ContinuousClock()
     let deadline = clock.now.advanced(by: .seconds(5))
@@ -238,10 +265,13 @@ final class EdgeEditingTests: XCTestCase {
     let updated = await store.graph
     XCTAssertEqual(updated.nodes[id: parent]?.subGraph?.edges[id: edgeID]?.fireCount, 5)
     XCTAssertEqual(updated.nodes[id: parent]?.subGraph?.edges[id: edgeID]?.spec, after)
-    XCTAssertEqual(updated.nodes[id: sibling], initial.nodes[id: sibling])
+    let normalized = initial.enforcingRootProject(initial.project)
+    XCTAssertEqual(updated.nodes[id: sibling], normalized.nodes[id: sibling])
     XCTAssertEqual(snapshots.values.count, 2)
-    XCTAssertEqual(snapshots.values.first?.nodes[id: parent]?.subGraph?.edges[id: edgeID]?.kind, .message)
-    XCTAssertEqual(snapshots.values.last?.nodes[id: parent]?.subGraph?.edges[id: edgeID]?.kind, .handoff)
+    XCTAssertEqual(
+      snapshots.values.first?.nodes[id: parent]?.subGraph?.edges[id: edgeID]?.kind, .message)
+    XCTAssertEqual(
+      snapshots.values.last?.nodes[id: parent]?.subGraph?.edges[id: edgeID]?.kind, .handoff)
   }
 }
 

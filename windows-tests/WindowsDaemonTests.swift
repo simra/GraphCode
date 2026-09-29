@@ -162,6 +162,174 @@ final class WindowsDaemonTests: XCTestCase {
     XCTAssertEqual(persistence.loadRecentProjects().first?.metadata, .ssh)
   }
 
+  func testGraphStoreEnforcesRemoteRootAcrossDraftPersistenceReplayAndRestart() async throws {
+    let root = FileManager.default.temporaryDirectory
+      .appendingPathComponent(
+        "graphcode-root-invariant-\(UUID().uuidString)", isDirectory: true)
+    let projectDirectory = root.appendingPathComponent("identical-project", isDirectory: true)
+    try FileManager.default.createDirectory(
+      at: projectDirectory, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+
+    let replayStore = DaemonReplayStore()
+    let replayClientID = Foundation.UUID()
+    let replayConnectionID = Foundation.UUID()
+    replayStore.register(
+      clientID: replayClientID,
+      connectionID: replayConnectionID,
+      subscription: nil)
+    replayStore.join(
+      clientID: replayClientID,
+      connectionID: replayConnectionID,
+      projectPath: projectDirectory.path)
+
+    let registry = ProjectRegistry(
+      persistenceDirectory: root,
+      replayStore: replayStore,
+      ensureSession: nil,
+      terminateSession: nil,
+      restartSession: nil,
+      evaluatePredicate: nil,
+      checkPredicate: nil,
+      deliverMessage: nil,
+      captureScript: nil,
+      readUsage: nil,
+      readGoalVerdict: nil,
+      readActivity: nil,
+      readSummary: nil,
+      readPresence: nil,
+      sessionAlive: nil,
+      composeBoard: nil,
+      persistsSynchronously: true,
+      classifyProject: { _ in .ssh })
+    let transport = RecordingDaemonConnection()
+    await registry.addConnection(id: transport.id, connection: transport)
+    _ = await registry.apply(
+      .openProject(path: projectDirectory.path),
+      connectionID: transport.id)
+
+    let forgedProject = ProjectRef(
+      path: projectDirectory.path,
+      name: "Synthetic local",
+      metadata: .local)
+    let emptyCompositeID = Foundation.UUID()
+    let createEmpty = await registry.apply(
+      .graphCommand(
+        projectPath: projectDirectory.path,
+        command: .createNode(
+          NodeDraft(
+            id: emptyCompositeID,
+            title: "Empty",
+            loopType: .composite,
+            subGraph: LoopGraph(project: forgedProject)))),
+      connectionID: transport.id)
+    guard case .graphChanged(let emittedGraph) = createEmpty?.response else {
+      return XCTFail("Expected composite creation graph")
+    }
+
+    func assertRemoteRoot(_ graph: LoopGraph) {
+      XCTAssertEqual(graph.project.path, projectDirectory.path)
+      XCTAssertEqual(graph.project.metadata, .ssh)
+      for node in graph.nodes {
+        if let subGraph = node.subGraph { assertRemoteRoot(subGraph) }
+      }
+    }
+    assertRemoteRoot(emittedGraph)
+    XCTAssertTrue(emittedGraph.nodes[id: emptyCompositeID]?.subGraph?.nodes.isEmpty == true)
+    XCTAssertEqual(
+      emittedGraph.nodes[id: emptyCompositeID]?.subGraph?.project.name,
+      "Synthetic local")
+
+    let writebackCompositeID = Foundation.UUID()
+    _ = await registry.apply(
+      .graphCommand(
+        projectPath: projectDirectory.path,
+        command: .createNode(
+          NodeDraft(
+            id: writebackCompositeID,
+            title: "Writeback",
+            loopType: .composite,
+            subGraph: LoopGraph(project: forgedProject)))),
+      connectionID: transport.id)
+
+    let nestedCompositeID = Foundation.UUID()
+    let forgedNested = LoopGraph(
+      project: ProjectRef(path: "", name: "Editable", metadata: .local))
+    let childWriteback = await registry.apply(
+      .graphCommand(
+        projectPath: projectDirectory.path,
+        command: .subGraphCommand(
+          nodeID: writebackCompositeID,
+          command: .createNode(
+            NodeDraft(
+              id: nestedCompositeID,
+              title: "Nested",
+              loopType: .composite,
+              subGraph: forgedNested)))),
+      connectionID: transport.id)
+    guard case .graphChanged(let childGraph) = childWriteback?.response else {
+      return XCTFail("Expected child writeback graph")
+    }
+    assertRemoteRoot(childGraph)
+    XCTAssertEqual(
+      childGraph.nodes[id: writebackCompositeID]?.subGraph?.nodes[id: nestedCompositeID]?
+        .subGraph?.project.name,
+      "Editable")
+
+    guard
+      let persisted = ProjectPersistence(baseDirectory: root)
+        .loadGraph(path: projectDirectory.path)
+    else {
+      return XCTFail("Expected persisted graph")
+    }
+    assertRemoteRoot(persisted)
+
+    let replay = try replayStore.replay(clientID: replayClientID, after: 0)
+    guard let replayEvent = replay.last?.event,
+      case .graphChanged(let replayedGraph) = replayEvent
+    else {
+      return XCTFail("Expected replayed graph")
+    }
+    assertRemoteRoot(replayedGraph)
+
+    let reconnected = ProjectRegistry(
+      persistenceDirectory: root,
+      ensureSession: nil,
+      terminateSession: nil,
+      restartSession: nil,
+      evaluatePredicate: nil,
+      checkPredicate: nil,
+      deliverMessage: nil,
+      captureScript: nil,
+      readUsage: nil,
+      readGoalVerdict: nil,
+      readActivity: nil,
+      readSummary: nil,
+      readPresence: nil,
+      sessionAlive: nil,
+      composeBoard: nil,
+      persistsSynchronously: true,
+      classifyProject: { _ in .ssh })
+    let reconnectTransport = RecordingDaemonConnection()
+    await reconnected.addConnection(
+      id: reconnectTransport.id,
+      connection: reconnectTransport)
+    let reopened = await reconnected.apply(
+      .openProject(path: projectDirectory.path),
+      connectionID: reconnectTransport.id)
+    guard case .graphChanged(let restartedGraph) = reopened?.response else {
+      return XCTFail("Expected restarted graph")
+    }
+    assertRemoteRoot(restartedGraph)
+    XCTAssertTrue(restartedGraph.nodes[id: emptyCompositeID]?.subGraph?.nodes.isEmpty == true)
+    XCTAssertEqual(
+      restartedGraph.nodes[id: emptyCompositeID]?.subGraph?.project.name,
+      "Synthetic local")
+    XCTAssertEqual(
+      restartedGraph.nodes[id: emptyCompositeID]?.subGraph?.project.metadata,
+      .ssh)
+  }
+
   func testGraphcodeSettingsPersistAllProductChoices() throws {
     let url = FileManager.default.temporaryDirectory
       .appendingPathComponent("graphcode-settings-\(UUID().uuidString)", isDirectory: true)

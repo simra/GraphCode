@@ -36,6 +36,7 @@ public enum GraphStoreCommandResult: Equatable, Sendable {
 }
 public actor GraphStore {
   public private(set) var graph: LoopGraph
+  private let authoritativeProject: ProjectRef
   private var connections: [UUID: DaemonConnectionChannel] = [:]
   /// What each connection announced it can read (`DaemonCommand.announce`) — what
   /// decides whether a presence tick reaches it as a delta or as the whole snapshot.
@@ -316,6 +317,7 @@ public actor GraphStore {
   /// `ZmxSessionLauncher`; tests leave it `nil` or capture the calls.
   public init(
     graph: LoopGraph = LoopGraph(project: ProjectRef(path: "", name: "Untitled")),
+    authoritativeProject: ProjectRef? = nil,
     deliveryDeadline: Duration = .seconds(45),
     onGraphChanged: (@Sendable (LoopGraph) -> Void)? = nil,
     onGraphEvent: (@Sendable (DaemonEvent) -> [UUID: DaemonWireEnvelope])? = nil,
@@ -358,7 +360,11 @@ public actor GraphStore {
     drainLeaseDuration: Duration = .seconds(300),
     subGraphDepth: Int = 0
   ) {
-    self.graph = graph
+    let authoritativeProject = authoritativeProject ?? graph.project
+    self.authoritativeProject = authoritativeProject
+    self.graph = graph.enforcingRootProject(
+      authoritativeProject,
+      preservingCurrentDisplayName: subGraphDepth > 0)
     self.subGraphDepth = subGraphDepth
     self.onGraphChanged = onGraphChanged
     self.onGraphEvent = onGraphEvent
@@ -660,7 +666,10 @@ public actor GraphStore {
       terminateSession(worker)
       onRemoveMemory?(worker.id)
     }
-    graph.nodes[id: nodeID]?.subGraph = carried.reIdentified()
+    graph.nodes[id: nodeID]?.subGraph =
+      carried.reIdentified().enforcingRootProject(
+        authoritativeProject,
+        preservingCurrentDisplayName: true)
   }
 
   /// A sub-graph reduced to what a person wrote — titles, types, briefs, agents and
@@ -741,6 +750,7 @@ public actor GraphStore {
     channel: DaemonConnectionChannel,
     capabilities: Set<String> = []
   ) async -> LoopGraph {
+    enforceRootProjectInvariant()
     connections[id] = channel
     connectionCapabilities[id] = capabilities
     await channel.join(projectPath: graph.project.path)
@@ -852,7 +862,10 @@ public actor GraphStore {
     _ command: GraphCommand,
     broadcastErrors: Bool
   ) async -> GraphStoreCommandResult {
-    let shadow = GraphStore(graph: graph, subGraphDepth: subGraphDepth)
+    let shadow = GraphStore(
+      graph: graph,
+      authoritativeProject: authoritativeProject,
+      subGraphDepth: subGraphDepth)
     return await shadow.handle(command, broadcastErrors: broadcastErrors)
   }
 
@@ -874,8 +887,12 @@ public actor GraphStore {
     from connectionID: UUID? = nil,
     broadcastErrors: Bool = true
   ) async -> GraphStoreCommandResult {
+    enforceRootProjectInvariant()
     switch command {
     case .createNode(var draft):
+      draft.subGraph = draft.subGraph?.enforcingRootProject(
+        authoritativeProject,
+        preservingCurrentDisplayName: true)
       // A child inherits its creator's backend unless one was named: a Copilot loop
       // fanning work out must produce Copilot loops, not whatever the CLI's default
       // happened to be. Resolved here rather than in any client — the CLI can't see the
@@ -1145,6 +1162,7 @@ public actor GraphStore {
       await refreshBoards()
     }
 
+    enforceRootProjectInvariant()
     // Guarded re-fires need an `until` predicate answered first, which means a
     // subprocess — so they're queued during the synchronous pass and settled here,
     // before anyone is told what the graph looks like. Cycle re-entries run before
@@ -1279,6 +1297,7 @@ public actor GraphStore {
     let effects = SubGraphEffects()
     let child = GraphStore(
       graph: subGraph,
+      authoritativeProject: authoritativeProject,
       // Deliberately *not* forwarded. A loop inside a composite is a template with no
       // `zmx` session until the composite is piloted (`ProjectCanvasSubGraphs`), and
       // `createNode` starts a session for every unattended loop it makes — so forwarding
@@ -1328,6 +1347,7 @@ public actor GraphStore {
     }
     processRecurrence(effects.recurrence)
     graph.nodes[id: nodeID]?.subGraph = await child.graph
+    enforceRootProjectInvariant()
     rollUpComposite(nodeID)
     return rejectedMessage
   }
@@ -2606,6 +2626,7 @@ public actor GraphStore {
     let delivered = mailbox.highestDeliveredID ?? current
     guard delivered > current else { return mailbox }
     graph.nodes[id: readerID]?.lastMailroomRead = delivered
+    enforceRootProjectInvariant()
     onGraphChanged?(graph)
     return mailbox
   }
@@ -2705,6 +2726,7 @@ public actor GraphStore {
       return
     }
     graph = plan.mergedGraph
+    enforceRootProjectInvariant()
     // An imported loop's cursor describes the board it came from. On this board it is
     // worse than meaningless: until this graph's ids overtake that number, sync keeps
     // reporting nothing new — mail that exists and is never shown. A fresh identity
@@ -4019,6 +4041,7 @@ public actor GraphStore {
   private func subGraphStore(for subGraph: LoopGraph, effects: SubGraphEffects) -> GraphStore {
     GraphStore(
       graph: subGraph,
+      authoritativeProject: authoritativeProject,
       onTerminateSession: onTerminateSession,
       onRestartSession: onRestartSession,
       onEvaluatePredicate: onEvaluatePredicate,
@@ -4048,6 +4071,7 @@ public actor GraphStore {
     }
     processRecurrence(effects.recurrence)
     graph.nodes[id: ownerID]?.subGraph = await child.graph
+    enforceRootProjectInvariant()
     rollUpComposite(ownerID)
     await drainAndBroadcast()
   }
@@ -4494,10 +4518,17 @@ public actor GraphStore {
     await broadcastIfTemplatesRefreshed()
   }
 
+  private func enforceRootProjectInvariant() {
+    graph = graph.enforcingRootProject(
+      authoritativeProject,
+      preservingCurrentDisplayName: subGraphDepth > 0)
+  }
+
   // MARK: - Broadcast
 
   private func broadcast() async {
     let started = Date()
+    enforceRootProjectInvariant()
     onGraphChanged?(graph)
     DaemonLog.shared.record(
       "persist",
@@ -4558,6 +4589,7 @@ public actor GraphStore {
   /// Sends a presence delta to clients that understand it and a same-revision snapshot
   /// to legacy v1 clients. V2 clients use the replay envelope for the delta.
   private func notifyClients(nodesChanged nodes: [LoopNode]) async {
+    enforceRootProjectInvariant()
     revision += 1
     let started = Date()
     let delta = DaemonEvent.nodesChanged(

@@ -49,7 +49,8 @@ extension AppFeature {
     loopHistoryStore.save(history)
     switch visit {
     case .loop(let projectPath, let nodeID):
-      openLoopWithoutRecording(&state, projectPath: projectPath, nodeID: nodeID)
+      guard openLoopWithoutRecording(&state, projectPath: projectPath, nodeID: nodeID)
+      else { return .none }
       return resumeCodespace(state.projects[id: projectPath]?.graph.project)
     case .quickChat(let id):
       guard let chat = state.quickChats[id: id] else { return .none }
@@ -71,7 +72,10 @@ extension AppFeature {
     { visit in
       switch visit {
       case .loop(let projectPath, let nodeID):
-        guard let node = state.projects[id: projectPath]?.graph.nodes[id: nodeID] else {
+        guard let graph = state.projects[id: projectPath]?.graph,
+          supportsInteractiveTerminals(graph),
+          let node = graph.nodes[id: nodeID]
+        else {
           return false
         }
         return node.opensOnHumanTap
@@ -83,11 +87,11 @@ extension AppFeature {
 
   private func openLoopWithoutRecording(
     _ state: inout State, projectPath: String, nodeID: UUID
-  ) {
+  ) -> Bool {
     guard let project = state.projects[id: projectPath],
       let node = project.graph.nodes[id: nodeID]
-    else { return }
-    mountWorkspace(node: node, graph: project.graph, projectPath: projectPath, &state)
+    else { return false }
+    return mountWorkspace(node: node, graph: project.graph, projectPath: projectPath, &state)
   }
 
   /// Records an arrival the human chose. Called from the two places a workspace opens on
