@@ -8,6 +8,7 @@ import {
   closePane,
   createTerminalLayout,
   resizeSplit,
+  splitFocusedPane,
   type TerminalLayout,
   type TerminalSurface,
 } from "../state/terminalLayout";
@@ -386,5 +387,100 @@ describe("LoopWorkspace", () => {
       root.unmount();
     });
     expect(bridge.close).toHaveBeenCalledTimes(2);
+  });
+
+  it("normalizes pointer movement to the owning nested split region", async () => {
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    const ids = [
+      "22222222-2222-4222-8222-222222222222",
+      "33333333-3333-4333-8333-333333333333",
+      "44444444-4444-4444-8444-444444444444",
+      "55555555-5555-4555-8555-555555555555",
+    ];
+
+    function Harness() {
+      const [layout, setLayout] = useState<TerminalLayout>(() => {
+        let initial = createTerminalLayout(node.id, () => ids[0]);
+        initial = splitFocusedPane(initial, "horizontal", () => ids[1]);
+        initial = splitFocusedPane(initial, "vertical", () => ids[2]);
+        return splitFocusedPane(initial, "horizontal", () => ids[3]);
+      });
+      return (
+        <LoopWorkspace
+          graph={graph}
+          node={node}
+          mailroomOwned
+          commands={[]}
+          layout={layout}
+          onLayoutChange={setLayout}
+          onClosePane={() => undefined}
+          onCloseTab={() => undefined}
+          onResizeSplit={(tabId, splitId, dividerIndex, delta) =>
+            setLayout((current) =>
+              resizeSplit(current, tabId, splitId, dividerIndex, delta),
+            )
+          }
+          onBack={() => undefined}
+          onSummarySeen={() => undefined}
+          onExecuteCommand={() => undefined}
+          onSessionExit={async () => undefined}
+        />
+      );
+    }
+
+    await act(async () => {
+      root.render(<Harness />);
+    });
+
+    const panel = container.querySelector<HTMLElement>(".terminal-tab-panel");
+    if (!panel) throw new Error("terminal panel missing");
+    panel.getBoundingClientRect = () =>
+      ({
+        width: 1000,
+        height: 800,
+      }) as DOMRect;
+    const nestedDivider = Array.from(
+      container.querySelectorAll<HTMLElement>(
+        '[role="separator"][aria-orientation="vertical"]',
+      ),
+    ).find(
+      (divider) =>
+        Number.parseFloat(divider.style.getPropertyValue("--divider-left")) ===
+        75,
+    );
+    expect(nestedDivider).toBeDefined();
+
+    await act(async () => {
+      nestedDivider?.dispatchEvent(
+        new MouseEvent("pointerdown", {
+          bubbles: true,
+          clientX: 750,
+          clientY: 600,
+        }),
+      );
+      window.dispatchEvent(
+        new MouseEvent("pointermove", {
+          bubbles: true,
+          clientX: 850,
+          clientY: 600,
+        }),
+      );
+      window.dispatchEvent(new MouseEvent("pointerup", { bubbles: true }));
+    });
+
+    const widths = Array.from(
+      container.querySelectorAll<HTMLElement>(".terminal-pane-position"),
+    ).map((pane) =>
+      Number.parseFloat(pane.style.getPropertyValue("--pane-width")),
+    );
+    [50, 50, 35, 15].forEach((expected, index) => {
+      expect(widths[index]).toBeCloseTo(expected);
+    });
+
+    await act(async () => {
+      root.unmount();
+    });
   });
 });

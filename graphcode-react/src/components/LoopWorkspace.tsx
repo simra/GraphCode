@@ -118,6 +118,8 @@ interface DividerBounds {
   left: number;
   top: number;
   length: number;
+  ownerWidth: number;
+  ownerHeight: number;
   value: number;
 }
 
@@ -173,6 +175,8 @@ function terminalGeometry(
         left: node.direction === "horizontal" ? left + width * offset : left,
         top: node.direction === "vertical" ? top + height * offset : top,
         length: node.direction === "horizontal" ? height : width,
+        ownerWidth: width,
+        ownerHeight: height,
         value: pairSize > 0 ? Math.round((share / pairSize) * 100) : 50,
       });
     }
@@ -193,10 +197,11 @@ function SplitDivider({
     event.preventDefault();
     const panel = event.currentTarget.parentElement;
     if (!panel) return;
+    const panelBounds = panel.getBoundingClientRect();
     const dimension =
       divider.direction === "horizontal"
-        ? panel.getBoundingClientRect().width
-        : panel.getBoundingClientRect().height;
+        ? panelBounds.width * (divider.ownerWidth / 100)
+        : panelBounds.height * (divider.ownerHeight / 100);
     if (dimension <= 0) return;
     lastPointerPosition.current =
       divider.direction === "horizontal" ? event.clientX : event.clientY;

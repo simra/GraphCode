@@ -69,6 +69,8 @@ pub enum TerminalError {
     HistoryTooLarge,
     #[error("the requested session is not an app-owned local shell")]
     NotOwnedShell,
+    #[error("shell attach failed: {attach}; cleanup also failed: {cleanup}")]
+    ShellAttachCleanup { attach: String, cleanup: String },
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -123,6 +125,20 @@ struct TargetIdentity {
     session_name: String,
     working_directory: Option<PathBuf>,
     owns_session: bool,
+}
+
+struct ShellAttachFailure {
+    error: TerminalError,
+    retain_ownership: bool,
+}
+
+impl From<TerminalError> for ShellAttachFailure {
+    fn from(error: TerminalError) -> Self {
+        Self {
+            error,
+            retain_ownership: false,
+        }
+    }
 }
 
 impl TerminalTarget {
@@ -213,7 +229,18 @@ impl TerminalManager {
         } = target;
 
         let prepared = if owns_session {
-            prepare_shell_attach(&session_name, working_directory.as_deref(), columns, rows).await
+            match prepare_shell_attach(&session_name, working_directory.as_deref(), columns, rows)
+                .await
+            {
+                Ok(prepared) => Ok(prepared),
+                Err(failure) => {
+                    self.remove(handle);
+                    if newly_owned && !failure.retain_ownership {
+                        self.forget_owned_shell(surface_id);
+                    }
+                    return Err(failure.error);
+                }
+            }
         } else {
             prepare_attach(&session_name, columns, rows).await
         };
@@ -518,9 +545,42 @@ async fn prepare_shell_attach(
     working_directory: Option<&Path>,
     columns: u16,
     rows: u16,
-) -> Result<PreparedAttach, TerminalError> {
+) -> Result<PreparedAttach, ShellAttachFailure> {
     let zmx = zmx_binary()?;
-    let existing = session_info(&zmx, session_name).await.ok();
+    let existing = match session_info(&zmx, session_name).await {
+        Ok(info) => Some(info),
+        Err(TerminalError::SessionUnavailable) => None,
+        Err(error) => return Err(error.into()),
+    };
+    let created_by_attach = existing.is_none();
+    match prepare_shell_attach_inner(
+        zmx.clone(),
+        session_name,
+        working_directory,
+        columns,
+        rows,
+        existing,
+    )
+    .await
+    {
+        Ok(prepared) => Ok(prepared),
+        Err(error) => Err(
+            recover_failed_shell_attach_with(created_by_attach, error, || async {
+                cleanup_shell_session(&zmx, session_name).await
+            })
+            .await,
+        ),
+    }
+}
+
+async fn prepare_shell_attach_inner(
+    zmx: PathBuf,
+    session_name: &str,
+    working_directory: Option<&Path>,
+    columns: u16,
+    rows: u16,
+    existing: Option<SessionInfo>,
+) -> Result<PreparedAttach, TerminalError> {
     if let Some(info) = &existing {
         validate_attachable_session(info)?;
         resize_session(&zmx, session_name, columns, rows, 0).await?;
@@ -551,6 +611,61 @@ async fn prepare_shell_attach(
         .ok_or_else(|| TerminalError::Launch("zmx attach did not expose stderr".into()))?;
     resize_session(&zmx, session_name, columns, rows, 1).await?;
     Ok((zmx, child, stdin, stdout, stderr))
+}
+
+async fn cleanup_failed_new_shell_with<F, Fut>(
+    created_by_attach: bool,
+    cleanup: F,
+) -> Result<bool, TerminalError>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<(), TerminalError>>,
+{
+    if !created_by_attach {
+        return Ok(false);
+    }
+    cleanup().await?;
+    Ok(true)
+}
+
+async fn recover_failed_shell_attach_with<F, Fut>(
+    created_by_attach: bool,
+    attach_error: TerminalError,
+    cleanup: F,
+) -> ShellAttachFailure
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<(), TerminalError>>,
+{
+    match cleanup_failed_new_shell_with(created_by_attach, cleanup).await {
+        Ok(_) => attach_error.into(),
+        Err(cleanup_error) => ShellAttachFailure {
+            error: TerminalError::ShellAttachCleanup {
+                attach: attach_error.to_string(),
+                cleanup: cleanup_error.to_string(),
+            },
+            retain_ownership: true,
+        },
+    }
+}
+
+async fn cleanup_shell_session(zmx: &Path, session_name: &str) -> Result<(), TerminalError> {
+    let kill_result = run_command(zmx, ["kill", session_name]).await;
+    if matches!(&kill_result, Ok(output) if output.status.success()) {
+        return Ok(());
+    }
+    if matches!(
+        session_info(zmx, session_name).await,
+        Err(TerminalError::SessionUnavailable)
+    ) {
+        return Ok(());
+    }
+    match kill_result {
+        Err(error) => Err(error),
+        Ok(_) => Err(TerminalError::Command(
+            "failed shell session remained after cleanup".into(),
+        )),
+    }
 }
 
 fn spawn_attach(
@@ -939,6 +1054,7 @@ async fn read_bounded_tail<R: AsyncRead + Unpin>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use tokio::io::AsyncWriteExt;
 
     #[test]
@@ -1011,6 +1127,60 @@ mod tests {
         assert!(manager.remember_owned_target(&shell));
         manager.forget_owned_shell(shell.surface_id);
         assert!(manager.take_owned_shells().is_empty());
+    }
+
+    #[tokio::test]
+    async fn failed_new_shell_requests_cleanup_before_ownership_is_released() {
+        let cleanup_requested = AtomicBool::new(false);
+        let shell = TerminalTarget::Shell {
+            surface_id: "5d375c15-b26f-4b4f-b742-e915da84e2b1".into(),
+            working_directory: None,
+        }
+        .into_identity()
+        .unwrap();
+        let manager = TerminalManager::default();
+        assert!(manager.remember_owned_target(&shell));
+
+        let failure = recover_failed_shell_attach_with(true, TerminalError::Timeout, || async {
+            cleanup_requested.store(true, Ordering::SeqCst);
+            Ok(())
+        })
+        .await;
+        if !failure.retain_ownership {
+            manager.forget_owned_shell(shell.surface_id);
+        }
+
+        assert!(cleanup_requested.load(Ordering::SeqCst));
+        assert!(!failure.retain_ownership);
+        assert!(!manager.owns_shell(shell.surface_id));
+    }
+
+    #[tokio::test]
+    async fn failed_existing_shell_attach_does_not_kill_the_session() {
+        let cleanup_requested = AtomicBool::new(false);
+
+        let failure = recover_failed_shell_attach_with(false, TerminalError::Timeout, || async {
+            cleanup_requested.store(true, Ordering::SeqCst);
+            Ok(())
+        })
+        .await;
+
+        assert!(!cleanup_requested.load(Ordering::SeqCst));
+        assert!(!failure.retain_ownership);
+    }
+
+    #[tokio::test]
+    async fn failed_new_shell_retains_ownership_when_cleanup_fails() {
+        let failure = recover_failed_shell_attach_with(true, TerminalError::Timeout, || async {
+            Err(TerminalError::Command("kill failed".into()))
+        })
+        .await;
+
+        assert!(failure.retain_ownership);
+        assert!(matches!(
+            failure.error,
+            TerminalError::ShellAttachCleanup { .. }
+        ));
     }
 
     #[test]
