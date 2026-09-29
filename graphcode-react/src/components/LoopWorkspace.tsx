@@ -315,6 +315,9 @@ export function LoopWorkspace({
   const nodeCommands = commands.filter(
     (command) => command.id !== "loop.openTerminal",
   );
+  const historyCommand = commands.find(
+    (command) => command.id === "loop.openHistory",
+  );
   const workingDirectory =
     node.worktreeBinding?.worktreePath ??
     (graph.project.path.startsWith("graphcode://")
@@ -353,6 +356,17 @@ export function LoopWorkspace({
           <p className="eyebrow">{graph.project.name}</p>
           <h2 id="loop-workspace-title">{node.title}</h2>
         </div>
+        {historyCommand ? (
+          <button
+            type="button"
+            className="workspace-history-button"
+            disabled={!historyCommand.enabled}
+            title={historyCommand.disabledReason}
+            onClick={() => onExecuteCommand(historyCommand)}
+          >
+            Session history
+          </button>
+        ) : null}
       </header>
       <div className="loop-workspace-content">
         <div className="terminal-workspace">

@@ -1,6 +1,7 @@
 import type { AppState } from "../state/graphState";
 import { promotionTargetForNode } from "../forms/sketchPromotion";
 import { currentGraph, selectedNode } from "../state/graphState";
+import { supportsStructuredTranscript } from "../state/transcriptHistory";
 
 export type CommandId =
   | "app.commandPalette"
@@ -41,6 +42,7 @@ export type CommandId =
   | "loop.mailroomWatch"
   | "loop.mailroomPost"
   | "mailroom.readPost"
+  | "loop.openHistory"
   | "loop.openTerminal"
   | "terminal.newTab"
   | "terminal.closePane"
@@ -139,6 +141,7 @@ export interface CommandActions {
   searchMailroom?(): void;
   configureMailroomWatch?(): void;
   postMailroom?(): void;
+  openHistory?(): void;
   openTerminal?(): Promise<void>;
   newTerminalTab?(): void;
   closeTerminalPane?(): Promise<void>;
@@ -770,6 +773,33 @@ export function createCommandRegistry(
               graph
                 ? "Reconnect to graphcoded before refreshing usage"
                 : "Select an open project first",
+            ),
+            execute: () => undefined,
+          }),
+    },
+    {
+      id: "loop.openHistory",
+      label: "Open Session History",
+      description: "Read the selected loop's bounded redacted transcript",
+      category: "Loop",
+      shortcut: { key: "h", ctrl: true, shift: true, label: "Ctrl+Shift+H" },
+      surfaces: ["node"],
+      ...(node &&
+      connected &&
+      actions.openHistory &&
+      supportsStructuredTranscript(node.backend)
+        ? { enabled: true, execute: actions.openHistory }
+        : {
+            ...unavailable(
+              !node
+                ? "Select a loop first"
+                : !supportsStructuredTranscript(node.backend)
+                  ? node.backend
+                    ? `${node.backend} does not advertise structured transcript support`
+                    : "This loop has no advertised transcript provider"
+                  : !connected
+                    ? "Reconnect to graphcoded before reading session history"
+                    : "Session history requires the desktop app",
             ),
             execute: () => undefined,
           }),

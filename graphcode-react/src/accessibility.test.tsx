@@ -10,6 +10,7 @@ import { MailroomView } from "./components/MailroomView";
 import { NewEdgeDialog } from "./components/NewEdgeDialog";
 import { ProjectGraphTree } from "./components/ProjectGraphTree";
 import { SettingsEditor } from "./components/SettingsDialog";
+import { TranscriptPanel } from "./components/TranscriptPanel";
 import type { AppCommand } from "./commands/registry";
 import { editableSettingsFields, settingsDefaults } from "./forms/settingsForm";
 import type { LoopGraph } from "./protocol/domain";
@@ -229,6 +230,29 @@ describe("automated accessibility checks", () => {
           enteringCopilotVersion={false}
           onEnteringCopilotVersionChange={() => undefined}
           onChange={() => undefined}
+        />,
+      ),
+    );
+  });
+
+  it("checks transcript dialog, redaction, and pagination semantics", async () => {
+    await expectNoAxeViolations(
+      renderToStaticMarkup(
+        <TranscriptPanel
+          projectPath="C:\\project"
+          node={{
+            id: "review",
+            title: "Review",
+            backend: "copilotCLI",
+            state: "idle",
+          }}
+          onClose={() => undefined}
+          readPage={async () => ({
+            nodeID: "review",
+            provider: "copilotCLI",
+            entries: [],
+            hasMore: false,
+          })}
         />,
       ),
     );

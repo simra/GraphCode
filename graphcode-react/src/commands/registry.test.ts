@@ -109,6 +109,41 @@ describe("command registry", () => {
     expect(openTerminal).toHaveBeenCalledTimes(2);
   });
 
+  it("capability-gates structured session history by provider", () => {
+    const state = stateWithSelectedNode();
+    state.graphs["C:\\work\\graph"].nodes[0].backend = "copilotCLI";
+    const openHistory = vi.fn();
+    let commands = createCommandRegistry(state, {
+      openPalette: vi.fn(),
+      clearSelection: vi.fn(),
+      selectNode: vi.fn(),
+      openHistory,
+    });
+
+    const supported = commands.find(
+      (candidate) => candidate.id === "loop.openHistory",
+    );
+    expect(supported?.enabled).toBe(true);
+    supported?.execute();
+    expect(openHistory).toHaveBeenCalledOnce();
+
+    state.graphs["C:\\work\\graph"].nodes[0].backend = "openCode";
+    commands = createCommandRegistry(state, {
+      openPalette: vi.fn(),
+      clearSelection: vi.fn(),
+      selectNode: vi.fn(),
+      openHistory,
+    });
+    const unsupported = commands.find(
+      (candidate) => candidate.id === "loop.openHistory",
+    );
+    expect(unsupported).toMatchObject({
+      enabled: false,
+      disabledReason:
+        "openCode does not advertise structured transcript support",
+    });
+  });
+
   it("exposes terminal layout actions only while a workspace is open", async () => {
     const actions = {
       openPalette: vi.fn(),

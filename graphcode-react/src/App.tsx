@@ -63,6 +63,7 @@ import { ProjectRowActions } from "./components/ProjectRowActions";
 import { QuickChatsView } from "./components/QuickChatsView";
 import { SettingsDialog } from "./components/SettingsDialog";
 import { SketchPromotionDialog } from "./components/SketchPromotionDialog";
+import { TranscriptPanel } from "./components/TranscriptPanel";
 import { WorkspacesDialog } from "./components/WorkspacesDialog";
 import { initialSnapshotFixture } from "./fixtures/initialSnapshot";
 import { edgeSpecFromSnapshot } from "./forms/edgeSpec";
@@ -156,6 +157,10 @@ export default function App() {
   const [newQuickChatOpen, setNewQuickChatOpen] = useState(false);
   const [newEdgeOpen, setNewEdgeOpen] = useState(false);
   const [terminalNodeId, setTerminalNodeId] = useState<string>();
+  const [transcriptTarget, setTranscriptTarget] = useState<{
+    projectPath: string;
+    nodeId: string;
+  }>();
   const [terminalLayouts, setTerminalLayouts] = useState<
     Record<string, TerminalLayout>
   >({});
@@ -405,6 +410,17 @@ export default function App() {
     ? uiLayout?.projects[selectedProjectPath]?.nodePositions[selectedViewKey]
     : undefined;
   const inspectedNode = selectedNode(state);
+  const transcriptNode =
+    transcriptTarget &&
+    transcriptTarget.projectPath === selectedProjectPath &&
+    transcriptTarget.nodeId === inspectedNode?.id
+      ? inspectedNode
+      : undefined;
+  useEffect(() => {
+    if (transcriptTarget && !transcriptNode) {
+      setTranscriptTarget(undefined);
+    }
+  }, [transcriptNode, transcriptTarget]);
   const inspectedEdge = selectedGraph?.edges.find(
     (edge, index) =>
       (edge.id ?? `${edge.from}-${edge.to}-${index}`) === selectedEdgeKey,
@@ -724,6 +740,16 @@ export default function App() {
                 projectPath: selectedProjectPath,
               })
           : undefined,
+        openHistory:
+          "__TAURI_INTERNALS__" in window &&
+          inspectedNode &&
+          selectedProjectPath
+            ? () =>
+                setTranscriptTarget({
+                  projectPath: selectedProjectPath,
+                  nodeId: inspectedNode.id,
+                })
+            : undefined,
         openTerminal:
           "__TAURI_INTERNALS__" in window &&
           inspectedNode &&
@@ -2457,6 +2483,13 @@ export default function App() {
               announce(`Renamed Quick Chat to ${response.event.chat.title}.`);
             }
           }}
+        />
+      ) : null}
+      {transcriptTarget && transcriptNode ? (
+        <TranscriptPanel
+          projectPath={transcriptTarget.projectPath}
+          node={transcriptNode}
+          onClose={() => setTranscriptTarget(undefined)}
         />
       ) : null}
     </main>

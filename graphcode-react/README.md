@@ -4,6 +4,13 @@ This is the side-by-side React + TypeScript + Tauri v2 client. It does not repla
 or modify `graphcode-windows`; both clients use the authoritative `graphcoded`
 protocol.
 
+Selected loops expose **Session history**, a separate bounded and
+cursor-paginated view of the daemon's structured transcript. History is never
+replayed into the live terminal. The client renders only normalized semantic
+entries, allowlisted tool labels, and explicit redaction indicators from
+`graphcoded`; providers without structured transcript support remain
+capability-gated instead of falling back to raw terminal output.
+
 ## Prerequisites
 
 - Node.js 24 or newer and npm.

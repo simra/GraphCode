@@ -354,7 +354,57 @@ async function installTauriMock(page: Page) {
             target.__GRAPHCODE_E2E_COMMANDS__.push(args.command);
             const daemonCommand = args.command as {
               openQuickChat?: { id: string };
+              transcript?: {
+                projectPath: string;
+                query: { nodeID: string; cursor: string | null };
+              };
             };
+            if (daemonCommand.transcript) {
+              const cursor = daemonCommand.transcript.query.cursor;
+              return {
+                version: 2,
+                kind: "response",
+                requestID: crypto.randomUUID(),
+                event: {
+                  transcriptPage: {
+                    _0: {
+                      nodeID: daemonCommand.transcript.query.nodeID,
+                      provider: "copilotCLI",
+                      entries:
+                        cursor === null
+                          ? [
+                              {
+                                sourceOffset: 10,
+                                timestamp: "2026-09-28T18:00:00Z",
+                                kind: "prompt",
+                                text: "[redacted prompt]",
+                                redactions: ["prompt"],
+                              },
+                              {
+                                sourceOffset: 20,
+                                timestamp: "2026-09-28T18:01:00Z",
+                                kind: "toolUse",
+                                text: "Used an allowlisted tool",
+                                toolName: "read",
+                                redactions: ["toolInput", "filesystemPath"],
+                              },
+                            ]
+                          : [
+                              {
+                                sourceOffset: 30,
+                                timestamp: "2026-09-28T18:02:00Z",
+                                kind: "status",
+                                text: "Session completed",
+                                redactions: [],
+                              },
+                            ],
+                      nextCursor: cursor === null ? "page-2" : undefined,
+                      hasMore: cursor === null,
+                    },
+                  },
+                },
+              };
+            }
             if (daemonCommand.openQuickChat?.id === quickChatFixture.id) {
               return {
                 version: 2,
@@ -468,6 +518,51 @@ test("prepares the attended sketch before opening its terminal", async ({
         nodeID: sketchId,
       },
     });
+});
+
+test("opens bounded history and loads another page without disturbing the live terminal", async ({
+  page,
+}) => {
+  await page.getByText("Test session", { exact: true }).first().click();
+  await page.getByRole("button", { name: "Open Terminal" }).click();
+  const terminal = page.getByRole("region", {
+    name: "Test session terminal",
+  });
+  await expect(terminal).toBeVisible();
+  const terminalOpenCount = await page.evaluate(() => {
+    const target = window as Window & {
+      __GRAPHCODE_E2E_NATIVE_COMMANDS__: { command: string }[];
+    };
+    return target.__GRAPHCODE_E2E_NATIVE_COMMANDS__.filter(
+      ({ command }) => command === "open_terminal",
+    ).length;
+  });
+
+  await page.getByRole("button", { name: "Session history" }).click();
+  const history = page.getByRole("dialog", {
+    name: "Test session",
+  });
+  await expect(history.getByText("[redacted prompt]")).toBeVisible();
+  await expect(history.getByText("Prompt withheld")).toBeVisible();
+  await expect(history.getByText("Tool: read")).toBeVisible();
+  await expect(history.getByText("Tool input withheld")).toBeVisible();
+
+  await history.getByRole("button", { name: "Load more history" }).click();
+  await expect(history.getByText("Session completed")).toBeVisible();
+  await expect(terminal).toBeVisible();
+
+  await expect
+    .poll(async () =>
+      page.evaluate(() => {
+        const target = window as Window & {
+          __GRAPHCODE_E2E_NATIVE_COMMANDS__: { command: string }[];
+        };
+        return target.__GRAPHCODE_E2E_NATIVE_COMMANDS__.filter(
+          ({ command }) => command === "open_terminal",
+        ).length;
+      }),
+    )
+    .toBe(terminalOpenCount);
 });
 
 test("retypes a timed loop to a goal loop in place", async ({ page }) => {

@@ -136,6 +136,7 @@ export function NodeInspector({
     )
       ? ["loop.openTerminal" as const]
       : []),
+    "loop.openHistory" as const,
   ]);
   const primaryCommands = commands.filter((command) =>
     primaryCommandIds.has(command.id),
@@ -144,6 +145,7 @@ export function NodeInspector({
     (command) =>
       !primaryCommandIds.has(command.id) &&
       command.id !== "loop.openTerminal" &&
+      command.id !== "loop.openHistory" &&
       (command.id !== "loop.openComposite" ||
         (node.loopType === "composite" && Boolean(node.subGraph))),
   );
