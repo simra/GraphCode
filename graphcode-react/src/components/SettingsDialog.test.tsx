@@ -120,6 +120,50 @@ describe("SettingsDialog", () => {
     expect(order).toEqual(["listen", "load"]);
   });
 
+  it("loads after listener failure and retries the subscription on Reload", async () => {
+    let publish!: (value: typeof snapshot) => void;
+    settingsBridge.listen
+      .mockRejectedValueOnce(new Error("listener unavailable"))
+      .mockImplementationOnce(
+        async (listener: (value: typeof snapshot) => void) => {
+          publish = listener;
+          return () => undefined;
+        },
+      );
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+
+    await act(async () => {
+      root.render(<SettingsDialog onClose={() => undefined} />);
+    });
+
+    expect(settingsBridge.load).toHaveBeenCalledTimes(1);
+    expect(container.textContent).toContain("settings.json");
+    expect(container.textContent).toContain(
+      "Settings refresh subscription failed: listener unavailable",
+    );
+
+    const reload = Array.from(container.querySelectorAll("button")).find(
+      (button) => button.textContent === "Reload",
+    )!;
+    await act(async () => {
+      reload.click();
+    });
+
+    expect(settingsBridge.listen).toHaveBeenCalledTimes(2);
+    expect(settingsBridge.load).toHaveBeenCalledTimes(2);
+    expect(container.textContent).not.toContain("listener unavailable");
+
+    await act(async () => {
+      publish(changedSnapshot("retry-event", true));
+    });
+    const checkbox = container.querySelector<HTMLInputElement>(
+      'input[type="checkbox"]',
+    )!;
+    expect(checkbox.checked).toBe(true);
+  });
+
   it("does not let a delayed load overwrite a newer settings event", async () => {
     const pendingLoad = deferred<typeof snapshot>();
     let publish!: (value: typeof snapshot) => void;

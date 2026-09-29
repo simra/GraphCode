@@ -12,14 +12,17 @@ export function SettingsDialog({ onClose }: { onClose(): void }) {
   const [heartbeatEnabled, setHeartbeatEnabled] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string>();
+  const [subscriptionError, setSubscriptionError] = useState<string>();
   const snapshotGeneration = useRef(0);
+  const listenerAttempt = useRef(0);
+  const activeUnlisten = useRef<(() => void) | undefined>(undefined);
 
   const applySnapshot = useCallback((snapshot: SettingsSnapshot) => {
     setSettings(snapshot);
     setHeartbeatEnabled(snapshot.daemonHeartbeatEnabled);
   }, []);
 
-  const reload = useCallback(() => {
+  const loadCurrentSettings = useCallback(() => {
     const startedAt = snapshotGeneration.current;
     setError(undefined);
     void loadSettings()
@@ -34,27 +37,50 @@ export function SettingsDialog({ onClose }: { onClose(): void }) {
       });
   }, [applySnapshot]);
 
-  useEffect(() => {
-    let active = true;
-    let unlisten: (() => void) | undefined;
+  const synchronize = useCallback(() => {
+    const attempt = listenerAttempt.current + 1;
+    listenerAttempt.current = attempt;
+    snapshotGeneration.current += 1;
+    activeUnlisten.current?.();
+    activeUnlisten.current = undefined;
+    setSubscriptionError(undefined);
+
     void listenForSettingsChanges((snapshot) => {
-      if (!active) return;
+      if (listenerAttempt.current !== attempt) return;
       snapshotGeneration.current += 1;
       applySnapshot(snapshot);
       setError(undefined);
-    }).then((stop) => {
-      if (!active) {
-        stop();
-        return;
-      }
-      unlisten = stop;
-      reload();
-    });
+    })
+      .then((stop) => {
+        if (listenerAttempt.current !== attempt) {
+          stop();
+          return;
+        }
+        activeUnlisten.current = stop;
+      })
+      .catch((caught: unknown) => {
+        if (listenerAttempt.current !== attempt) return;
+        const message =
+          caught instanceof Error ? caught.message : String(caught);
+        setSubscriptionError(
+          `Settings refresh subscription failed: ${message}`,
+        );
+      })
+      .finally(() => {
+        if (listenerAttempt.current === attempt) {
+          loadCurrentSettings();
+        }
+      });
+  }, [applySnapshot, loadCurrentSettings]);
+
+  useEffect(() => {
+    synchronize();
     return () => {
-      active = false;
-      unlisten?.();
+      listenerAttempt.current += 1;
+      activeUnlisten.current?.();
+      activeUnlisten.current = undefined;
     };
-  }, [applySnapshot, reload]);
+  }, [synchronize]);
 
   const save = async () => {
     if (!settings) return;
@@ -79,6 +105,7 @@ export function SettingsDialog({ onClose }: { onClose(): void }) {
       setSaving(false);
     }
   };
+  const visibleError = subscriptionError ?? error;
 
   return (
     <div className="new-loop-overlay" role="presentation">
@@ -135,10 +162,10 @@ export function SettingsDialog({ onClose }: { onClose(): void }) {
               <code>{settings.filePath}</code>
             </section>
           ) : null}
-          {error ? (
+          {visibleError ? (
             <div className="terminal-error" role="alert">
-              {error}
-              <button type="button" onClick={reload}>
+              {visibleError}
+              <button type="button" onClick={synchronize}>
                 Reload
               </button>
             </div>
