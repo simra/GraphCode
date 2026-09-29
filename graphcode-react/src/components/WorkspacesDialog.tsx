@@ -18,9 +18,12 @@ export function WorkspacesDialog({ onClose }: { onClose(): void }) {
   const [renameValue, setRenameValue] = useState("");
   const [busy, setBusy] = useState<string>();
   const [error, setError] = useState<string>();
+  const [notice, setNotice] = useState<string>();
 
   const refresh = () => {
+    setDeleting(undefined);
     setError(undefined);
+    setNotice(undefined);
     void listWorkspaces()
       .then(setWorkspaces)
       .catch((caught: unknown) =>
@@ -31,8 +34,10 @@ export function WorkspacesDialog({ onClose }: { onClose(): void }) {
   useEffect(refresh, []);
 
   const run = async (key: string, operation: () => Promise<unknown>) => {
+    setDeleting(undefined);
     setBusy(key);
     setError(undefined);
+    setNotice(undefined);
     try {
       await operation();
       await listWorkspaces().then(setWorkspaces);
@@ -48,8 +53,39 @@ export function WorkspacesDialog({ onClose }: { onClose(): void }) {
   const prepareDeletion = async (workspace: WorkspaceSummary) => {
     setBusy(`prepare-delete:${workspace.id}`);
     setError(undefined);
+    setNotice(undefined);
     try {
       setDeleting(await prepareWorkspaceDeletion(workspace.id));
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : String(caught));
+    } finally {
+      setBusy(undefined);
+    }
+  };
+
+  const commitDeletion = async (plan: WorkspaceDeletionPlan) => {
+    setDeleting(undefined);
+    setBusy(`delete:${plan.id}`);
+    setError(undefined);
+    setNotice(undefined);
+    try {
+      const result = await deleteWorkspace(
+        plan.id,
+        plan.canonicalPath,
+        plan.recoveryPath,
+        plan.identityToken,
+      );
+      if (!result.committed) {
+        throw new Error("Workspace deletion did not commit.");
+      }
+      setWorkspaces((current) =>
+        current.filter((workspace) => workspace.id !== plan.id),
+      );
+      setNotice(
+        result.cleanupWarning ??
+          `Workspace moved to the recovery location: ${result.recoveryPath}`,
+      );
+      setWorkspaces(await listWorkspaces());
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught));
     } finally {
@@ -193,17 +229,7 @@ export function WorkspacesDialog({ onClose }: { onClose(): void }) {
                   type="button"
                   className="danger-button"
                   disabled={busy !== undefined}
-                  onClick={() =>
-                    void run(`delete:${deleting.id}`, () =>
-                      deleteWorkspace(
-                        deleting.id,
-                        deleting.canonicalPath,
-                        deleting.recoveryPath,
-                      ),
-                    ).then((succeeded) => {
-                      if (succeeded) setDeleting(undefined);
-                    })
-                  }
+                  onClick={() => void commitDeletion(deleting)}
                 >
                   {busy === `delete:${deleting.id}`
                     ? "Deleting…"
@@ -288,15 +314,29 @@ export function WorkspacesDialog({ onClose }: { onClose(): void }) {
               </button>
             </div>
           ) : null}
+          {notice ? (
+            <div className="terminal-notice" role="status">
+              {notice}
+            </div>
+          ) : null}
         </div>
         <footer className="new-loop-footer">
           <span>
             Opening a workspace starts its daemon and launches another GraphCode
             window.
           </span>
-          <button type="button" onClick={onClose}>
-            Done
-          </button>
+          <div>
+            <button
+              type="button"
+              disabled={busy !== undefined}
+              onClick={refresh}
+            >
+              Refresh
+            </button>
+            <button type="button" onClick={onClose}>
+              Done
+            </button>
+          </div>
         </footer>
       </section>
     </div>

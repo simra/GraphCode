@@ -17,9 +17,16 @@ export interface WorkspaceDeletionPlan {
   name: string;
   canonicalPath: string;
   recoveryPath: string;
+  identityToken: string;
   projects: number;
   loops: number;
   terminalSessions: number;
+}
+
+export interface WorkspaceDeletionResult {
+  committed: boolean;
+  recoveryPath: string;
+  cleanupWarning: string | null;
 }
 
 export function listWorkspaces(): Promise<WorkspaceSummary[]> {
@@ -47,11 +54,13 @@ export function deleteWorkspace(
   id: string,
   expectedPath: string,
   expectedRecoveryPath: string,
-): Promise<void> {
+  expectedIdentityToken: string,
+): Promise<WorkspaceDeletionResult> {
   return invoke("delete_workspace", {
     id,
     expectedPath,
     expectedRecoveryPath,
+    expectedIdentityToken,
   });
 }
 

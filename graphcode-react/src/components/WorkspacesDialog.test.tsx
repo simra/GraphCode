@@ -60,7 +60,11 @@ beforeEach(() => {
   workspaceBridge.open.mockResolvedValue(undefined);
   workspaceBridge.create.mockReset();
   workspaceBridge.delete.mockReset();
-  workspaceBridge.delete.mockResolvedValue(undefined);
+  workspaceBridge.delete.mockResolvedValue({
+    committed: true,
+    recoveryPath: "C:\\Users\\me\\.graphcode_recovery\\research-123",
+    cleanupWarning: null,
+  });
   workspaceBridge.prepareDelete.mockReset();
   workspaceBridge.prepareDelete.mockImplementation((id: string) => {
     const workspace = workspaces.find((candidate) => candidate.id === id)!;
@@ -69,6 +73,7 @@ beforeEach(() => {
       name: workspace.name,
       canonicalPath: workspace.path,
       recoveryPath: "C:\\Users\\me\\.graphcode_recovery\\research-123",
+      identityToken: "opaque-directory-identity",
       projects: workspace.projects,
       loops: workspace.loops,
       terminalSessions: workspace.terminalSessions,
@@ -145,6 +150,85 @@ describe("WorkspacesDialog", () => {
       workspaces[1].id,
       workspaces[1].path,
       "C:\\Users\\me\\.graphcode_recovery\\research-123",
+      "opaque-directory-identity",
     );
+    expect(container.textContent).toContain(
+      "Workspace moved to the recovery location",
+    );
+    expect(container.textContent).not.toContain("Delete Workspace");
+  });
+
+  it("invalidates a pending deletion after refresh or workspace mutation", async () => {
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+
+    await act(async () => {
+      root.render(<WorkspacesDialog onClose={() => undefined} />);
+    });
+
+    const deleteButton = () =>
+      Array.from(container.querySelectorAll("button")).find(
+        (button) => button.textContent === "Delete" && !button.disabled,
+      );
+    await act(async () => {
+      deleteButton()?.click();
+    });
+    expect(container.textContent).toContain("Delete Workspace");
+
+    const refresh = Array.from(container.querySelectorAll("button")).find(
+      (button) => button.textContent === "Refresh",
+    );
+    await act(async () => {
+      refresh?.click();
+    });
+    expect(container.textContent).not.toContain("Delete Workspace");
+
+    await act(async () => {
+      deleteButton()?.click();
+    });
+    const open = Array.from(container.querySelectorAll("button")).find(
+      (button) => button.textContent === "Open" && !button.disabled,
+    );
+    await act(async () => {
+      open?.click();
+    });
+    expect(container.textContent).not.toContain("Delete Workspace");
+  });
+
+  it("surfaces a post-commit cleanup warning while refreshing stale state", async () => {
+    workspaceBridge.list.mockReset();
+    workspaceBridge.list.mockResolvedValueOnce(workspaces);
+    workspaceBridge.list.mockResolvedValueOnce([workspaces[0]]);
+    workspaceBridge.delete.mockResolvedValueOnce({
+      committed: true,
+      recoveryPath: "C:\\Users\\me\\.graphcode_recovery\\research-123",
+      cleanupWarning:
+        "Workspace recovery committed, but deletion lease cleanup failed.",
+    });
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+
+    await act(async () => {
+      root.render(<WorkspacesDialog onClose={() => undefined} />);
+    });
+    const deleteButton = Array.from(container.querySelectorAll("button")).find(
+      (button) => button.textContent === "Delete" && !button.disabled,
+    );
+    await act(async () => {
+      deleteButton?.click();
+    });
+    const confirm = Array.from(container.querySelectorAll("button")).find(
+      (button) => button.textContent === "Delete Workspace",
+    );
+    await act(async () => {
+      confirm?.click();
+    });
+
+    expect(container.textContent).toContain("recovery committed");
+    expect(container.textContent).not.toContain("Delete Workspace");
+    expect(container.textContent).not.toContain(workspaces[1].path);
+    expect(workspaceBridge.list).toHaveBeenCalledTimes(2);
   });
 });

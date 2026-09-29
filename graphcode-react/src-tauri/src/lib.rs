@@ -313,9 +313,15 @@ async fn delete_workspace(
     id: String,
     expected_path: String,
     expected_recovery_path: String,
-) -> Result<(), BridgeError> {
+    expected_identity_token: String,
+) -> Result<workspace::WorkspaceDeletionResult, BridgeError> {
     tauri::async_runtime::spawn_blocking(move || {
-        workspace::delete(&id, &expected_path, &expected_recovery_path)
+        workspace::delete(
+            &id,
+            &expected_path,
+            &expected_recovery_path,
+            &expected_identity_token,
+        )
     })
     .await
     .map_err(|error| BridgeError::WorkspaceTask(error.to_string()))?

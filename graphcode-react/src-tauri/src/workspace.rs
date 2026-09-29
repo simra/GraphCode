@@ -61,6 +61,8 @@ pub enum WorkspaceError {
     Synchronization(String),
     #[error("workspace confirmation no longer matches the canonical path (expected {expected}, found {actual})")]
     ConfirmationMismatch { expected: String, actual: String },
+    #[error("workspace confirmation expired because the directory identity changed")]
+    ConfirmationIdentityMismatch,
     #[error("GraphCode helpers are unavailable at {0}")]
     HelpersUnavailable(String),
     #[error("failed to start the workspace daemon: {0}")]
@@ -92,9 +94,18 @@ pub struct WorkspaceDeletionPlan {
     pub name: String,
     pub canonical_path: String,
     pub recovery_path: String,
+    pub identity_token: String,
     pub projects: usize,
     pub loops: usize,
     pub terminal_sessions: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceDeletionResult {
+    pub committed: bool,
+    pub recovery_path: String,
+    pub cleanup_warning: Option<String>,
 }
 
 #[cfg(windows)]
@@ -284,6 +295,10 @@ impl StableDirectory {
         }
         Ok(())
     }
+
+    fn confirmation_token(&self) -> String {
+        self.identity.confirmation_token()
+    }
 }
 
 #[cfg(windows)]
@@ -322,6 +337,20 @@ impl StableDirectory {
                 path.display()
             )))
         }
+    }
+
+    fn confirmation_token(&self) -> String {
+        self.identity.confirmation_token()
+    }
+}
+
+impl DirectoryIdentity {
+    fn confirmation_token(&self) -> String {
+        let mut digest = Sha256::new();
+        digest.update(b"graphcode-workspace-deletion-identity-v1\0");
+        digest.update(self.volume_serial.to_le_bytes());
+        digest.update(self.file_id);
+        hex::encode(digest.finalize())
     }
 }
 
@@ -447,7 +476,8 @@ pub fn delete(
     id: &str,
     expected_path: &str,
     expected_recovery_path: &str,
-) -> Result<(), WorkspaceError> {
+    expected_identity_token: &str,
+) -> Result<WorkspaceDeletionResult, WorkspaceError> {
     let home = home_directory()?;
     let _synchronization = WorkspaceMutationGuard::acquire(&home)?;
     delete_from(
@@ -456,8 +486,10 @@ pub fn delete(
         id,
         expected_path,
         expected_recovery_path,
+        expected_identity_token,
         zmx_sessions,
         move_to_recovery,
+        DeletionLease::cleanup_after_commit,
     )
 }
 
@@ -466,6 +498,7 @@ pub fn prepare_delete(id: &str) -> Result<WorkspaceDeletionPlan, WorkspaceError>
     let _synchronization = WorkspaceMutationGuard::acquire(&home)?;
     let current = current_directory()?;
     let target = validate_deletion_target(&home, &current, id)?;
+    let stable = StableDirectory::open(&target)?;
     inspect_workspace_locks(&target)?;
     preflight_process_ownership(&target)?;
     verify_zmx_namespace(&target)?;
@@ -483,6 +516,7 @@ pub fn prepare_delete(id: &str) -> Result<WorkspaceDeletionPlan, WorkspaceError>
         name,
         canonical_path: target.display().to_string(),
         recovery_path: recovery_path.display().to_string(),
+        identity_token: stable.confirmation_token(),
         projects: contents.projects,
         loops: contents.loops,
         terminal_sessions: sessions.len(),
@@ -868,18 +902,21 @@ fn resolve_known_from(home: &Path, current: &Path, id: &str) -> Result<PathBuf, 
         .ok_or(WorkspaceError::NotFound)
 }
 
-fn delete_from<L, F>(
+fn delete_from<L, F, C>(
     home: &Path,
     current: &Path,
     id: &str,
     expected_path: &str,
     expected_recovery_path: &str,
+    expected_identity_token: &str,
     list_sessions: L,
     recover: F,
-) -> Result<(), WorkspaceError>
+    cleanup_lease: C,
+) -> Result<WorkspaceDeletionResult, WorkspaceError>
 where
     L: FnOnce(&Path) -> Result<Vec<String>, WorkspaceError>,
-    F: FnOnce(&Path, &Path, &StableDirectory) -> Result<(), WorkspaceError>,
+    F: FnOnce(&Path, &Path, &StableDirectory) -> Result<Option<String>, WorkspaceError>,
+    C: FnOnce(DeletionLease) -> Option<String>,
 {
     let target = validate_deletion_target(home, current, id)?;
     let confirmed = canonical_existing(Path::new(expected_path))?;
@@ -890,6 +927,10 @@ where
         });
     }
     let stable = StableDirectory::open(&target)?;
+    let actual_identity_token = stable.confirmation_token();
+    if actual_identity_token != expected_identity_token {
+        return Err(WorkspaceError::ConfirmationIdentityMismatch);
+    }
     let recovery = validate_recovery_destination(home, &target, expected_recovery_path)?;
     let sessions = list_sessions(&target)?;
 
@@ -912,9 +953,17 @@ where
     verify_no_owned_processes(&target)?;
     stable.verify_path(&target)?;
 
-    recover(&target, &recovery, &stable)?;
-    lease.release()?;
-    Ok(())
+    let recovery_warning = recover(&target, &recovery, &stable)?;
+    let cleanup_warning = match (recovery_warning, cleanup_lease(lease)) {
+        (Some(recovery), Some(cleanup)) => Some(format!("{recovery} {cleanup}")),
+        (Some(warning), None) | (None, Some(warning)) => Some(warning),
+        (None, None) => None,
+    };
+    Ok(WorkspaceDeletionResult {
+        committed: true,
+        recovery_path: recovery.display().to_string(),
+        cleanup_warning,
+    })
 }
 
 fn validate_deletion_target(
@@ -1189,16 +1238,22 @@ impl DeletionLease {
         }
     }
 
-    fn release(self) -> Result<(), WorkspaceError> {
-        fs::remove_file(&self.path).map_err(|error| {
-            map_io_error(
-                error,
-                format!("could not release deletion lease {}", self.path.display()),
-            )
-        })?;
+    fn cleanup_after_commit(self) -> Option<String> {
+        self.cleanup_after_commit_with(|path| fs::remove_file(path))
+    }
+
+    fn cleanup_after_commit_with<F>(self, remove: F) -> Option<String>
+    where
+        F: FnOnce(&Path) -> io::Result<()>,
+    {
         self.armed
             .store(false, std::sync::atomic::Ordering::Release);
-        Ok(())
+        remove(&self.path).err().map(|error| {
+            format!(
+                "workspace recovery committed, but deletion lease cleanup failed at {}: {error}",
+                self.path.display()
+            )
+        })
     }
 }
 
@@ -1950,7 +2005,7 @@ fn move_to_recovery(
     source: &Path,
     destination: &Path,
     stable: &StableDirectory,
-) -> Result<(), WorkspaceError> {
+) -> Result<Option<String>, WorkspaceError> {
     use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Foundation::GetLastError;
     use windows_sys::Win32::Storage::FileSystem::{MoveFileExW, MOVEFILE_WRITE_THROUGH};
@@ -1989,14 +2044,20 @@ fn move_to_recovery(
             )));
         }
     }
-    stable.verify_path(destination)?;
-    if source.exists() {
-        return Err(WorkspaceError::RecoveryUncertain(format!(
-            "{} still exists after the recovery move",
-            source.display()
-        )));
+    let mut warnings = Vec::new();
+    if let Err(error) = stable.verify_path(destination) {
+        warnings.push(format!(
+            "workspace recovery committed at {}, but destination identity verification failed: {error}",
+            destination.display()
+        ));
     }
-    Ok(())
+    if source.exists() {
+        warnings.push(format!(
+            "workspace recovery committed at {}, but the original path still appears to exist",
+            destination.display()
+        ));
+    }
+    Ok((!warnings.is_empty()).then(|| warnings.join(" ")))
 }
 
 #[cfg(not(windows))]
@@ -2004,14 +2065,20 @@ fn move_to_recovery(
     source: &Path,
     destination: &Path,
     stable: &StableDirectory,
-) -> Result<(), WorkspaceError> {
+) -> Result<Option<String>, WorkspaceError> {
     stable.verify_path(source)?;
     fs::rename(source, destination).map_err(|error| {
         map_io_error(
             error,
             format!("could not move {} to recovery", source.display()),
         )
-    })
+    })?;
+    Ok(stable.verify_path(destination).err().map(|error| {
+        format!(
+            "workspace recovery committed at {}, but destination identity verification failed: {error}",
+            destination.display()
+        )
+    }))
 }
 
 #[cfg(windows)]
@@ -2220,26 +2287,125 @@ mod tests {
         fs::write(target.join(RENDEZVOUS_FILE), [7u8; 32]).unwrap();
         let lease_path = deletion_lease_path(&target).unwrap();
         let expected = canonical_existing(&target).unwrap();
+        let identity_token = StableDirectory::open(&target).unwrap().confirmation_token();
 
-        delete_from(
+        let result = delete_from(
             &home,
             &default,
             target.to_str().unwrap(),
             expected.to_str().unwrap(),
             recovered.to_str().unwrap(),
+            &identity_token,
             // Editable graph IDs are impact metadata only; the trusted namespace
             // is the sole source of sessions authorized for teardown.
             |_| Ok(Vec::new()),
             move_to_recovery,
+            DeletionLease::cleanup_after_commit,
         )
         .unwrap();
 
+        assert!(result.committed);
+        assert!(result.cleanup_warning.is_none());
         assert!(!target.exists());
         assert!(recovered.is_dir());
         assert!(!recovered.join(LOCK_FILE).exists());
         assert!(!recovered.join(LEGACY_LOCK_FILE).exists());
         assert!(!recovered.join(RENDEZVOUS_FILE).exists());
         assert!(!lease_path.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn deletion_confirmation_rejects_replacement_at_the_same_path() {
+        let root =
+            std::env::temp_dir().join(format!("graphcode-delete-replaced-{}", Uuid::new_v4()));
+        let home = root.join("home");
+        let default = home.join(".graphcode");
+        let target = home.join(".graphcode-research");
+        let original = home.join(".graphcode-research-original");
+        for workspace in [&default, &target] {
+            fs::create_dir_all(workspace.join("bin")).unwrap();
+            fs::write(workspace.join("bin").join("graphcoded.exe"), b"test").unwrap();
+            fs::write(workspace.join("bin").join("zmx.exe"), b"test").unwrap();
+        }
+        let expected = canonical_existing(&target).unwrap();
+        let identity_token = StableDirectory::open(&target).unwrap().confirmation_token();
+
+        fs::rename(&target, &original).unwrap();
+        fs::create_dir_all(target.join("bin")).unwrap();
+        fs::write(target.join("bin").join("graphcoded.exe"), b"replacement").unwrap();
+        fs::write(target.join("bin").join("zmx.exe"), b"replacement").unwrap();
+        fs::write(target.join("replacement-marker"), b"untouched").unwrap();
+
+        let result = delete_from(
+            &home,
+            &default,
+            target.to_str().unwrap(),
+            expected.to_str().unwrap(),
+            home.join(RECOVERY_DIRECTORY)
+                .join("unused")
+                .to_str()
+                .unwrap(),
+            &identity_token,
+            |_| panic!("session enumeration must not begin after identity mismatch"),
+            |_, _, _| panic!("recovery move must not begin after identity mismatch"),
+            |_| panic!("lease cleanup must not begin after identity mismatch"),
+        );
+
+        assert!(matches!(
+            result,
+            Err(WorkspaceError::ConfirmationIdentityMismatch)
+        ));
+        assert!(target.join("replacement-marker").is_file());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn committed_recovery_returns_cleanup_warning_instead_of_failure() {
+        let root =
+            std::env::temp_dir().join(format!("graphcode-delete-committed-{}", Uuid::new_v4()));
+        let home = root.join("home");
+        let default = home.join(".graphcode");
+        let target = home.join(".graphcode-research");
+        let recovered = home.join(RECOVERY_DIRECTORY).join("research-committed");
+        for workspace in [&default, &target] {
+            fs::create_dir_all(workspace.join("bin")).unwrap();
+            fs::write(workspace.join("bin").join("graphcoded.exe"), b"test").unwrap();
+            fs::write(workspace.join("bin").join("zmx.exe"), b"test").unwrap();
+        }
+        initialize_zmx_namespace(&target).unwrap();
+        let expected = canonical_existing(&target).unwrap();
+        let identity_token = StableDirectory::open(&target).unwrap().confirmation_token();
+        let lease_path = deletion_lease_path(&target).unwrap();
+
+        let result = delete_from(
+            &home,
+            &default,
+            target.to_str().unwrap(),
+            expected.to_str().unwrap(),
+            recovered.to_str().unwrap(),
+            &identity_token,
+            |_| Ok(Vec::new()),
+            move_to_recovery,
+            |lease| {
+                lease.cleanup_after_commit_with(|_| {
+                    Err(io::Error::other("simulated post-commit cleanup failure"))
+                })
+            },
+        )
+        .unwrap();
+
+        assert!(result.committed);
+        assert!(result
+            .cleanup_warning
+            .as_deref()
+            .is_some_and(|warning| warning.contains("recovery committed")));
+        assert!(!target.exists());
+        assert!(recovered.is_dir());
+        assert!(lease_path.is_file());
+        fs::remove_file(lease_path).unwrap();
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -2262,7 +2428,9 @@ mod tests {
         let stable = StableDirectory::open(&target).unwrap();
 
         verify_local_recovery_volume(&target, &recovery).unwrap();
-        move_to_recovery(&target, &destination, &stable).unwrap();
+        assert!(move_to_recovery(&target, &destination, &stable)
+            .unwrap()
+            .is_none());
         assert!(!target.exists());
         assert!(destination.join("marker.txt").is_file());
         fs::remove_dir_all(root).unwrap();
