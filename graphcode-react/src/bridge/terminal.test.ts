@@ -46,16 +46,29 @@ describe("terminal bridge encoding", () => {
       },
     );
 
-    const connection = await openTerminal("loop", 80, 24, {
-      onOutput(bytes, _sequence, acknowledge) {
-        expect(new TextDecoder().decode(bytes)).toBe("abc");
-        void acknowledge();
+    const connection = await openTerminal(
+      { kind: "node", nodeId: "loop" },
+      80,
+      24,
+      {
+        onOutput(bytes, _sequence, acknowledge) {
+          expect(new TextDecoder().decode(bytes)).toBe("abc");
+          void acknowledge();
+        },
+        onError: vi.fn(),
+        onExit: vi.fn(),
       },
-      onError: vi.fn(),
-      onExit: vi.fn(),
-    });
+    );
 
     expect(connection.handle).toBe("terminal-1");
+    expect(invokeMock).toHaveBeenCalledWith(
+      "open_terminal",
+      expect.objectContaining({
+        target: { kind: "node", nodeId: "loop" },
+        columns: 80,
+        rows: 24,
+      }),
+    );
     expect(invokeMock).toHaveBeenCalledWith("acknowledge_terminal_output", {
       handle: "terminal-1",
       sequence: 7,

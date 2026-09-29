@@ -16,6 +16,7 @@ import {
   loadNavigationHistory,
   saveNavigationHistory,
 } from "./bridge/navigationHistory";
+import { killTerminalSession } from "./bridge/terminal";
 import {
   loadUiLayout,
   saveUiNodePositions,
@@ -132,6 +133,20 @@ import {
   activateQuickChat,
   pendingCreatedQuickChatRoute,
 } from "./state/quickChatNavigation";
+import {
+  addShellTab,
+  closePane,
+  closeTab,
+  createTerminalLayout,
+  focusRelativePane,
+  selectRelativeTab,
+  selectedTerminalTab,
+  splitFocusedPane,
+  terminalSurfaces,
+  type TerminalLayout,
+  type TerminalSurface,
+  type TerminalTab,
+} from "./state/terminalLayout";
 
 export default function App() {
   const [state, dispatch] = useReducer(appReducer, initialAppState);
@@ -140,6 +155,9 @@ export default function App() {
   const [newQuickChatOpen, setNewQuickChatOpen] = useState(false);
   const [newEdgeOpen, setNewEdgeOpen] = useState(false);
   const [terminalNodeId, setTerminalNodeId] = useState<string>();
+  const [terminalLayouts, setTerminalLayouts] = useState<
+    Record<string, TerminalLayout>
+  >({});
   const [navigationHistory, setNavigationHistory] =
     useState<NavigationHistory>();
   const [seenSummaryBeatByNode, setSeenSummaryBeatByNode] = useState<
@@ -451,6 +469,62 @@ export default function App() {
       leaveTerminalWorkspace();
     }
   }, [inspectedNode?.id, leaveTerminalWorkspace, terminalNodeId]);
+  const terminalLayout = terminalNode
+    ? terminalLayouts[terminalNode.id]
+    : undefined;
+  useEffect(() => {
+    if (!terminalNode || terminalLayouts[terminalNode.id]) return;
+    setTerminalLayouts((current) => ({
+      ...current,
+      [terminalNode.id]: createTerminalLayout(terminalNode.id),
+    }));
+  }, [terminalLayouts, terminalNode]);
+  const setTerminalLayout = useCallback(
+    (nodeId: string, layout: TerminalLayout) => {
+      setTerminalLayouts((current) => ({
+        ...current,
+        [nodeId]: layout,
+      }));
+    },
+    [],
+  );
+  const updateTerminalLayout = useCallback(
+    (nodeId: string, update: (layout: TerminalLayout) => TerminalLayout) => {
+      setTerminalLayouts((current) => {
+        const layout = current[nodeId];
+        if (!layout) return current;
+        const next = update(layout);
+        return next === layout ? current : { ...current, [nodeId]: next };
+      });
+    },
+    [],
+  );
+  const closeTerminalSurfaces = useCallback(
+    async (surfaces: TerminalSurface[]) => {
+      await Promise.all(
+        surfaces
+          .filter((surface) => surface.kind === "shell")
+          .map((surface) => killTerminalSession(surface.id)),
+      );
+    },
+    [],
+  );
+  const closeTerminalPane = useCallback(
+    async (nodeId: string, tabId: string, surface: TerminalSurface) => {
+      await closeTerminalSurfaces([surface]);
+      updateTerminalLayout(nodeId, (layout) =>
+        closePane(layout, tabId, surface.id),
+      );
+    },
+    [closeTerminalSurfaces, updateTerminalLayout],
+  );
+  const closeTerminalTab = useCallback(
+    async (nodeId: string, tab: TerminalTab) => {
+      await closeTerminalSurfaces(terminalSurfaces(tab.root));
+      updateTerminalLayout(nodeId, (layout) => closeTab(layout, tab.id));
+    },
+    [closeTerminalSurfaces, updateTerminalLayout],
+  );
   const selectionKey = inspectedEdge
     ? `edge:${selectedProjectPath}:${selectedViewKey}:${selectedEdgeKey}`
     : inspectedNode
@@ -655,6 +729,16 @@ export default function App() {
                 await sendDaemonCommand(
                   openNodeSessionCommand(selectedProjectPath, inspectedNode.id),
                 );
+                setTerminalLayouts((current) =>
+                  current[inspectedNode.id]
+                    ? current
+                    : {
+                        ...current,
+                        [inspectedNode.id]: createTerminalLayout(
+                          inspectedNode.id,
+                        ),
+                      },
+                );
                 visitNavigationRoute({
                   kind: "project",
                   projectPath: selectedProjectPath,
@@ -664,6 +748,82 @@ export default function App() {
                 });
               }
             : undefined,
+        newTerminalTab:
+          terminalNode && terminalLayout
+            ? () =>
+                updateTerminalLayout(terminalNode.id, (layout) =>
+                  addShellTab(layout),
+                )
+            : undefined,
+        closeTerminalPane:
+          terminalNode && terminalLayout
+            ? async () => {
+                const tab = selectedTerminalTab(terminalLayout);
+                const surface = tab
+                  ? terminalSurfaces(tab.root).find(
+                      (candidate) => candidate.id === tab.focusedSurfaceId,
+                    )
+                  : undefined;
+                if (tab && surface) {
+                  await closeTerminalPane(terminalNode.id, tab.id, surface);
+                }
+              }
+            : undefined,
+        closeTerminalTab:
+          terminalNode && terminalLayout
+            ? async () => {
+                const tab = selectedTerminalTab(terminalLayout);
+                if (tab) await closeTerminalTab(terminalNode.id, tab);
+              }
+            : undefined,
+        splitTerminalRight:
+          terminalNode && terminalLayout
+            ? () =>
+                updateTerminalLayout(terminalNode.id, (layout) =>
+                  splitFocusedPane(layout, "horizontal"),
+                )
+            : undefined,
+        splitTerminalDown:
+          terminalNode && terminalLayout
+            ? () =>
+                updateTerminalLayout(terminalNode.id, (layout) =>
+                  splitFocusedPane(layout, "vertical"),
+                )
+            : undefined,
+        selectNextTerminalTab:
+          terminalNode && terminalLayout
+            ? () =>
+                updateTerminalLayout(terminalNode.id, (layout) =>
+                  selectRelativeTab(layout, 1),
+                )
+            : undefined,
+        selectPreviousTerminalTab:
+          terminalNode && terminalLayout
+            ? () =>
+                updateTerminalLayout(terminalNode.id, (layout) =>
+                  selectRelativeTab(layout, -1),
+                )
+            : undefined,
+        focusNextTerminalPane:
+          terminalNode && terminalLayout
+            ? () =>
+                updateTerminalLayout(terminalNode.id, (layout) =>
+                  focusRelativePane(layout, 1),
+                )
+            : undefined,
+        focusPreviousTerminalPane:
+          terminalNode && terminalLayout
+            ? () =>
+                updateTerminalLayout(terminalNode.id, (layout) =>
+                  focusRelativePane(layout, -1),
+                )
+            : undefined,
+        terminalIsSplit: Boolean(
+          terminalLayout &&
+          selectedTerminalTab(terminalLayout) &&
+          terminalSurfaces(selectedTerminalTab(terminalLayout)!.root).length >
+            1,
+        ),
         openNewEdge: () => {
           setNewEdgeEndpoints({ from: inspectedNode?.id });
           setNewEdgeOpen(true);
@@ -972,7 +1132,12 @@ export default function App() {
       state,
       canGoBack,
       canGoForward,
+      closeTerminalPane,
+      closeTerminalTab,
+      terminalLayout,
+      terminalNode,
       traverseNavigationHistory,
+      updateTerminalLayout,
       visitNavigationRoute,
     ],
   );
@@ -1655,7 +1820,7 @@ export default function App() {
             ))}
           </nav>
         ) : null}
-        {terminalNode && selectedGraph ? (
+        {terminalNode && selectedGraph && terminalLayout ? (
           <LoopWorkspace
             graph={selectedGraph}
             node={terminalNode}
@@ -1673,6 +1838,28 @@ export default function App() {
             }
             commands={nodeCommands}
             pendingCommandId={pendingCommandId}
+            layout={terminalLayout}
+            onLayoutChange={(layout) =>
+              setTerminalLayout(terminalNode.id, layout)
+            }
+            onClosePane={(tabId, surface) =>
+              void closeTerminalPane(terminalNode.id, tabId, surface).catch(
+                (error: unknown) => {
+                  setCommandError(
+                    error instanceof Error ? error.message : String(error),
+                  );
+                },
+              )
+            }
+            onCloseTab={(tab) =>
+              void closeTerminalTab(terminalNode.id, tab).catch(
+                (error: unknown) => {
+                  setCommandError(
+                    error instanceof Error ? error.message : String(error),
+                  );
+                },
+              )
+            }
             onBack={() => {
               leaveTerminalWorkspace();
               if (!selectedProjectPath) return;

@@ -50,6 +50,10 @@ interface TerminalOpenResult {
   sessionName: string;
 }
 
+export type TerminalTarget =
+  | { kind: "node"; nodeId: string }
+  | { kind: "shell"; surfaceId: string; workingDirectory?: string };
+
 export function decodeBase64(data: string): Uint8Array {
   const binary = globalThis.atob(data);
   return Uint8Array.from(binary, (character) => character.charCodeAt(0));
@@ -79,7 +83,7 @@ export async function loadTerminalHistory(
 }
 
 export async function openTerminal(
-  nodeId: string,
+  target: TerminalTarget,
   columns: number,
   rows: number,
   handlers: TerminalHandlers,
@@ -113,7 +117,7 @@ export async function openTerminal(
   };
 
   const opened = await invoke<TerminalOpenResult>("open_terminal", {
-    nodeId,
+    target,
     columns,
     rows,
     onEvent,
@@ -144,4 +148,8 @@ export async function openTerminal(
       await invoke("close_terminal", { handle });
     },
   };
+}
+
+export async function killTerminalSession(surfaceId: string): Promise<void> {
+  await invoke("kill_terminal_session", { surfaceId });
 }

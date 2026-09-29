@@ -2,20 +2,41 @@ import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
 import { useEffect, useRef, useState } from "react";
-import { openTerminal, type TerminalConnection } from "../bridge/terminal";
+import {
+  openTerminal,
+  type TerminalConnection,
+  type TerminalTarget,
+} from "../bridge/terminal";
 
 export type TerminalPhase = "connecting" | "connected" | "exited" | "failed";
 
 export function useTerminalWorkspace(
-  targetId: string,
+  target: string | TerminalTarget,
   onSessionExit?: (succeeded: boolean) => Promise<void>,
+  active = true,
 ) {
   const containerRef = useRef<HTMLDivElement>(null);
   const connectionRef = useRef<TerminalConnection | undefined>(undefined);
+  const terminalRef = useRef<Terminal | undefined>(undefined);
   const onSessionExitRef = useRef(onSessionExit);
   const [phase, setPhase] = useState<TerminalPhase>("connecting");
   const [error, setError] = useState<string>();
   onSessionExitRef.current = onSessionExit;
+  const targetKind = typeof target === "string" ? "node" : target.kind;
+  const targetId =
+    typeof target === "string"
+      ? target
+      : target.kind === "node"
+        ? target.nodeId
+        : target.surfaceId;
+  const workingDirectory =
+    typeof target === "string" || target.kind === "node"
+      ? undefined
+      : target.workingDirectory;
+
+  useEffect(() => {
+    if (active) terminalRef.current?.focus();
+  }, [active]);
 
   useEffect(() => {
     const container = containerRef.current;
@@ -43,6 +64,7 @@ export function useTerminalWorkspace(
         selectionBackground: "#49654488",
       },
     });
+    terminalRef.current = terminal;
     const fit = new FitAddon();
     terminal.loadAddon(fit);
     terminal.open(container);
@@ -89,7 +111,9 @@ export function useTerminalWorkspace(
         const openedColumns = terminal.cols;
         const openedRows = terminal.rows;
         const connection = await openTerminal(
-          targetId,
+          targetKind === "node"
+            ? { kind: "node", nodeId: targetId }
+            : { kind: "shell", surfaceId: targetId, workingDirectory },
           openedColumns,
           openedRows,
           {
@@ -144,11 +168,17 @@ export function useTerminalWorkspace(
       const connection = connectionRef.current;
       connectionRef.current = undefined;
       if (connection) void connection.close();
+      if (terminalRef.current === terminal) terminalRef.current = undefined;
       terminal.dispose();
     };
-  }, [targetId]);
+  }, [targetId, targetKind, workingDirectory]);
 
-  return { containerRef, phase, error };
+  return {
+    containerRef,
+    phase,
+    error,
+    focus: () => terminalRef.current?.focus(),
+  };
 }
 
 export function terminalPhaseLabel(phase: TerminalPhase): string {

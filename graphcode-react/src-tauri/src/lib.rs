@@ -176,14 +176,14 @@ async fn acknowledge_daemon_sequence(
 #[tauri::command]
 async fn open_terminal(
     state: State<'_, BridgeState>,
-    node_id: String,
+    target: terminal::TerminalTarget,
     columns: u16,
     rows: u16,
     on_event: tauri::ipc::Channel<terminal::TerminalEvent>,
 ) -> Result<terminal::TerminalOpenResult, BridgeError> {
     state
         .terminal
-        .open(&node_id, columns, rows, on_event)
+        .open(target, columns, rows, on_event)
         .await
         .map_err(Into::into)
 }
@@ -231,6 +231,13 @@ async fn acknowledge_terminal_output(
 #[tauri::command]
 async fn close_terminal(state: State<'_, BridgeState>, handle: String) -> Result<(), BridgeError> {
     state.terminal.close(&handle).await.map_err(Into::into)
+}
+
+#[tauri::command]
+async fn kill_terminal_session(surface_id: String) -> Result<(), BridgeError> {
+    terminal::kill_session(&surface_id)
+        .await
+        .map_err(Into::into)
 }
 
 #[tauri::command]
@@ -310,7 +317,14 @@ fn set_native_menu(
     }
 
     let mut menu = MenuBuilder::new(&app);
-    for category in ["GraphCode", "Project", "Loop", "View", "Navigation"] {
+    for category in [
+        "GraphCode",
+        "Project",
+        "Loop",
+        "Terminal",
+        "View",
+        "Navigation",
+    ] {
         let category_commands: Vec<_> = commands
             .iter()
             .filter(|command| command.category == category)
@@ -454,6 +468,7 @@ pub fn run() {
             resize_terminal,
             acknowledge_terminal_output,
             close_terminal,
+            kill_terminal_session,
             load_terminal_history,
             load_settings,
             set_daemon_heartbeat_enabled,

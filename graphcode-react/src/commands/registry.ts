@@ -42,6 +42,15 @@ export type CommandId =
   | "loop.mailroomPost"
   | "mailroom.readPost"
   | "loop.openTerminal"
+  | "terminal.newTab"
+  | "terminal.closePane"
+  | "terminal.closeTab"
+  | "terminal.splitRight"
+  | "terminal.splitDown"
+  | "terminal.nextTab"
+  | "terminal.previousTab"
+  | "terminal.focusNextPane"
+  | "terminal.focusPreviousPane"
   | "view.zoomIn"
   | "view.zoomOut"
   | "view.resetZoom"
@@ -54,7 +63,7 @@ export type CommandId =
   | "selection.previousLoop";
 
 export type CommandCategory =
-  "Application" | "Project" | "Loop" | "View" | "Navigation";
+  "Application" | "Project" | "Loop" | "Terminal" | "View" | "Navigation";
 export type CommandSurface = "header" | "node" | "canvas" | "mailroom";
 export type HeaderCommandContext =
   "overview" | "project" | "quickChats" | "mailroom";
@@ -131,6 +140,16 @@ export interface CommandActions {
   configureMailroomWatch?(): void;
   postMailroom?(): void;
   openTerminal?(): Promise<void>;
+  newTerminalTab?(): void;
+  closeTerminalPane?(): Promise<void>;
+  closeTerminalTab?(): Promise<void>;
+  splitTerminalRight?(): void;
+  splitTerminalDown?(): void;
+  selectNextTerminalTab?(): void;
+  selectPreviousTerminalTab?(): void;
+  focusNextTerminalPane?(): void;
+  focusPreviousTerminalPane?(): void;
+  terminalIsSplit?: boolean;
   restartSession?(): Promise<void>;
   completeNode?(): void;
   deleteNode?(): Promise<void>;
@@ -770,6 +789,155 @@ export function createCommandRegistry(
                   ? "Composite loops open their child graph"
                   : "Terminal streaming requires the desktop app"
                 : "Select a loop first",
+            ),
+            execute: () => undefined,
+          }),
+    },
+    {
+      id: "terminal.newTab",
+      label: "New Shell Tab",
+      description: "Open a persistent local shell tab in this loop workspace",
+      category: "Terminal",
+      shortcut: { key: "t", ctrl: true, label: "Ctrl+T", global: true },
+      surfaces: [],
+      ...(actions.newTerminalTab
+        ? { enabled: true, execute: actions.newTerminalTab }
+        : {
+            ...unavailable("Open a loop terminal workspace first"),
+            execute: () => undefined,
+          }),
+    },
+    {
+      id: "terminal.closePane",
+      label: "Close Pane",
+      description: "Close the focused pane without ending the loop session",
+      category: "Terminal",
+      shortcut: { key: "w", ctrl: true, label: "Ctrl+W", global: true },
+      surfaces: [],
+      ...(actions.closeTerminalPane
+        ? { enabled: true, execute: actions.closeTerminalPane }
+        : {
+            ...unavailable("Open a loop terminal workspace first"),
+            execute: () => undefined,
+          }),
+    },
+    {
+      id: "terminal.closeTab",
+      label: "Close Tab",
+      description: "Close every pane in the selected terminal tab",
+      category: "Terminal",
+      surfaces: [],
+      ...(actions.closeTerminalTab
+        ? { enabled: true, execute: actions.closeTerminalTab }
+        : {
+            ...unavailable("Open a loop terminal workspace first"),
+            execute: () => undefined,
+          }),
+    },
+    {
+      id: "terminal.splitRight",
+      label: "Split Right",
+      description: "Split the focused pane with a persistent local shell",
+      category: "Terminal",
+      shortcut: { key: "d", ctrl: true, label: "Ctrl+D", global: true },
+      surfaces: [],
+      ...(actions.splitTerminalRight
+        ? { enabled: true, execute: actions.splitTerminalRight }
+        : {
+            ...unavailable("Open a loop terminal workspace first"),
+            execute: () => undefined,
+          }),
+    },
+    {
+      id: "terminal.splitDown",
+      label: "Split Down",
+      description: "Split the focused pane vertically with a local shell",
+      category: "Terminal",
+      shortcut: {
+        key: "d",
+        ctrl: true,
+        shift: true,
+        label: "Ctrl+Shift+D",
+        global: true,
+      },
+      surfaces: [],
+      ...(actions.splitTerminalDown
+        ? { enabled: true, execute: actions.splitTerminalDown }
+        : {
+            ...unavailable("Open a loop terminal workspace first"),
+            execute: () => undefined,
+          }),
+    },
+    {
+      id: "terminal.nextTab",
+      label: "Next Tab",
+      description: "Select the next terminal tab",
+      category: "Terminal",
+      shortcut: {
+        key: "ArrowRight",
+        ctrl: true,
+        label: "Ctrl+→",
+        global: true,
+      },
+      surfaces: [],
+      ...(actions.selectNextTerminalTab
+        ? { enabled: true, execute: actions.selectNextTerminalTab }
+        : {
+            ...unavailable("Open a loop terminal workspace first"),
+            execute: () => undefined,
+          }),
+    },
+    {
+      id: "terminal.previousTab",
+      label: "Previous Tab",
+      description: "Select the previous terminal tab",
+      category: "Terminal",
+      shortcut: {
+        key: "ArrowLeft",
+        ctrl: true,
+        label: "Ctrl+←",
+        global: true,
+      },
+      surfaces: [],
+      ...(actions.selectPreviousTerminalTab
+        ? { enabled: true, execute: actions.selectPreviousTerminalTab }
+        : {
+            ...unavailable("Open a loop terminal workspace first"),
+            execute: () => undefined,
+          }),
+    },
+    {
+      id: "terminal.focusNextPane",
+      label: "Focus Next Pane",
+      description: "Move keyboard focus to the next split pane",
+      category: "Terminal",
+      shortcut: { key: "]", ctrl: true, label: "Ctrl+]", global: true },
+      surfaces: [],
+      ...(actions.focusNextTerminalPane && actions.terminalIsSplit
+        ? { enabled: true, execute: actions.focusNextTerminalPane }
+        : {
+            ...unavailable(
+              actions.focusNextTerminalPane
+                ? "The selected terminal tab is not split"
+                : "Open a loop terminal workspace first",
+            ),
+            execute: () => undefined,
+          }),
+    },
+    {
+      id: "terminal.focusPreviousPane",
+      label: "Focus Previous Pane",
+      description: "Move keyboard focus to the previous split pane",
+      category: "Terminal",
+      shortcut: { key: "[", ctrl: true, label: "Ctrl+[", global: true },
+      surfaces: [],
+      ...(actions.focusPreviousTerminalPane && actions.terminalIsSplit
+        ? { enabled: true, execute: actions.focusPreviousTerminalPane }
+        : {
+            ...unavailable(
+              actions.focusPreviousTerminalPane
+                ? "The selected terminal tab is not split"
+                : "Open a loop terminal workspace first",
             ),
             execute: () => undefined,
           }),

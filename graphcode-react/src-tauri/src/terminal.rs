@@ -7,7 +7,7 @@ use std::{
 };
 
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::ipc::Channel;
 use thiserror::Error;
 use tokio::{
@@ -100,6 +100,22 @@ pub struct TerminalHistory {
     pub data: String,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum TerminalTarget {
+    Node {
+        node_id: String,
+    },
+    Shell {
+        surface_id: String,
+        working_directory: Option<String>,
+    },
+}
+
 enum TerminalCommand {
     Write(Vec<u8>),
     Resize { columns: u16, rows: u16 },
@@ -108,7 +124,7 @@ enum TerminalCommand {
 }
 
 struct ActiveTerminal {
-    node_id: Uuid,
+    surface_id: Uuid,
     sender: mpsc::Sender<TerminalCommand>,
 }
 
@@ -120,14 +136,30 @@ pub struct TerminalManager {
 impl TerminalManager {
     pub async fn open(
         &self,
-        node_id: &str,
+        target: TerminalTarget,
         columns: u16,
         rows: u16,
         on_event: Channel<TerminalEvent>,
     ) -> Result<TerminalOpenResult, TerminalError> {
         validate_dimensions(columns, rows)?;
-        let node_id = parse_node_id(node_id)?;
-        let session_name = session_name(node_id);
+        let (surface_id, session_name, working_directory, shell) = match target {
+            TerminalTarget::Node { node_id } => {
+                let node_id = parse_node_id(&node_id)?;
+                (node_id, session_name(node_id), None, false)
+            }
+            TerminalTarget::Shell {
+                surface_id,
+                working_directory,
+            } => {
+                let surface_id = parse_node_id(&surface_id)?;
+                (
+                    surface_id,
+                    session_name(surface_id),
+                    working_directory.map(PathBuf::from),
+                    true,
+                )
+            }
+        };
         let handle = Uuid::new_v4();
         let (sender, receiver) = mpsc::channel(64);
         {
@@ -137,21 +169,25 @@ impl TerminalManager {
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             if sessions
                 .values()
-                .any(|terminal| terminal.node_id == node_id)
+                .any(|terminal| terminal.surface_id == surface_id)
             {
                 return Err(TerminalError::AlreadyOpen);
             } else {
                 sessions.insert(
                     handle,
                     ActiveTerminal {
-                        node_id,
+                        surface_id,
                         sender: sender.clone(),
                     },
                 );
             }
         }
 
-        let prepared = prepare_attach(&session_name, columns, rows).await;
+        let prepared = if shell {
+            prepare_shell_attach(&session_name, working_directory.as_deref(), columns, rows).await
+        } else {
+            prepare_attach(&session_name, columns, rows).await
+        };
         let (zmx, child, stdin, stdout, stderr) = match prepared {
             Ok(prepared) => prepared,
             Err(error) => {
@@ -310,6 +346,20 @@ pub async fn history(node_id: &str, max_bytes: usize) -> Result<TerminalHistory,
     })
 }
 
+pub async fn kill_session(surface_id: &str) -> Result<(), TerminalError> {
+    let surface_id = parse_node_id(surface_id)?;
+    let session_name = session_name(surface_id);
+    let zmx = zmx_binary()?;
+    let output = run_command(&zmx, ["kill", &session_name]).await?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(TerminalError::Command(
+            "terminal session could not be closed".into(),
+        ))
+    }
+}
+
 type PreparedAttach = (
     PathBuf,
     Child,
@@ -335,14 +385,7 @@ async fn prepare_attach(
     validate_attachable_session(&before)?;
     resize_session(&zmx, session_name, columns, rows, 0).await?;
 
-    let mut child = zmx_command(&zmx)
-        .args(["attach", session_name])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()
-        .map_err(|error| TerminalError::Launch(error.to_string()))?;
+    let mut child = spawn_attach(&zmx, session_name, None)?;
 
     let attached = wait_for_attach(&zmx, session_name, before.pid, &mut child).await;
     if let Err(error) = attached {
@@ -371,6 +414,66 @@ async fn prepare_attach(
     Ok((zmx, child, stdin, stdout, stderr))
 }
 
+async fn prepare_shell_attach(
+    session_name: &str,
+    working_directory: Option<&Path>,
+    columns: u16,
+    rows: u16,
+) -> Result<PreparedAttach, TerminalError> {
+    let zmx = zmx_binary()?;
+    let existing = session_info(&zmx, session_name).await.ok();
+    if let Some(info) = &existing {
+        validate_attachable_session(info)?;
+        resize_session(&zmx, session_name, columns, rows, 0).await?;
+    }
+
+    let mut child = spawn_attach(&zmx, session_name, working_directory)?;
+    let attached = if let Some(info) = existing {
+        wait_for_attach(&zmx, session_name, info.pid, &mut child).await
+    } else {
+        wait_for_new_attach(&zmx, session_name, &mut child).await
+    };
+    if let Err(error) = attached {
+        let _ = child.kill().await;
+        return Err(error);
+    }
+
+    let stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| TerminalError::Launch("zmx attach did not expose stdin".into()))?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| TerminalError::Launch("zmx attach did not expose stdout".into()))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| TerminalError::Launch("zmx attach did not expose stderr".into()))?;
+    resize_session(&zmx, session_name, columns, rows, 1).await?;
+    Ok((zmx, child, stdin, stdout, stderr))
+}
+
+fn spawn_attach(
+    zmx: &Path,
+    session_name: &str,
+    working_directory: Option<&Path>,
+) -> Result<Child, TerminalError> {
+    let mut command = zmx_command(zmx);
+    command
+        .args(["attach", session_name])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    if let Some(working_directory) = working_directory {
+        command.current_dir(working_directory);
+    }
+    command
+        .spawn()
+        .map_err(|error| TerminalError::Launch(error.to_string()))
+}
+
 fn validate_attachable_session(info: &SessionInfo) -> Result<(), TerminalError> {
     if !info.has_command {
         return Err(TerminalError::SessionCommandMissing);
@@ -395,11 +498,38 @@ async fn wait_for_attach(
         {
             return Err(TerminalError::SessionUnavailable);
         }
+
         if let Ok(info) = session_info(zmx, session_name).await {
             if info.pid != expected_pid {
                 return Err(TerminalError::SessionChanged);
             }
             if info.clients == 1 {
+                return Ok(());
+            }
+            if info.clients > 1 {
+                return Err(TerminalError::AlreadyAttached);
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    Err(TerminalError::Timeout)
+}
+
+async fn wait_for_new_attach(
+    zmx: &Path,
+    session_name: &str,
+    child: &mut Child,
+) -> Result<(), TerminalError> {
+    for _ in 0..20 {
+        if child
+            .try_wait()
+            .map_err(|error| TerminalError::Stream(error.to_string()))?
+            .is_some()
+        {
+            return Err(TerminalError::SessionUnavailable);
+        }
+        if let Ok(info) = session_info(zmx, session_name).await {
+            if info.clients == 1 && info.has_command {
                 return Ok(());
             }
             if info.clients > 1 {
@@ -719,6 +849,32 @@ mod tests {
             session_name(id),
             "graphcode-2E527087-B363-48B9-883B-FFD255F01675"
         );
+    }
+
+    #[test]
+    fn terminal_targets_decode_node_and_shell_identity() {
+        let node: TerminalTarget = serde_json::from_str(
+            r#"{"kind":"node","nodeId":"2e527087-b363-48b9-883b-ffd255f01675"}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            node,
+            TerminalTarget::Node { node_id }
+                if node_id == "2e527087-b363-48b9-883b-ffd255f01675"
+        ));
+
+        let shell: TerminalTarget = serde_json::from_str(
+            r#"{"kind":"shell","surfaceId":"5d375c15-b26f-4b4f-b742-e915da84e2b1","workingDirectory":"C:\\work"}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            shell,
+            TerminalTarget::Shell {
+                surface_id,
+                working_directory: Some(working_directory)
+            } if surface_id == "5d375c15-b26f-4b4f-b742-e915da84e2b1"
+                && working_directory == "C:\\work"
+        ));
     }
 
     #[test]

@@ -29,6 +29,14 @@ and byte-based queue limits. The slice does **not** yet provide graph mutation
 parity beyond typed Stop and New Loop creation, settings, terminal streaming,
 packaging, or production parity.
 
+The xterm workspace now retains a stable per-loop tab/split tree for the lifetime
+of the React app. Node panes attach the daemon-owned node session; shell tabs and
+split panes use their own UUID-named zmx sessions, detach on navigation, and
+reattach without losing layout or scrollback. The shared command registry projects
+new-tab, close, split, tab traversal, and pane-focus actions into both the command
+palette and Tauri's native Terminal menu. This is unit/build evidence only: live
+multi-pane rendering and keyboard behavior remain part of the final parity gate.
+
 ## Goals
 
 1. Preserve `graphcoded` as the only owner of graph mutation, orchestration,
@@ -513,8 +521,10 @@ support rollback is proven, and no daemon protocol fork exists.
    tray, notifications, process/Codespace and settings.
 9. **zmx Rust spike** — may run after connection actor; prove raw attach, resize,
    scrollback, labels, detach, reconnect and multi-attach policy.
-10. **xterm workspace** — depends on zmx spike and shell navigation; channels,
-    flow-control acknowledgements, tabs/splits and layout persistence.
+10. **xterm workspace** — implemented for in-run stable tabs/splits, node and local
+    shell zmx sessions, independent pane fitting, detach/reattach, and shared
+    palette/native-menu commands. Durable cross-launch layout persistence and live
+    multi-pane parity evidence remain.
 11. **Packaging/signing/updater** — depends on native services and terminal workspace;
     side-by-side staging, provenance, clean-machine and rollback tests.
 12. **Parity/security/accessibility gates** — continuous, final gate depends on all

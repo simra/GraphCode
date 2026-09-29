@@ -109,6 +109,50 @@ describe("command registry", () => {
     expect(openTerminal).toHaveBeenCalledTimes(2);
   });
 
+  it("exposes terminal layout actions only while a workspace is open", async () => {
+    const actions = {
+      openPalette: vi.fn(),
+      clearSelection: vi.fn(),
+      selectNode: vi.fn(),
+      newTerminalTab: vi.fn(),
+      closeTerminalPane: vi.fn(async () => undefined),
+      closeTerminalTab: vi.fn(async () => undefined),
+      splitTerminalRight: vi.fn(),
+      splitTerminalDown: vi.fn(),
+      selectNextTerminalTab: vi.fn(),
+      selectPreviousTerminalTab: vi.fn(),
+      focusNextTerminalPane: vi.fn(),
+      focusPreviousTerminalPane: vi.fn(),
+      terminalIsSplit: true,
+    };
+    const commands = createCommandRegistry(stateWithSelectedNode(), actions);
+
+    for (const id of [
+      "terminal.newTab",
+      "terminal.closePane",
+      "terminal.closeTab",
+      "terminal.splitRight",
+      "terminal.splitDown",
+      "terminal.nextTab",
+      "terminal.previousTab",
+      "terminal.focusNextPane",
+      "terminal.focusPreviousPane",
+    ] as const) {
+      expect(commands.find((command) => command.id === id)?.enabled).toBe(true);
+    }
+    commands.find((command) => command.id === "terminal.splitRight")?.execute();
+    expect(actions.splitTerminalRight).toHaveBeenCalledOnce();
+
+    const closed = createCommandRegistry(stateWithSelectedNode(), {
+      openPalette: vi.fn(),
+      clearSelection: vi.fn(),
+      selectNode: vi.fn(),
+    });
+    expect(
+      closed.find((command) => command.id === "terminal.newTab")?.enabled,
+    ).toBe(false);
+  });
+
   it("uses the same registry execution for relative navigation", () => {
     const selectNode = vi.fn();
     const commands = createCommandRegistry(stateWithSelectedNode(), {

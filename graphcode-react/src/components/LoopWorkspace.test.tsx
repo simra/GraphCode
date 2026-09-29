@@ -1,9 +1,15 @@
 // @vitest-environment jsdom
 
-import { act } from "react";
+import { act, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { LoopGraph, LoopNode } from "../protocol/domain";
+import {
+  closePane,
+  createTerminalLayout,
+  type TerminalLayout,
+  type TerminalSurface,
+} from "../state/terminalLayout";
 
 const bridge = vi.hoisted(() => ({
   acknowledge: vi.fn(async () => undefined),
@@ -130,6 +136,10 @@ describe("LoopWorkspace", () => {
     document.body.append(container);
     const root = createRoot(container);
     const onSessionExit = vi.fn(async () => undefined);
+    const layout = createTerminalLayout(
+      node.id,
+      () => "22222222-2222-4222-8222-222222222222",
+    );
 
     await act(async () => {
       root.render(
@@ -138,6 +148,10 @@ describe("LoopWorkspace", () => {
           node={node}
           mailroomOwned
           commands={[]}
+          layout={layout}
+          onLayoutChange={() => undefined}
+          onClosePane={() => undefined}
+          onCloseTab={() => undefined}
           onBack={() => undefined}
           onSummarySeen={() => undefined}
           onExecuteCommand={() => undefined}
@@ -147,7 +161,7 @@ describe("LoopWorkspace", () => {
     });
 
     expect(bridge.openTerminal).toHaveBeenCalledWith(
-      node.id,
+      { kind: "node", nodeId: node.id },
       112,
       24,
       expect.any(Object),
@@ -155,7 +169,7 @@ describe("LoopWorkspace", () => {
     expect(container.textContent).toContain("Live");
     const workspaceContent = container.querySelector(".loop-workspace-content");
     expect(
-      workspaceContent?.children[0].classList.contains("terminal-host"),
+      workspaceContent?.children[0].classList.contains("terminal-workspace"),
     ).toBe(true);
     expect(
       workspaceContent?.children[1].classList.contains("loop-workspace-rail"),
@@ -190,6 +204,10 @@ describe("LoopWorkspace", () => {
     document.body.append(container);
     const root = createRoot(container);
     const onSessionExit = vi.fn(async () => undefined);
+    const layout = createTerminalLayout(
+      node.id,
+      () => "22222222-2222-4222-8222-222222222222",
+    );
 
     await act(async () => {
       root.render(
@@ -198,6 +216,10 @@ describe("LoopWorkspace", () => {
           node={node}
           mailroomOwned
           commands={[]}
+          layout={layout}
+          onLayoutChange={() => undefined}
+          onClosePane={() => undefined}
+          onCloseTab={() => undefined}
           onBack={() => undefined}
           onSummarySeen={() => undefined}
           onExecuteCommand={() => undefined}
@@ -213,5 +235,82 @@ describe("LoopWorkspace", () => {
     await act(async () => {
       root.unmount();
     });
+  });
+
+  it("mounts node and shell panes with independent stable targets", async () => {
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    const ids = [
+      "22222222-2222-4222-8222-222222222222",
+      "33333333-3333-4333-8333-333333333333",
+    ];
+    let index = 0;
+
+    function Harness() {
+      const [layout, setLayout] = useState<TerminalLayout>(() =>
+        createTerminalLayout(node.id, () => ids[index++]),
+      );
+      return (
+        <LoopWorkspace
+          graph={graph}
+          node={node}
+          mailroomOwned
+          commands={[]}
+          layout={layout}
+          onLayoutChange={setLayout}
+          onClosePane={(tabId: string, surface: TerminalSurface) =>
+            setLayout((current) => closePane(current, tabId, surface.id))
+          }
+          onCloseTab={() => undefined}
+          onBack={() => undefined}
+          onSummarySeen={() => undefined}
+          onExecuteCommand={() => undefined}
+          onSessionExit={async () => undefined}
+        />
+      );
+    }
+
+    vi.stubGlobal("crypto", {
+      randomUUID: () => ids[index++],
+    });
+    await act(async () => {
+      root.render(<Harness />);
+    });
+    await act(async () => {
+      (
+        Array.from(container.querySelectorAll("button")).find(
+          (button) => button.textContent === "Split right",
+        ) as HTMLButtonElement
+      ).click();
+    });
+
+    expect(container.querySelectorAll(".terminal-pane")).toHaveLength(2);
+    expect(
+      Array.from(
+        container.querySelectorAll<HTMLElement>(".terminal-pane-position"),
+      ).map((pane) => pane.style.getPropertyValue("--pane-width")),
+    ).toEqual(["50%", "50%"]);
+    expect(bridge.openTerminal).toHaveBeenCalledWith(
+      { kind: "node", nodeId: node.id },
+      112,
+      24,
+      expect.any(Object),
+    );
+    expect(bridge.openTerminal).toHaveBeenCalledWith(
+      {
+        kind: "shell",
+        surfaceId: ids[1],
+        workingDirectory: graph.project.path,
+      },
+      112,
+      24,
+      expect.any(Object),
+    );
+
+    await act(async () => {
+      root.unmount();
+    });
+    expect(bridge.close).toHaveBeenCalledTimes(2);
   });
 });
