@@ -73,7 +73,7 @@ struct OrchestratorClientTests {
     try await client.send(.listRecentProjects)
 
     let announce = try #require(await daemon.nextCommand())
-    #expect(announce == .announce(capabilities: [ClientCapability.nodesChanged.rawValue]))
+    #expect(announce == completeCapabilityAnnouncement)
     let command = try #require(await daemon.nextCommand())
     #expect(command == .listRecentProjects)
 
@@ -136,7 +136,7 @@ struct OrchestratorClientTests {
     async let received = firstEvent(of: events)
     try await client.send(.listRecentProjects)
     let announce = try #require(await daemon.nextCommand())
-    #expect(announce == .announce(capabilities: [ClientCapability.nodesChanged.rawValue]))
+    #expect(announce == completeCapabilityAnnouncement)
     let opening = try #require(await daemon.nextCommand())
     #expect(opening == .listRecentProjects)
 
@@ -144,15 +144,21 @@ struct OrchestratorClientTests {
     daemon.closeConnection(at: 0)
 
     let reannounce = try #require(await daemon.nextCommand(onConnection: 1))
-    #expect(reannounce == .announce(capabilities: [ClientCapability.nodesChanged.rawValue]))
+    #expect(reannounce == completeCapabilityAnnouncement)
     let rejoin = try #require(await daemon.nextCommand(onConnection: 1))
     #expect(rejoin == .restoreOpenProjects)
     let joinGlobal = try #require(await daemon.nextCommand(onConnection: 1))
     #expect(joinGlobal == .openGlobalGraph)
 
     // And it's a live subscription, not merely an open socket.
-    try daemon.reply(.errorOccurred("after reconnect"), onConnection: 1)
-    #expect(await received == .errorOccurred("after reconnect"))
+    let settings = GraphcodeSettingsSnapshot(
+      settings: GraphcodeSettings(daemonHeartbeatEnabled: true),
+      revision: "after-reconnect",
+      exists: true,
+      supportDirectory: "/tmp",
+      filePath: "/tmp/settings.json")
+    try daemon.reply(.settingsChanged(settings), onConnection: 1)
+    #expect(await received == .settingsChanged(settings))
   }
 
   @Test
@@ -167,7 +173,7 @@ struct OrchestratorClientTests {
     try await client.send(.listRecentProjects)
     #expect(
       await daemon.nextCommand()
-        == .announce(capabilities: [ClientCapability.nodesChanged.rawValue]))
+        == completeCapabilityAnnouncement)
     #expect(await daemon.nextCommand() == .listRecentProjects)
 
     daemon.closeConnection(at: 0)
@@ -177,7 +183,7 @@ struct OrchestratorClientTests {
 
     #expect(
       await daemon.nextCommand(onConnection: 1)
-        == .announce(capabilities: [ClientCapability.nodesChanged.rawValue]))
+        == completeCapabilityAnnouncement)
     #expect(await daemon.nextCommand(onConnection: 1) == .restoreOpenProjects)
     #expect(await daemon.nextCommand(onConnection: 1) == .openGlobalGraph)
     #expect(
@@ -236,7 +242,7 @@ struct OrchestratorClientTests {
     try await client.send(.listRecentProjects)
     #expect(
       await daemon.nextCommand()
-        == .announce(capabilities: [ClientCapability.nodesChanged.rawValue]))
+        == completeCapabilityAnnouncement)
     _ = try #require(await daemon.nextCommand())
 
     try daemon.replyRaw(Data(#"{"somethingNewer":{"_0":42}}"#.utf8))
@@ -257,6 +263,13 @@ struct OrchestratorClientTests {
   private func firstEvent(of events: AsyncStream<DaemonEvent>) async -> DaemonEvent? {
     for await event in events { return event }
     return nil
+  }
+
+  private var completeCapabilityAnnouncement: DaemonCommand {
+    .announce(capabilities: [
+      ClientCapability.nodesChanged.rawValue,
+      ClientCapability.settingsChanged.rawValue,
+    ])
   }
 }
 

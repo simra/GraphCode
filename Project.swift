@@ -127,7 +127,10 @@ let project = Project(
             buildableFolders: [
                 "graphcode/Tests"
             ],
-            dependencies: [.target(name: "graphcode")]
+            dependencies: [
+                .target(name: "graphcode"),
+                .target(name: "graphcoded"),
+            ]
         ),
         // `graphcode` the CLI (docs/03-architecture.md#cli-graphcode) — a separate
         // product from `graphcode` the app, talking to `graphcoded` over the same socket

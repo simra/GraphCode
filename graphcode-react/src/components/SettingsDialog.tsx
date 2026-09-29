@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   loadSettings,
   listenForSettingsChanges,
@@ -12,34 +12,53 @@ export function SettingsDialog({ onClose }: { onClose(): void }) {
   const [heartbeatEnabled, setHeartbeatEnabled] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string>();
+  const snapshotGeneration = useRef(0);
 
-  const reload = () => {
+  const applySnapshot = useCallback((snapshot: SettingsSnapshot) => {
+    setSettings(snapshot);
+    setHeartbeatEnabled(snapshot.daemonHeartbeatEnabled);
+  }, []);
+
+  const reload = useCallback(() => {
+    const startedAt = snapshotGeneration.current;
     setError(undefined);
     void loadSettings()
       .then((loaded) => {
-        setSettings(loaded);
-        setHeartbeatEnabled(loaded.daemonHeartbeatEnabled);
+        if (snapshotGeneration.current !== startedAt) return;
+        snapshotGeneration.current += 1;
+        applySnapshot(loaded);
       })
-      .catch((caught: unknown) =>
-        setError(caught instanceof Error ? caught.message : String(caught)),
-      );
-  };
+      .catch((caught: unknown) => {
+        if (snapshotGeneration.current !== startedAt) return;
+        setError(caught instanceof Error ? caught.message : String(caught));
+      });
+  }, [applySnapshot]);
 
   useEffect(() => {
-    reload();
+    let active = true;
     let unlisten: (() => void) | undefined;
     void listenForSettingsChanges((snapshot) => {
-      setSettings(snapshot);
-      setHeartbeatEnabled(snapshot.daemonHeartbeatEnabled);
+      if (!active) return;
+      snapshotGeneration.current += 1;
+      applySnapshot(snapshot);
       setError(undefined);
     }).then((stop) => {
+      if (!active) {
+        stop();
+        return;
+      }
       unlisten = stop;
+      reload();
     });
-    return () => unlisten?.();
-  }, []);
+    return () => {
+      active = false;
+      unlisten?.();
+    };
+  }, [applySnapshot, reload]);
 
   const save = async () => {
     if (!settings) return;
+    const startedAt = snapshotGeneration.current;
     setSaving(true);
     setError(undefined);
     try {
@@ -48,10 +67,14 @@ export function SettingsDialog({ onClose }: { onClose(): void }) {
         settings.settings,
         heartbeatEnabled,
       );
-      setSettings(saved);
-      setHeartbeatEnabled(saved.daemonHeartbeatEnabled);
+      if (snapshotGeneration.current === startedAt) {
+        snapshotGeneration.current += 1;
+        applySnapshot(saved);
+      }
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : String(caught));
+      if (snapshotGeneration.current === startedAt) {
+        setError(caught instanceof Error ? caught.message : String(caught));
+      }
     } finally {
       setSaving(false);
     }

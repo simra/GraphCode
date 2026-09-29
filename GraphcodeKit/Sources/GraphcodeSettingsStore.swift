@@ -59,7 +59,15 @@ public enum GraphcodeSettingsStore {
     var object = try decodeObject(from: document.data, exists: document.exists)
     let canonical = try encodedObject(settings)
     for (key, value) in canonical {
-      object[key] = value
+      if key == "worktreePolicies",
+        let existingPolicies = object[key] as? [String: Any],
+        let canonicalPolicies = value as? [String: Any]
+      {
+        object[key] = mergeDictionaryEntries(
+          existing: existingPolicies, canonical: canonicalPolicies)
+      } else {
+        object[key] = value
+      }
     }
     let data: Data
     do {
@@ -168,6 +176,41 @@ public enum GraphcodeSettingsStore {
     } catch {
       throw StoreError.encodingFailed(error.localizedDescription)
     }
+  }
+
+  /// Dictionary membership comes from the newly encoded settings so deleting a known
+  /// entry stays a deletion. Within retained entries, canonical known fields replace
+  /// their old values while fields written by a newer GraphCode survive.
+  private static func mergeDictionaryEntries(
+    existing: [String: Any], canonical: [String: Any]
+  ) -> [String: Any] {
+    var merged: [String: Any] = [:]
+    for (key, canonicalValue) in canonical {
+      guard let existingObject = existing[key] as? [String: Any],
+        let canonicalObject = canonicalValue as? [String: Any]
+      else {
+        merged[key] = canonicalValue
+        continue
+      }
+      merged[key] = mergeObjects(existing: existingObject, canonical: canonicalObject)
+    }
+    return merged
+  }
+
+  private static func mergeObjects(
+    existing: [String: Any], canonical: [String: Any]
+  ) -> [String: Any] {
+    var merged = existing
+    for (key, value) in canonical {
+      if let existingObject = existing[key] as? [String: Any],
+        let canonicalObject = value as? [String: Any]
+      {
+        merged[key] = mergeObjects(existing: existingObject, canonical: canonicalObject)
+      } else {
+        merged[key] = value
+      }
+    }
+    return merged
   }
 
   private static func revision(of data: Data) -> String {

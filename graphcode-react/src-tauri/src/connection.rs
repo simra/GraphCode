@@ -10,7 +10,7 @@ use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter};
 use thiserror::Error;
 use tokio::{
-    io::WriteHalf,
+    io::AsyncWrite,
     sync::{mpsc, oneshot},
     time::{interval, sleep, Instant},
 };
@@ -370,11 +370,13 @@ fn replay_rejection(frame: &Value) -> Option<String> {
     })
 }
 
-async fn send_bootstrap_requests(
-    writer: &mut WriteHalf<BoxedDaemonStream>,
-) -> Result<(), protocol::ProtocolError> {
+async fn send_bootstrap_requests<W>(writer: &mut W) -> Result<(), protocol::ProtocolError>
+where
+    W: AsyncWrite + Unpin,
+{
     for command in [
         json!({ "announce": { "capabilities": ["nodesChanged", "settingsChanged"] } }),
+        json!({ "loadSettings": {} }),
         json!({ "restoreOpenProjects": {} }),
         json!({ "openGlobalGraph": {} }),
         json!({ "listRecentProjects": {} }),
@@ -387,8 +389,17 @@ async fn send_bootstrap_requests(
 }
 
 fn route_frame(app: &AppHandle, frame: Value, pending: &mut HashMap<Uuid, PendingRequest>) {
+    route_frame_to(frame, pending, |frame| {
+        let _ = app.emit("daemon://frame", frame);
+    });
+}
+
+fn route_frame_to<F>(frame: Value, pending: &mut HashMap<Uuid, PendingRequest>, emit: F)
+where
+    F: FnOnce(Value),
+{
     resolve_pending(&frame, pending);
-    let _ = app.emit("daemon://frame", frame);
+    emit(frame);
 }
 
 fn resolve_pending(frame: &Value, pending: &mut HashMap<Uuid, PendingRequest>) {
@@ -581,6 +592,49 @@ mod tests {
             Err(ConnectionError::Daemon { code, message })
                 if code == "invalidCommand" && message == "not allowed"
         ));
+    }
+
+    #[tokio::test]
+    async fn reconnect_loads_and_publishes_settings_changed_while_offline() {
+        let mut published_revisions = Vec::new();
+        for revision in ["before-offline", "changed-while-offline"] {
+            let (mut client, mut daemon) = tokio::io::duplex(8 * 1024);
+            let client_task =
+                tokio::spawn(async move { send_bootstrap_requests(&mut client).await.unwrap() });
+            let mut load_request = None;
+            for _ in 0..6 {
+                let frame = read_frame(&mut daemon).await.unwrap();
+                if frame.pointer("/command/loadSettings").is_some() {
+                    load_request = frame.get("requestID").cloned();
+                }
+            }
+            client_task.await.unwrap();
+            let response = json!({
+                "version": 2,
+                "kind": "response",
+                "requestID": load_request.unwrap(),
+                "event": {
+                    "settingsChanged": {
+                        "_0": {
+                            "revision": revision
+                        }
+                    }
+                }
+            });
+            route_frame_to(response, &mut HashMap::new(), |frame| {
+                published_revisions.push(
+                    frame
+                        .pointer("/event/settingsChanged/_0/revision")
+                        .and_then(Value::as_str)
+                        .unwrap()
+                        .to_owned(),
+                );
+            });
+        }
+        assert_eq!(
+            published_revisions,
+            ["before-offline", "changed-while-offline"]
+        );
     }
 
     #[test]

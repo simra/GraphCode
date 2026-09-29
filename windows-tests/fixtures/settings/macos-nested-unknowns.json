@@ -1,0 +1,20 @@
+{
+  "daemonHeartbeatEnabled": false,
+  "worktreePolicies": {
+    "/tmp/keep": {
+      "futurePolicyMode": "strict",
+      "futureThresholds": {
+        "days": 3
+      },
+      "noticeCount": 8,
+      "noticeSizeBytes": 2147483648,
+      "onResolveLanded": "ask"
+    },
+    "/tmp/delete": {
+      "futurePolicyMode": "archive",
+      "noticeCount": 12,
+      "noticeSizeBytes": 1073741824,
+      "onResolveLanded": "keep"
+    }
+  }
+}

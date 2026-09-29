@@ -121,6 +121,29 @@ public struct DaemonSocketClient: Sendable {
       self.timeout = max(0, timeout)
       connection = UnixSocketConnection(fileDescriptor: fileDescriptor, readTimeout: timeout)
     }
+
+    public init(
+      socketPath: URL,
+      timeout: TimeInterval = DaemonSocketClient.defaultTimeout,
+      dialAttempts: Int = DaemonSocketClient.defaultDialAttempts
+    ) throws {
+      let requestedTimeout = max(0, timeout)
+      self.timeout = requestedTimeout
+      let budget = max(1, dialAttempts)
+      var descriptor: Int32?
+      for attempt in 0..<budget {
+        do {
+          descriptor = try Self.dial(path: socketPath.path)
+          break
+        } catch {
+          guard Self.isTransient(error), attempt < budget - 1 else { throw error }
+          Thread.sleep(
+            forTimeInterval: Self.dialBackoff[min(attempt, Self.dialBackoff.count - 1)])
+        }
+      }
+      guard let descriptor else { throw ClientError.daemonNotRunning }
+      connection = UnixSocketConnection(fileDescriptor: descriptor, readTimeout: requestedTimeout)
+    }
   #endif
 
   /// Only failures that mean "not accepting connections *yet*". A permissions failure or a
@@ -168,7 +191,10 @@ public struct DaemonSocketClient: Sendable {
     }
   #else
     private static func dial() throws -> Int32 {
-      let path = DaemonSocketPath.url.path
+      try dial(path: DaemonSocketPath.url.path)
+    }
+
+    private static func dial(path: String) throws -> Int32 {
       guard FileManager.default.fileExists(atPath: path) else {
         throw ClientError.daemonNotRunning
       }

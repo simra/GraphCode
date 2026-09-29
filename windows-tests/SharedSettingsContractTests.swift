@@ -74,6 +74,27 @@ final class SharedSettingsContractTests: XCTestCase {
     XCTAssertEqual(try GraphcodeSettingsStore.snapshot(from: url).settings, first)
   }
 
+  func testRetainedPoliciesPreserveNestedUnknownFieldsAndDeletedPoliciesStayDeleted() throws {
+    let url = try temporarySettings(copying: fixture("macos-nested-unknowns"))
+    let loaded = try GraphcodeSettingsStore.snapshot(from: url)
+    var edited = loaded.settings
+    edited.daemonHeartbeatEnabled = true
+    edited.worktreePolicies["/tmp/keep"]?.noticeCount = 21
+    edited.worktreePolicies.removeValue(forKey: "/tmp/delete")
+
+    _ = try GraphcodeSettingsStore.update(
+      edited, expectedRevision: loaded.revision, at: url)
+
+    let saved = try XCTUnwrap(
+      JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any])
+    let policies = try XCTUnwrap(saved["worktreePolicies"] as? [String: Any])
+    let kept = try XCTUnwrap(policies["/tmp/keep"] as? [String: Any])
+    XCTAssertEqual(kept["futurePolicyMode"] as? String, "strict")
+    XCTAssertEqual((kept["futureThresholds"] as? [String: Any])?["days"] as? Int, 3)
+    XCTAssertEqual(kept["noticeCount"] as? Int, 21)
+    XCTAssertNil(policies["/tmp/delete"])
+  }
+
   func testCorruptFileIsRecoverableAndNeverSilentlyReset() throws {
     let url = try temporarySettings()
     let corrupt = Data("{ definitely not settings".utf8)

@@ -440,7 +440,10 @@ private actor AppDaemonConnection {
         let connection = try await connectAsync()
         do {
           let announce = try JSONEncoder().encode(
-            DaemonCommand.announce(capabilities: [ClientCapability.nodesChanged.rawValue]))
+            DaemonCommand.announce(capabilities: [
+              ClientCapability.nodesChanged.rawValue,
+              ClientCapability.settingsChanged.rawValue,
+            ]))
           try await connection.sendFrame(announce)
           return connection
         } catch {

@@ -33,6 +33,23 @@ const snapshot = {
   daemonHeartbeatEnabled: false,
 };
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((complete) => {
+    resolve = complete;
+  });
+  return { promise, resolve };
+}
+
+function changedSnapshot(revision: string, enabled: boolean) {
+  return {
+    ...snapshot,
+    revision,
+    daemonHeartbeatEnabled: enabled,
+    settings: { daemonHeartbeatEnabled: enabled },
+  };
+}
+
 beforeEach(() => {
   settingsBridge.load.mockReset();
   settingsBridge.load.mockResolvedValue(snapshot);
@@ -80,5 +97,90 @@ describe("SettingsDialog", () => {
       true,
     );
     expect(container.textContent).toContain("without a daemon restart");
+  });
+
+  it("installs the listener before starting the initial load", async () => {
+    const order: string[] = [];
+    settingsBridge.listen.mockImplementation(async () => {
+      order.push("listen");
+      return () => undefined;
+    });
+    settingsBridge.load.mockImplementation(async () => {
+      order.push("load");
+      return snapshot;
+    });
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+
+    await act(async () => {
+      root.render(<SettingsDialog onClose={() => undefined} />);
+    });
+
+    expect(order).toEqual(["listen", "load"]);
+  });
+
+  it("does not let a delayed load overwrite a newer settings event", async () => {
+    const pendingLoad = deferred<typeof snapshot>();
+    let publish!: (value: typeof snapshot) => void;
+    settingsBridge.load.mockReturnValue(pendingLoad.promise);
+    settingsBridge.listen.mockImplementation(
+      async (listener: (value: typeof snapshot) => void) => {
+        publish = listener;
+        return () => undefined;
+      },
+    );
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+
+    await act(async () => {
+      root.render(<SettingsDialog onClose={() => undefined} />);
+    });
+    await act(async () => {
+      publish(changedSnapshot("event-revision", true));
+      pendingLoad.resolve(snapshot);
+      await pendingLoad.promise;
+    });
+
+    const checkbox = container.querySelector<HTMLInputElement>(
+      'input[type="checkbox"]',
+    )!;
+    expect(checkbox.checked).toBe(true);
+    expect(container.textContent).toContain("settings.json");
+  });
+
+  it("does not let a delayed save overwrite a newer settings event", async () => {
+    const pendingSave = deferred<typeof snapshot>();
+    let publish!: (value: typeof snapshot) => void;
+    settingsBridge.save.mockReturnValue(pendingSave.promise);
+    settingsBridge.listen.mockImplementation(
+      async (listener: (value: typeof snapshot) => void) => {
+        publish = listener;
+        return () => undefined;
+      },
+    );
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    await act(async () => {
+      root.render(<SettingsDialog onClose={() => undefined} />);
+    });
+    const checkbox = container.querySelector<HTMLInputElement>(
+      'input[type="checkbox"]',
+    )!;
+    await act(async () => checkbox.click());
+    const save = Array.from(container.querySelectorAll("button")).find(
+      (button) => button.textContent === "Save",
+    )!;
+    await act(async () => save.click());
+
+    await act(async () => {
+      publish(changedSnapshot("event-revision", false));
+      pendingSave.resolve(changedSnapshot("save-revision", true));
+      await pendingSave.promise;
+    });
+
+    expect(checkbox.checked).toBe(false);
   });
 });

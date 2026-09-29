@@ -66,4 +66,47 @@ struct SettingsMailroomTests {
         == SettingsModel.MailroomResolution(
           enabled: false, fileNeedsWrite: true))
   }
+
+  @MainActor
+  @Test
+  func applyingADaemonSnapshotDoesNotRecordAnExplicitChoice() {
+    let suiteName = "settings-mailroom-\(UUID().uuidString)"
+    let defaults = UserDefaults(suiteName: suiteName)!
+    defer { defaults.removePersistentDomain(forName: suiteName) }
+    let model = SettingsModel(
+      loaded: GraphcodeSettings(mailroomEnabled: true),
+      userDefaults: defaults,
+      rampedOn: true,
+      startsReload: false,
+      savesChanges: false)
+    let snapshot = GraphcodeSettingsSnapshot(
+      settings: GraphcodeSettings(mailroomEnabled: false),
+      revision: "daemon-revision",
+      exists: true,
+      supportDirectory: "/tmp",
+      filePath: "/tmp/settings.json")
+
+    model.apply(snapshot)
+
+    #expect(model.mailroomEnabled == false)
+    #expect(defaults.object(forKey: SettingsModel.mailroomChoiceDefaultsKey) == nil)
+  }
+
+  @MainActor
+  @Test
+  func aUserMailroomToggleRecordsAnExplicitChoice() {
+    let suiteName = "settings-mailroom-\(UUID().uuidString)"
+    let defaults = UserDefaults(suiteName: suiteName)!
+    defer { defaults.removePersistentDomain(forName: suiteName) }
+    let model = SettingsModel(
+      loaded: GraphcodeSettings(mailroomEnabled: true),
+      userDefaults: defaults,
+      rampedOn: true,
+      startsReload: false,
+      savesChanges: false)
+
+    model.mailroomEnabled = false
+
+    #expect(defaults.object(forKey: SettingsModel.mailroomChoiceDefaultsKey) as? Bool == false)
+  }
 }

@@ -489,9 +489,12 @@ import GraphcodeKit
   signal(SIGPIPE, SIG_IGN)
 
   // Before the shutdown handlers below, which flush its writer on the way out.
+  let replayStore = DaemonReplayStore(capacity: 128)
   let registry = ProjectRegistry(
     persistenceDirectory: supportDirectory,
+    replayStore: replayStore,
     reapCondemnedSessions: true)
+  let replayCleanupTask = replayStore.startCleanup()
 
   // Termination is handled on the main queue, not in signal context (#167). The handlers
   // this replaces called `exit(0)` from inside the signal handler itself, and `exit` is
@@ -554,21 +557,6 @@ import GraphcodeKit
 
   let stalenessTimer = makeStalenessTimer()
 
-  /// Bridges a blocking socket read onto a background queue so the `Task` awaiting it
-  /// never blocks Swift concurrency's cooperative thread pool — the whole connection
-  /// handler below is otherwise just async/await hops (this, plus actor calls).
-  @Sendable func readFrameAsync(from fileDescriptor: Int32) async throws -> Data {
-    try await withCheckedThrowingContinuation { continuation in
-      DispatchQueue.global().async {
-        do {
-          continuation.resume(returning: try FramedMessageIO.readFrame(from: fileDescriptor))
-        } catch {
-          continuation.resume(throwing: error)
-        }
-      }
-    }
-  }
-
   /// A counter safe to bump from the accept loop's thread while connection tasks read it.
   final class ManagedAtomic: @unchecked Sendable {
     private var value: Int
@@ -592,8 +580,13 @@ import GraphcodeKit
       let connection = connectionCounter.next()
       let peer = SocketPeer.pid(of: fileDescriptor)
       let connected = Date()
-      // `addConnection` opens this connection's outbound channel as it registers it.
-      await registry.addConnection(id: connectionID, fileDescriptor: fileDescriptor)
+      let transport = UnixSocketConnection(
+        id: connectionID,
+        fileDescriptor: fileDescriptor,
+        endpoint: .unixSocket(socketURL),
+        bufferedWrites: true)
+      var channel: DaemonConnectionChannel?
+      var initialFrameData: Data?
       // `peer` is the client's pid: what a `graphcode` invocation prints when it times
       // out, so its complaint and these lines can be matched up with no id on the wire.
       DaemonLog.shared.record(
@@ -602,73 +595,165 @@ import GraphcodeKit
           ("conn", String(connection)), ("id", connectionID.tag), ("fd", String(fileDescriptor)),
           ("peer", peer.map(String.init) ?? "?"),
         ])
-      var sequence = 0
       var requests = 0
-      while true {
-        let data: Data
-        do {
-          data = try await readFrameAsync(from: fileDescriptor)
-        } catch {
-          break
+      defer {
+        let hadChannel = channel != nil
+        Task {
+          await registry.removeConnection(connectionID)
+          if !hadChannel { try? await transport.close() }
         }
-        sequence += 1
-        let received = Date()
-        let request = DaemonRequestContext.Request(connection: connection, sequence: sequence)
-        do {
-          let command = try JSONDecoder().decode(DaemonCommand.self, from: data)
-          let decoded = Date()
-          // Logged on receipt, before anything is handled: a request that hangs is
-          // exactly the one worth a line, and a line written on completion would never
-          // come. Never the payload — a `graphCommand.memoNode` is logged as exactly that.
-          DaemonLog.shared.record(
-            "request",
-            [
-              ("conn", String(connection)), ("seq", String(sequence)),
-              ("kind", command.kindName), ("bytes", String(data.count)),
-              ("decode_ms", DaemonLog.milliseconds(decoded.timeIntervalSince(received))),
-            ])
-          await DaemonRequestContext.$current.withValue(request) {
-            await registry.handle(command, connectionID: connectionID)
-          }
+        DaemonLog.shared.record(
+          "disconnect",
+          [
+            ("conn", String(connection)), ("fd", String(fileDescriptor)),
+            ("requests", String(requests)),
+            ("lifetime_ms", DaemonLog.milliseconds(Date().timeIntervalSince(connected))),
+          ])
+      }
+
+      do {
+        let firstData = try await transport.receiveFrameWithPostHandshakeDeadline()
+        initialFrameData = firstData
+        switch try DaemonWireProtocol.decodeClientFrame(firstData) {
+        case .v1(let command):
+          let v1Channel = DaemonConnectionChannel(connection: transport, mode: .v1)
+          channel = v1Channel
+          await registry.addConnection(id: connectionID, channel: v1Channel)
+          await registry.handle(command, connectionID: connectionID)
           requests += 1
-          DaemonLog.shared.record(
-            "handled",
-            [
-              ("conn", String(connection)), ("seq", String(sequence)),
-              ("kind", command.kindName),
-              ("handle_ms", DaemonLog.milliseconds(Date().timeIntervalSince(decoded))),
-            ])
-        } catch {
-          DaemonLog.shared.record(
-            "request",
-            [
-              ("conn", String(connection)), ("seq", String(sequence)), ("kind", "undecodable"),
-              ("bytes", String(data.count)),
-            ])
-          // A frame that read fine but didn't decode is version skew, not a dead socket:
-          // a newer CLI sent a command this daemon predates. Dropping the connection here
-          // failed *silently* — the client just saw a hang-up — so answer instead and
-          // keep serving the commands this daemon does understand.
-          let event = DaemonEvent.errorOccurred(
-            "unrecognized command — graphcoded may be older than the client that sent it")
-          if let encoded = try? JSONEncoder().encode(event) {
-            OutboundChannels.send(encoded, to: fileDescriptor)
+
+        case .v2(let hello):
+          guard hello.kind == .hello else {
+            try await transport.sendFrame(
+              JSONEncoder().encode(
+                DaemonWireEnvelope.error(
+                  id: nil, code: DaemonWireErrorCode.expectedHello.rawValue,
+                  message: "the first v2 frame must be hello")))
+            return
           }
+          let selectedVersion: Int
+          do {
+            selectedVersion = try DaemonWireProtocol.negotiatedVersion(for: hello)
+          } catch DaemonWireProtocol.NegotiationError.noSupportedVersion {
+            try await transport.sendFrame(
+              JSONEncoder().encode(
+                DaemonWireEnvelope.error(
+                  id: nil, code: DaemonWireErrorCode.unsupportedVersion.rawValue,
+                  message: "no mutually supported daemon protocol version")))
+            return
+          }
+          let mode: DaemonProtocolMode = selectedVersion == 2 ? .v2(version: 2) : .v1
+          let v2Channel = DaemonConnectionChannel(
+            connection: transport,
+            mode: mode,
+            clientID: hello.clientID ?? connectionID,
+            subscription: hello.subscription,
+            replayStore: replayStore)
+          channel = v2Channel
+          await registry.addConnection(id: connectionID, channel: v2Channel)
+          try await v2Channel.sendHelloResponse(selectedVersion: selectedVersion)
+          if selectedVersion == 2, let resumeFrom = hello.resumeFrom {
+            do {
+              try await v2Channel.replay(after: resumeFrom)
+            } catch DaemonConnectionChannelError.replayUnavailable {
+              try await v2Channel.sendError(
+                code: .replayUnavailable,
+                message: "requested replay history is unavailable")
+            } catch DaemonConnectionChannelError.cursorOutsideWindow {
+              try await v2Channel.sendError(
+                code: .cursorOutsideWindow,
+                message: "requested cursor is beyond the retained event history")
+            }
+          }
+        }
+
+        guard let channel else { return }
+        var sequence = 0
+        while true {
+          let data = try await transport.receiveFrameWithPostHandshakeDeadline()
+          sequence += 1
+          let received = Date()
+          do {
+            switch try DaemonWireProtocol.decodeClientFrame(data) {
+            case .v1(let command):
+              guard channel.mode == .v1 else {
+                try await channel.sendError(
+                  code: .malformedEnvelope,
+                  message: "v2 connections must send request envelopes")
+                continue
+              }
+              let decoded = Date()
+              DaemonLog.shared.record(
+                "request",
+                [
+                  ("conn", String(connection)), ("seq", String(sequence)),
+                  ("kind", command.kindName), ("bytes", String(data.count)),
+                  ("decode_ms", DaemonLog.milliseconds(decoded.timeIntervalSince(received))),
+                ])
+              let request = DaemonRequestContext.Request(
+                connection: connection, sequence: sequence)
+              await DaemonRequestContext.$current.withValue(request) {
+                await registry.handle(command, connectionID: connectionID)
+              }
+              requests += 1
+              DaemonLog.shared.record(
+                "handled",
+                [
+                  ("conn", String(connection)), ("seq", String(sequence)),
+                  ("kind", command.kindName),
+                  ("handle_ms", DaemonLog.milliseconds(Date().timeIntervalSince(decoded))),
+                ])
+
+            case .v2(let request):
+              guard case .v2 = channel.mode, request.kind == .request,
+                let requestID = request.requestID, let command = request.command
+              else {
+                try await channel.sendError(
+                  requestID: DaemonWireProtocol.requestIDIfPresent(in: data),
+                  code: .malformedEnvelope,
+                  message: "expected a v2 request envelope")
+                continue
+              }
+              let result = await registry.apply(command, connectionID: connectionID)
+              requests += 1
+              guard let result else {
+                try await channel.sendError(
+                  requestID: requestID,
+                  code: .connectionClosed,
+                  message: "connection is no longer registered")
+                continue
+              }
+              if let error = result.error {
+                try await channel.sendError(
+                  requestID: requestID, code: result.errorCode ?? .requestFailed, message: error)
+              } else if let response = result.response {
+                try await channel.sendResponse(requestID: requestID, event: response)
+              } else if result.succeeded {
+                try await channel.sendSuccess(requestID: requestID)
+              } else {
+                try await channel.sendError(
+                  requestID: requestID,
+                  code: .requestFailed,
+                  message: "request could not be applied")
+              }
+            }
+          } catch {
+            try await channel.sendError(
+              requestID: DaemonWireProtocol.requestIDIfPresent(in: data),
+              code: .malformedEnvelope,
+              message: "\(error)")
+          }
+        }
+      } catch {
+        if let channel {
+          try? await channel.sendError(code: .transportFailure, message: "\(error)")
+        } else if let initialFrameData,
+          let errorFrame = try? DaemonWireProtocol.initialErrorFrame(
+            for: initialFrameData, message: "\(error)")
+        {
+          try? await transport.sendFrame(errorFrame)
         }
       }
-      await registry.removeConnection(connectionID)
-      // The channel owns the descriptor now: closing it here would free a number the
-      // kernel can hand straight to the next `accept` while a write is still in flight on
-      // it. `close` tears the socket down, which is also what unblocks a writer parked on a
-      // peer that stopped reading.
-      OutboundChannels.close(fileDescriptor)
-      DaemonLog.shared.record(
-        "disconnect",
-        [
-          ("conn", String(connection)), ("fd", String(fileDescriptor)),
-          ("requests", String(requests)),
-          ("lifetime_ms", DaemonLog.milliseconds(Date().timeIntervalSince(connected))),
-        ])
     }
   }
 

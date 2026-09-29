@@ -680,13 +680,6 @@ extension AppFeature {
       }
       .cancellable(id: CancelID.daemonSubscription),
       .run { _ in try? await orchestratorClient.send(.listRecentProjects) },
-      .run { _ in
-        try? await orchestratorClient.send(
-          .announce(capabilities: [
-            ClientCapability.nodesChanged.rawValue,
-            ClientCapability.settingsChanged.rawValue,
-          ]))
-      },
       // Without this the sidebar comes up empty on every launch even though the
       // daemon has been persisting every project all along — the app just never
       // asked for them back. Each restored project arrives as an ordinary

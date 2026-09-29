@@ -24,13 +24,15 @@ final class SettingsModel {
   static let mailroomChoiceDefaultsKey = "mailroomChoice"
 
   @ObservationIgnored private let daemonWriter = SettingsDaemonWriter()
+  @ObservationIgnored private let userDefaults: UserDefaults
+  @ObservationIgnored private let savesChanges: Bool
   @ObservationIgnored private var applyingSnapshot = false
 
   private(set) var lastSaveError: String?
 
   var settings: GraphcodeSettings {
     didSet {
-      guard settings != oldValue, !applyingSnapshot else { return }
+      guard settings != oldValue, !applyingSnapshot, savesChanges else { return }
       save(settings)
     }
   }
@@ -51,18 +53,26 @@ final class SettingsModel {
   /// outranks the ramp for good.
   var mailroomEnabled: Bool {
     didSet {
-      UserDefaults.standard.set(mailroomEnabled, forKey: Self.mailroomChoiceDefaultsKey)
+      guard mailroomEnabled != oldValue, !applyingSnapshot else { return }
+      userDefaults.set(mailroomEnabled, forKey: Self.mailroomChoiceDefaultsKey)
       settings.mailroomEnabled = mailroomEnabled
     }
   }
 
-  private init() {
-    let loaded = GraphcodeSettingsStore.load()
+  init(
+    loaded: GraphcodeSettings = GraphcodeSettingsStore.load(),
+    userDefaults: UserDefaults = .standard,
+    rampedOn: Bool = FeatureRamps.isEnabled(.mailroom),
+    startsReload: Bool = true,
+    savesChanges: Bool = true
+  ) {
+    self.userDefaults = userDefaults
+    self.savesChanges = savesChanges
     let mailroom = Self.resolvesMailroom(
       loaded: loaded.mailroomEnabled,
       explicitChoice:
-        UserDefaults.standard.object(forKey: Self.mailroomChoiceDefaultsKey) as? Bool,
-      rampedOn: FeatureRamps.isEnabled(.mailroom))
+        userDefaults.object(forKey: Self.mailroomChoiceDefaultsKey) as? Bool,
+      rampedOn: rampedOn)
     var booted = loaded
     booted.mailroomEnabled = mailroom.enabled
     settings = booted
@@ -72,9 +82,11 @@ final class SettingsModel {
     betaUpdates =
       booted.betaUpdates
       || UpdateChannel.channel(
-        for: version, override: UserDefaults.standard.string(forKey: "updateChannel"))
+        for: version, override: userDefaults.string(forKey: "updateChannel"))
         == .beta
-    Task { await reload() }
+    if startsReload {
+      Task { await reload() }
+    }
   }
 
   func apply(_ snapshot: GraphcodeSettingsSnapshot) {
@@ -97,7 +109,7 @@ final class SettingsModel {
       let mailroom = Self.resolvesMailroom(
         loaded: loaded.settings.mailroomEnabled,
         explicitChoice:
-          UserDefaults.standard.object(forKey: Self.mailroomChoiceDefaultsKey) as? Bool,
+          userDefaults.object(forKey: Self.mailroomChoiceDefaultsKey) as? Bool,
         rampedOn: FeatureRamps.isEnabled(.mailroom))
       guard mailroom.fileNeedsWrite else {
         apply(loaded)
