@@ -171,6 +171,8 @@ function applyDaemonEvent(state: AppState, event: DaemonEvent): AppState {
         graphs: { ...state.graphs, [event.change.projectPath]: graph },
       };
     }
+    case "transcriptPage":
+      return state;
     case "quickChatsListed": {
       const selectedQuickChatId = event.chats.some(
         (chat) => chat.id === state.selectedQuickChatId,

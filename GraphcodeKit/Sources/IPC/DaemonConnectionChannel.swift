@@ -17,6 +17,14 @@ public enum DaemonWireErrorCode: String, Codable, Sendable {
   case settingsCorrupt
   case settingsUnavailable
   case settingsPayloadTooLarge
+  case transcriptUnauthorized
+  case transcriptMissing
+  case transcriptCorrupt
+  case transcriptOversized
+  case transcriptInvalidBounds
+  case transcriptInvalidCursor
+  case transcriptUnsupportedProvider
+  case transcriptTransportFailure
   case connectionClosed
   case transportFailure
 }
@@ -680,6 +688,8 @@ public actor DaemonConnectionChannel {
       return paths.contains(graph.project.path)
     case .mailbox(let projectPath, _), .nodesChanged(let projectPath, _, _):
       return paths.contains(projectPath)
+    case .transcriptPage:
+      return true
     case .recentProjectsListed:
       return true
     case .quickChatsListed, .quickChatChanged, .quickChatDeleted, .quickChatActivity:

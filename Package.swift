@@ -70,6 +70,7 @@ import PackageDescription
       "Sessions/SummaryBoardComposer.swift",
       "Sessions/SummaryModelWriter.swift",
       "Sessions/TranscriptFreshness.swift",
+      "Sessions/TranscriptRead.swift",
       "Sessions/WindowsPTYProcessSession.swift",
       "Sessions/ZmxSessionLauncher.swift",
       "Sessions/PresenceHooks.swift",

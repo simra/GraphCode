@@ -116,7 +116,7 @@ func openProject(_ projectPath: String) throws -> LoopGraph? {
   let opened = try client.waitForEvent {
     switch $0 {
     case .graphChanged, .errorOccurred: return true
-    case .recentProjectsListed, .mailbox, .nodesChanged, .quickChatsListed,
+    case .recentProjectsListed, .mailbox, .transcriptPage, .nodesChanged, .quickChatsListed,
       .quickChatChanged, .quickChatDeleted, .quickChatActivity, .settingsChanged:
       return false
     }

@@ -327,6 +327,9 @@ struct AppFeature {
           state.welcome.recentProjects = projects
           return .none
 
+        case .transcriptPage:
+          return .none
+
         case .graphChanged(let graph):
           // A broadcast means the daemon is alive and answering — whatever failure
           // banner was up (a dead-daemon Add Folder, say) is stale now.

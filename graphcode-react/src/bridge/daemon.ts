@@ -1,7 +1,8 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { decodeEnvelope } from "../protocol/decode";
-import type { DaemonWireEnvelope } from "../protocol/domain";
+import { transcriptCommand } from "../protocol/commands";
+import type { DaemonWireEnvelope, TranscriptPage } from "../protocol/domain";
 
 export interface DaemonConnectionStatus {
   phase: "connecting" | "connected" | "reconnecting" | "resyncing";
@@ -80,6 +81,25 @@ export async function sendDaemonCommand(
     throw new Error(`${envelope.error.code}: ${envelope.error.message}`);
   }
   return envelope;
+}
+
+export async function readTranscriptPage(
+  projectPath: string,
+  nodeID: string,
+  cursor: string | null = null,
+  maxEntries = 32,
+  maxBytes = 64 * 1024,
+): Promise<TranscriptPage> {
+  const envelope = await sendDaemonCommand(
+    transcriptCommand(projectPath, nodeID, cursor, maxEntries, maxBytes),
+  );
+  if (
+    envelope.kind !== "response" ||
+    envelope.event?.type !== "transcriptPage"
+  ) {
+    throw new Error("daemon returned no transcript page");
+  }
+  return envelope.event.page;
 }
 
 export async function acknowledgeDaemonSequence(

@@ -347,6 +347,32 @@ function singleAssociatedValue(payload: unknown): unknown {
   return payload;
 }
 
+const transcriptEntrySchema = z.object({
+  sourceOffset: z.number().int().nonnegative(),
+  timestamp: z.string().optional(),
+  kind: z.enum(["prompt", "assistant", "toolUse", "toolResult", "status"]),
+  text: z.string(),
+  toolName: z.string().optional(),
+  redactions: z.array(
+    z.enum([
+      "prompt",
+      "toolInput",
+      "toolResult",
+      "filesystemPath",
+      "secret",
+      "modelMetadata",
+    ]),
+  ),
+});
+
+const transcriptPageSchema = z.object({
+  nodeID: uuidLike,
+  provider: z.enum(["claudeCode", "copilotCLI", "codex", "openCode", "pi"]),
+  entries: z.array(transcriptEntrySchema),
+  nextCursor: z.string().optional(),
+  hasMore: z.boolean(),
+});
+
 function decodeEvent(raw: Record<string, unknown>): DaemonEvent {
   const entries = Object.entries(raw);
   if (entries.length !== 1) {
@@ -410,6 +436,11 @@ function decodeEvent(raw: Record<string, unknown>): DaemonEvent {
         .parse(payload);
       return { type: name, ...decoded };
     }
+    case "transcriptPage":
+      return {
+        type: name,
+        page: transcriptPageSchema.parse(singleAssociatedValue(payload)),
+      };
     case "errorOccurred":
       return {
         type: name,

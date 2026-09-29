@@ -1,0 +1,4 @@
+{"type":"user.message","timestamp":"2026-01-01T00:00:00Z","data":{"content":"Open /synthetic/project and Authorization: Bearer synthetic-token-value"}}
+{"type":"assistant.message","timestamp":"2026-01-01T00:00:01Z","data":{"content":"Reading /synthetic/project/File.swift with password=synthetic-password","model":"synthetic-model"}}
+{"type":"tool.execution_start","timestamp":"2026-01-01T00:00:02Z","data":{"toolName":"view","arguments":{"path":"/synthetic/project/File.swift","token":"synthetic-token"}}}
+{"type":"tool.execution_complete","timestamp":"2026-01-01T00:00:03Z","data":{"toolName":"view","result":"synthetic file contents"}}

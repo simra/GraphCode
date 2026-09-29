@@ -76,6 +76,9 @@ cancellation, backpressure, and non-reading peers.
   require a subsequent append or reconnect attempt.
 - Responses and errors are not replayed. They are correlated to the request that produced
   them, while subscription events remain sequenced.
+- Transcript pages use this correlated response path exclusively. They are bounded and
+  redacted by the daemon and never enter graph snapshots, subscription broadcasts, or
+  replay history; see `transcript-read.md`.
 - A rejected graph command returns its correlated error and never a successful response
   snapshot.
 - Before a v2 graph mutation is applied, the daemon preflights both its correlated response

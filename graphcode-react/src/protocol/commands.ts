@@ -223,6 +223,20 @@ export interface MailboxCommand {
   };
 }
 
+export interface TranscriptQueryPayload {
+  nodeID: string;
+  cursor: string | null;
+  maxEntries: number;
+  maxBytes: number;
+}
+
+export interface TranscriptCommand {
+  transcript: {
+    projectPath: string;
+    query: TranscriptQueryPayload;
+  };
+}
+
 export type MailroomPostCommand = GraphCommandEnvelope<{
   mailroomPost: {
     text: string;
@@ -594,6 +608,21 @@ export function mailboxCommand(
     mailbox: {
       projectPath,
       query,
+    },
+  };
+}
+
+export function transcriptCommand(
+  projectPath: string,
+  nodeID: string,
+  cursor: string | null = null,
+  maxEntries = 32,
+  maxBytes = 64 * 1024,
+): TranscriptCommand {
+  return {
+    transcript: {
+      projectPath,
+      query: { nodeID, cursor, maxEntries, maxBytes },
     },
   };
 }

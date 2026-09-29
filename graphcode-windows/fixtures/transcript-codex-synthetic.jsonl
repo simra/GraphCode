@@ -1,0 +1,5 @@
+{"type":"session_meta","timestamp":"2026-01-01T00:00:00Z","payload":{"cwd":"/synthetic/project","model":"synthetic-model"}}
+{"type":"event_msg","timestamp":"2026-01-01T00:00:01Z","payload":{"type":"user_message","message":"Inspect /synthetic/project with secret=synthetic-secret"}}
+{"type":"event_msg","timestamp":"2026-01-01T00:00:02Z","payload":{"type":"agent_message","text":"I will update /synthetic/project/File.swift using token=synthetic-token-value."}}
+{"type":"response_item","timestamp":"2026-01-01T00:00:03Z","payload":{"type":"function_call","name":"shell_command","arguments":"{\"command\":\"cat /synthetic/project/File.swift\",\"api_key\":\"synthetic\"}","call_id":"synthetic-call"}}
+{"type":"response_item","timestamp":"2026-01-01T00:00:04Z","payload":{"type":"function_call_output","output":"synthetic command output","call_id":"synthetic-call"}}

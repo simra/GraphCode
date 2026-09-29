@@ -244,6 +244,34 @@ export interface SettingsSnapshot {
   }[];
 }
 
+export type TranscriptEntryKind =
+  "prompt" | "assistant" | "toolUse" | "toolResult" | "status";
+
+export type TranscriptRedaction =
+  | "prompt"
+  | "toolInput"
+  | "toolResult"
+  | "filesystemPath"
+  | "secret"
+  | "modelMetadata";
+
+export interface TranscriptEntry {
+  sourceOffset: number;
+  timestamp?: string;
+  kind: TranscriptEntryKind;
+  text: string;
+  toolName?: string;
+  redactions: TranscriptRedaction[];
+}
+
+export interface TranscriptPage {
+  nodeID: string;
+  provider: "claudeCode" | "copilotCLI" | "codex" | "openCode" | "pi";
+  entries: TranscriptEntry[];
+  nextCursor?: string;
+  hasMore: boolean;
+}
+
 export type DaemonEvent =
   | { type: "recentProjectsListed"; projects: ProjectRef[] }
   | { type: "graphChanged"; graph: LoopGraph }
@@ -254,6 +282,7 @@ export type DaemonEvent =
   | { type: "quickChatActivity"; id: string; activity: QuickChatActivity }
   | { type: "mailbox"; projectPath: string; mailbox: Mailbox }
   | { type: "settingsChanged"; snapshot: SettingsSnapshot }
+  | { type: "transcriptPage"; page: TranscriptPage }
   | { type: "errorOccurred"; message: string }
   | { type: "unsupported"; name: string; payload: unknown };
 

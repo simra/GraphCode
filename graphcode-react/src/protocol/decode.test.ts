@@ -300,6 +300,42 @@ describe("decodeEnvelope", () => {
     ).toThrow(ProtocolDecodeError);
   });
 
+  it("decodes a correlated bounded transcript page", () => {
+    const envelope = decodeEnvelope({
+      version: 2,
+      kind: "response",
+      requestID: "request",
+      event: {
+        transcriptPage: {
+          _0: {
+            nodeID: "11111111-1111-4111-8111-111111111111",
+            provider: "claudeCode",
+            entries: [
+              {
+                sourceOffset: 0,
+                kind: "prompt",
+                text: "[redacted prompt]",
+                redactions: ["prompt"],
+              },
+            ],
+            nextCursor: "opaque",
+            hasMore: true,
+          },
+        },
+      },
+    });
+
+    expect(envelope.kind).toBe("response");
+    if (
+      envelope.kind !== "response" ||
+      envelope.event?.type !== "transcriptPage"
+    ) {
+      throw new Error("Expected transcriptPage response");
+    }
+    expect(envelope.event.page.entries[0].redactions).toEqual(["prompt"]);
+    expect(envelope.event.page.nextCursor).toBe("opaque");
+  });
+
   it("retains additive unknown event cases as unsupported events", () => {
     const envelope = decodeEnvelope({
       version: 2,

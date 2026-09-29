@@ -56,6 +56,10 @@ public enum DaemonCommand: Codable, Sendable, Equatable {
   /// left alone because their lifecycle belongs to the daemon's ensure sweeps.
   case openNodeSession(projectPath: String, nodeID: UUID)
   case graphCommand(projectPath: String, command: GraphCommand)
+  /// Read one bounded, normalized page from a node's provider transcript. This is v2-only
+  /// and answered on the requesting connection; transcript content never enters graph
+  /// snapshots or the replay/broadcast stream.
+  case transcript(projectPath: String, query: TranscriptQuery)
   /// Read the project's Mailroom — the whole room, one loop's unread slice of it, or
   /// one post — answered on this connection alone with a `.mailbox`. This is the read
   /// path the room has instead of riding every `.graphChanged`: a snapshot carries only
@@ -95,7 +99,7 @@ extension DaemonEvent {
   /// that never announce; the handshake is how a newer client opts in.
   public var requiredCapability: ClientCapability? {
     switch self {
-    case .recentProjectsListed, .graphChanged, .errorOccurred, .mailbox,
+    case .recentProjectsListed, .graphChanged, .errorOccurred, .mailbox, .transcriptPage,
       .quickChatsListed, .quickChatChanged, .quickChatDeleted, .quickChatActivity:
       return nil
     case .nodesChanged: return .nodesChanged
@@ -295,6 +299,9 @@ public enum DaemonEvent: Codable, Sendable, Equatable {
   /// `projectPath` is the canonical spelling the daemon routed the query to, which is
   /// the id an app keys its projects by.
   case mailbox(projectPath: String, mailbox: Mailbox)
+  /// The correlated answer to `DaemonCommand.transcript`. It is never broadcast or
+  /// retained for replay.
+  case transcriptPage(TranscriptPage)
   /// The presence poll's broadcast: only the loops whose reading, activity, summary or
   /// board changed on this tick, as whole `LoopNode` values, instead of the whole graph
   /// every fifteen seconds (issue #288's background load — on a busy graph something

@@ -297,7 +297,7 @@ private actor AppDaemonConnection {
         // same one `listRecentProjects` takes.
         try await sendRaw(command, on: connection)
       case .openProject, .closeProject, .forgetProject, .deleteProjectGraph, .openNodeSession,
-        .graphCommand, .mailbox:
+        .graphCommand, .mailbox, .transcript:
         do {
           try await ensureRejoined(connection)
         } catch {

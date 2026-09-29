@@ -35,11 +35,34 @@ import {
   resumeSessionCommand,
   rollbackRefinementCommand,
   stopNodeCommand,
+  transcriptCommand,
   updateEdgeCommand,
   updateNodeCommand,
 } from "./commands";
 
 describe("daemon commands", () => {
+  it("encodes bounded transcript reads as request-scoped daemon commands", () => {
+    expect(
+      transcriptCommand(
+        "C:\\work\\project",
+        "11111111-1111-4111-8111-111111111111",
+        "opaque",
+        16,
+        32768,
+      ),
+    ).toEqual({
+      transcript: {
+        projectPath: "C:\\work\\project",
+        query: {
+          nodeID: "11111111-1111-4111-8111-111111111111",
+          cursor: "opaque",
+          maxEntries: 16,
+          maxBytes: 32768,
+        },
+      },
+    });
+  });
+
   it("encodes the authoritative Quick Chat command labels", () => {
     expect(listQuickChatsCommand()).toEqual({ listQuickChats: {} });
     expect(createQuickChatCommand("Scratch", "claudeCode")).toEqual({

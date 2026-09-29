@@ -1,0 +1,4 @@
+{"type":"user","timestamp":"2026-01-01T00:00:00Z","message":{"content":"Inspect C:\\synthetic\\project and use token=ghp_SYNTHETIC123456789"}}
+{"type":"assistant","timestamp":"2026-01-01T00:00:01Z","message":{"content":[{"type":"text","text":"I will inspect C:\\synthetic\\project\\File.swift with api_key=sk-synthetic123456789."},{"type":"tool_use","name":"Read","input":{"file_path":"C:\\synthetic\\project\\File.swift"}}],"model":"synthetic-model"}}
+{"type":"user","timestamp":"2026-01-01T00:00:02Z","message":{"content":[{"type":"tool_result","content":"synthetic file contents"}]},"toolUseResult":{"content":"synthetic file contents"}}
+{"type":"system","timestamp":"2026-01-01T00:00:03Z","model":"synthetic-model"}

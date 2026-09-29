@@ -87,6 +87,10 @@ public actor ProjectRegistry {
   private let sessionAlive: (@Sendable (LoopNode, String?) async -> Bool)?
   private let composeBoard:
     (@Sendable (LoopNode, LoopSummary, String?, String?) async -> SummaryBoard?)?
+  private let readTranscript:
+    @Sendable (LoopNode, String?, TranscriptQuery) async -> Result<
+      TranscriptPage, TranscriptReadError
+    >
   /// Non-nil only while at least one client is attached — see `startPresencePolling`.
   private var presencePoller: Task<Void, Never>?
   /// Runs only while the sleep assertion is held — see `refreshAwakeAssertion`.
@@ -159,6 +163,12 @@ public actor ProjectRegistry {
     sessionAlive: (@Sendable (LoopNode, String?) async -> Bool)? = CLISessionBackend.sessionAlive,
     composeBoard: (@Sendable (LoopNode, LoopSummary, String?, String?) async -> SummaryBoard?)? =
       CLISessionBackend.composeBoard,
+    readTranscript:
+      @escaping @Sendable (
+        LoopNode, String?, TranscriptQuery
+      ) async -> Result<TranscriptPage, TranscriptReadError> = { node, path, query in
+        await TranscriptReader.read(node: node, projectPath: path, query: query)
+      },
     reapCondemnedSessions: Bool = false,
     persistsSynchronously: Bool = false,
     startQuickChat: (
@@ -203,6 +213,7 @@ public actor ProjectRegistry {
     self.readPresence = readPresence
     self.sessionAlive = sessionAlive
     self.composeBoard = composeBoard
+    self.readTranscript = readTranscript
     self.startQuickChat =
       startQuickChat ?? { node, path in
         let result = await CLISessionBackend.backend(for: node).startResult(node, path)
@@ -779,6 +790,51 @@ public actor ProjectRegistry {
         error = reason
       }
 
+    case .transcript(let path, let query):
+      guard case .v2 = channel.mode else {
+        return ProjectRegistryCommandResult(
+          error: "transcript reads require daemon protocol v2",
+          errorCode: .transcriptUnauthorized)
+      }
+      switch routing(for: path, isSidebar: sidebarConnections.contains(connectionID)) {
+      case .project(let canonicalPath):
+        guard connectionProjectPaths[connectionID]?.contains(canonicalPath) == true,
+          let store = stores[canonicalPath]
+        else {
+          return ProjectRegistryCommandResult(
+            error: TranscriptReadError.unauthorized.message,
+            errorCode: .transcriptUnauthorized)
+        }
+        let graph = await store.graph
+        guard let node = graph.nodesAtAnyDepth.first(where: { $0.id == query.nodeID }) else {
+          return ProjectRegistryCommandResult(
+            error: TranscriptReadError.unauthorized.message,
+            errorCode: .transcriptUnauthorized)
+        }
+        switch await readTranscript(node, canonicalPath, query) {
+        case .success(let page):
+          let event = DaemonEvent.transcriptPage(page)
+          guard
+            let encoded = try? JSONEncoder().encode(
+              DaemonWireEnvelope.response(id: UUID(), event: event)),
+            encoded.count <= FramedMessageIO.v2MaxPayloadBytes
+          else {
+            return ProjectRegistryCommandResult(
+              error: TranscriptReadError.oversized.message,
+              errorCode: .transcriptOversized)
+          }
+          response = event
+        case .failure(let failure):
+          return ProjectRegistryCommandResult(
+            error: failure.message,
+            errorCode: Self.wireCode(for: failure))
+        }
+      case .refused:
+        return ProjectRegistryCommandResult(
+          error: TranscriptReadError.unauthorized.message,
+          errorCode: .transcriptUnauthorized)
+      }
+
     case .announce(let capabilities):
       // Reaches every store this connection has already joined too: the app's launch
       // sends its joins and its announcement together, and which lands first must not
@@ -864,7 +920,7 @@ public actor ProjectRegistry {
         return nil
       }
       return .graphChanged(await store.graph)
-    case .announce, .mailbox:
+    case .announce, .mailbox, .transcript:
       return nil
     }
   }
@@ -890,6 +946,19 @@ public actor ProjectRegistry {
       )
     case .unreadable, .encodingFailed, .writeFailed:
       return (.settingsUnavailable, "settings.json could not be read or saved")
+    }
+  }
+
+  private static func wireCode(for error: TranscriptReadError) -> DaemonWireErrorCode {
+    switch error {
+    case .unauthorized: return .transcriptUnauthorized
+    case .missing: return .transcriptMissing
+    case .corrupt: return .transcriptCorrupt
+    case .oversized: return .transcriptOversized
+    case .invalidBounds: return .transcriptInvalidBounds
+    case .invalidCursor: return .transcriptInvalidCursor
+    case .unsupportedProvider: return .transcriptUnsupportedProvider
+    case .transportFailure: return .transcriptTransportFailure
     }
   }
 
