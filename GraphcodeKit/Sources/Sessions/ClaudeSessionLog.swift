@@ -21,25 +21,75 @@ public enum ClaudeSessionLog {
   public static var projectsDirectory: URL = FileManager.default.homeDirectoryForCurrentUser
     .appendingPathComponent(".claude/projects", isDirectory: true)
 
-  /// The transcript for a session id, found by name across the project directories.
-  ///
-  /// Searched rather than derived. The directory name is the working directory with its
-  /// separators flattened, and reproducing that encoding here would be a second copy of a
-  /// rule Claude Code owns and can change — while the file name is exactly the session id,
-  /// which graphcode banked itself. One shallow pass over a directory of directories is
-  /// cheaper than being wrong.
-  public static func transcript(forSessionID sessionID: String) -> URL? {
+  public static func canonicalSessionID(_ sessionID: String) -> String? {
+    guard sessionID.utf8.count == 36, let uuid = UUID(uuidString: sessionID) else { return nil }
+    let canonical = uuid.uuidString.lowercased()
+    return sessionID.lowercased() == canonical ? canonical : nil
+  }
+
+  /// The transcript GraphCode banked for this project, constrained to the exact Claude
+  /// project directory and its immediate children.
+  public static func transcript(forSessionID sessionID: String, projectPath: String) -> URL? {
+    guard let sessionID = canonicalSessionID(sessionID) else { return nil }
     let manager = FileManager.default
-    guard
-      let projects = try? manager.contentsOfDirectory(
-        at: projectsDirectory, includingPropertiesForKeys: nil)
+    let root = projectsDirectory.standardizedFileURL.resolvingSymlinksInPath()
+    let project =
+      projectsDirectory
+      .appendingPathComponent(
+        SessionTransplant.claudeProjectSlug(forWorkingDirectory: projectPath),
+        isDirectory: true
+      )
+      .standardizedFileURL
+      .resolvingSymlinksInPath()
+    guard project.deletingLastPathComponent() == root else { return nil }
+    let candidate =
+      project.appendingPathComponent("\(sessionID).jsonl").standardizedFileURL
+      .resolvingSymlinksInPath()
+    guard candidate.deletingLastPathComponent() == project,
+      manager.fileExists(atPath: candidate.path)
     else { return nil }
-    let name = "\(sessionID).jsonl"
-    for project in projects {
-      let candidate = project.appendingPathComponent(name)
-      if manager.fileExists(atPath: candidate.path) { return candidate }
-    }
-    return nil
+    return candidate
+  }
+
+  static let remoteTranscriptResolverProgram = """
+    import os, re, sys, uuid
+    id_file, projects_root, working_directory = sys.argv[1:4]
+    uuid_pattern = re.compile(r"^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$")
+
+    try:
+        with open(id_file, "r", encoding="ascii") as source:
+            raw = source.read(128)
+    except (OSError, UnicodeError):
+        raise SystemExit
+    if uuid_pattern.fullmatch(raw) is None:
+        raise SystemExit
+    try:
+        session_id = str(uuid.UUID(raw))
+    except ValueError:
+        raise SystemExit
+
+    root = os.path.realpath(projects_root)
+    project_path = os.path.realpath(working_directory)
+    slug = re.sub(r"[^A-Za-z0-9]", "-", project_path)
+    project = os.path.realpath(os.path.join(root, slug))
+    candidate = os.path.realpath(os.path.join(project, session_id + ".jsonl"))
+    if (
+        os.path.normcase(os.path.dirname(project)) != os.path.normcase(root)
+        or os.path.normcase(os.path.dirname(candidate)) != os.path.normcase(project)
+    ):
+        raise SystemExit
+    if os.path.isfile(candidate):
+        print(candidate)
+    """
+
+  static func remoteFindExpression(for node: LoopNode, at location: RemoteProjectLocation) -> String
+  {
+    let idFile = PresenceHooks.remoteSessionIDExpression(forNodeID: node.id)
+    let program = RemoteProjectLocation.shellQuoted(remoteTranscriptResolverProgram)
+    let project = RemoteProjectLocation.shellQuoted(
+      SessionTransplant.remoteWorkingDirectory(forNode: node, at: location))
+    return
+      "F=$(python3 -c \(program) \(idFile) \"$HOME/.claude/projects\" \(project) 2>/dev/null)"
   }
 
   /// What one `tool_use` block is doing, in the same voice as the other two readers.
@@ -192,10 +242,7 @@ public enum ClaudeSessionLog {
   static func remoteSummaryInvocation(
     forNode node: LoopNode, at location: RemoteProjectLocation, since stamp: String?
   ) -> [String] {
-    let idFile = PresenceHooks.remoteSessionIDExpression(forNodeID: node.id)
-    let find =
-      "S=$(cat \(idFile) 2>/dev/null); F=''; "
-      + "[ -n \"$S\" ] && F=$(ls -t \"$HOME\"/.claude/projects/*/\"$S\".jsonl 2>/dev/null | head -1)"
+    let find = remoteFindExpression(for: node, at: location)
     let script = RemoteTranscriptProbe.script(
       findingFileWith: find, filter: "grep -av toolUseResult", since: stamp)
     return location.sshInvocation(remoteCommand: location.remoteLoginShellCommand(script))
@@ -227,8 +274,11 @@ public enum ClaudeSessionLog {
     if let projectPath, let remote = RemoteProjectLocation.parse(projectPath: projectPath) {
       return await remoteSummary(of: node, at: remote, metricSamples: node.metricHistory)
     }
-    guard let sessionID = SessionIDStore.load(forNodeID: node.id),
-      let transcript = transcript(forSessionID: sessionID),
+    guard let projectPath,
+      let sessionID = SessionIDStore.load(forNodeID: node.id),
+      let transcript = transcript(
+        forSessionID: sessionID,
+        projectPath: node.worktreeBinding?.worktreePath ?? projectPath),
       await TranscriptFreshness.shared.hasChanged(transcript, forNode: node.id)
     else { return nil }
     let reading = reading(inTranscriptAt: transcript, metricSamples: node.metricHistory)

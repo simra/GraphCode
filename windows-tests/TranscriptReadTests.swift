@@ -356,6 +356,112 @@ final class TranscriptReadTests: XCTestCase {
     XCTAssertFalse(remote.contains(#""cwd":"#))
   }
 
+  func testClaudeResolutionRejectsUntrustedIdsAndCrossProjectCandidates() throws {
+    let root = FileManager.default.temporaryDirectory
+      .appendingPathComponent("transcript-claude-id-\(UUID())", isDirectory: true)
+    let working = root.appendingPathComponent("authorized-worktree", isDirectory: true)
+    try FileManager.default.createDirectory(at: working, withIntermediateDirectories: true)
+    let authorized = root.appendingPathComponent(
+      SessionTransplant.claudeProjectSlug(forWorkingDirectory: working.path),
+      isDirectory: true)
+    let other = root.appendingPathComponent("other-project", isDirectory: true)
+    try FileManager.default.createDirectory(at: authorized, withIntermediateDirectories: true)
+    try FileManager.default.createDirectory(at: other, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+
+    let sessionID = UUID().uuidString.lowercased()
+    let transcript = authorized.appendingPathComponent("\(sessionID).jsonl")
+    try Data().write(to: transcript)
+    let crossProjectID = UUID().uuidString.lowercased()
+    try Data().write(to: other.appendingPathComponent("\(crossProjectID).jsonl"))
+    let nestedID = UUID().uuidString.lowercased()
+    let nested = authorized.appendingPathComponent("nested", isDirectory: true)
+    try FileManager.default.createDirectory(at: nested, withIntermediateDirectories: true)
+    try Data().write(to: nested.appendingPathComponent("\(nestedID).jsonl"))
+    let previous = ClaudeSessionLog.projectsDirectory
+    ClaudeSessionLog.projectsDirectory = root
+    defer { ClaudeSessionLog.projectsDirectory = previous }
+
+    XCTAssertEqual(
+      ClaudeSessionLog.transcript(
+        forSessionID: sessionID.uppercased(), projectPath: working.path),
+      transcript)
+    for value in [
+      "../\(sessionID)", "..\\\(sessionID)", "/tmp/\(sessionID)",
+      "C:\\tmp\\\(sessionID)", ".", "..", "\(sessionID)/child",
+      "\(sessionID)\n", "\(sessionID)\u{0001}", "*?\(sessionID)", "';\(sessionID)",
+    ] {
+      XCTAssertNil(
+        ClaudeSessionLog.transcript(forSessionID: value, projectPath: working.path),
+        "unsafe Claude identifier resolved: \(value.debugDescription)")
+    }
+    XCTAssertNil(
+      ClaudeSessionLog.transcript(
+        forSessionID: crossProjectID, projectPath: working.path))
+    XCTAssertNil(
+      ClaudeSessionLog.transcript(forSessionID: nestedID, projectPath: working.path))
+  }
+
+  func testRemoteClaudeResolutionValidatesBeforeExactChildLookup() throws {
+    let root = FileManager.default.temporaryDirectory
+      .appendingPathComponent("rc-\(UUID().uuidString.prefix(8))", isDirectory: true)
+    let projects = root.appendingPathComponent("projects", isDirectory: true)
+    let working = root.appendingPathComponent("authorized", isDirectory: true)
+    let idFile = root.appendingPathComponent("node.id")
+    try FileManager.default.createDirectory(at: working, withIntermediateDirectories: true)
+    let slug = try runPython(
+      "import os, re, sys; print(re.sub(r'[^A-Za-z0-9]', '-', os.path.realpath(sys.argv[1])))",
+      arguments: [working.path])
+    let project = projects.appendingPathComponent(slug, isDirectory: true)
+    try FileManager.default.createDirectory(at: project, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+
+    let sessionID = UUID().uuidString.lowercased()
+    let transcript = project.appendingPathComponent("\(sessionID).jsonl")
+    try Data().write(to: transcript)
+    try sessionID.uppercased().write(to: idFile, atomically: true, encoding: .ascii)
+    XCTAssertEqual(
+      try runPython(
+        ClaudeSessionLog.remoteTranscriptResolverProgram,
+        arguments: [idFile.path, projects.path, working.path]
+      ).replacingOccurrences(of: "\\", with: "/"),
+      transcript.path.replacingOccurrences(of: "\\", with: "/"))
+
+    for value in [
+      "../\(sessionID)", "..\\\(sessionID)", "/tmp/\(sessionID)",
+      "C:\\tmp\\\(sessionID)", ".", "..", "\(sessionID)\n",
+      "\(sessionID)\u{0001}", "*?\(sessionID)", "';\(sessionID)",
+    ] {
+      try Data(value.utf8).write(to: idFile)
+      XCTAssertEqual(
+        try runPython(
+          ClaudeSessionLog.remoteTranscriptResolverProgram,
+          arguments: [idFile.path, projects.path, working.path]),
+        "")
+    }
+
+    let crossProjectID = UUID().uuidString.lowercased()
+    let other = projects.appendingPathComponent("other", isDirectory: true)
+    try FileManager.default.createDirectory(at: other, withIntermediateDirectories: true)
+    try Data().write(to: other.appendingPathComponent("\(crossProjectID).jsonl"))
+    try crossProjectID.write(to: idFile, atomically: true, encoding: .ascii)
+    XCTAssertEqual(
+      try runPython(
+        ClaudeSessionLog.remoteTranscriptResolverProgram,
+        arguments: [idFile.path, projects.path, working.path]),
+      "")
+
+    var node = LoopNode(
+      id: UUID(), title: "Claude", loopType: .turnBased, firstInstruction: "test")
+    node.backend = .claudeCode
+    let command = TranscriptReader.remoteFind(
+      node: node,
+      location: RemoteProjectLocation(host: "synthetic", remotePath: "/authorized project"))
+    XCTAssertTrue(command.contains("python3 -c"))
+    XCTAssertFalse(command.contains(".claude/projects/*"))
+    XCTAssertFalse(command.contains("ls -t"))
+  }
+
   func testCodexExactLookupSearchesBeyondRecentRolloutLimit() throws {
     let root = FileManager.default.temporaryDirectory
       .appendingPathComponent("transcript-codex-complete-\(UUID())", isDirectory: true)
@@ -398,6 +504,7 @@ final class TranscriptReadTests: XCTestCase {
     defer { try? FileManager.default.removeItem(at: root) }
 
     let nodeID = UUID().uuidString.lowercased()
+    let marker = "/graphcode/project/\(nodeID)/PROMPT.md"
     let threadID = UUID().uuidString.lowercased()
     let rollout = sessions.appendingPathComponent(
       "rollout-2026-09-29T00-00-00-\(threadID).jsonl")
@@ -407,7 +514,9 @@ final class TranscriptReadTests: XCTestCase {
     XCTAssertEqual(
       try runPython(
         TranscriptReader.remoteCodexResolverProgram,
-        arguments: [idFile.path, codex.path, codex.appendingPathComponent("sessions").path, nodeID]
+        arguments: [
+          idFile.path, codex.path, codex.appendingPathComponent("sessions").path, nodeID, marker,
+        ]
       ).replacingOccurrences(of: "\\", with: "/"),
       rollout.path.replacingOccurrences(of: "\\", with: "/"))
 
@@ -426,6 +535,7 @@ final class TranscriptReadTests: XCTestCase {
           TranscriptReader.remoteCodexResolverProgram,
           arguments: [
             idFile.path, codex.path, codex.appendingPathComponent("sessions").path, nodeID,
+            marker,
           ]),
         "",
         "unsafe banked identifier selected a rollout: \(value.debugDescription)")
@@ -433,7 +543,7 @@ final class TranscriptReadTests: XCTestCase {
 
     let resolver = TranscriptReader.remoteCodexResolverProgram
     XCTAssertTrue(resolver.contains("WHERE id = ?"))
-    XCTAssertTrue(resolver.contains("first_user_message LIKE ?"))
+    XCTAssertTrue(resolver.contains("instr(first_user_message, ?) > 0 LIMIT 2"))
     XCTAssertTrue(resolver.contains("name.endswith(suffix)"))
     XCTAssertFalse(resolver.contains("WHERE id='"))
     var node = LoopNode(
@@ -461,6 +571,7 @@ final class TranscriptReadTests: XCTestCase {
     defer { try? FileManager.default.removeItem(at: root) }
 
     let nodeID = UUID().uuidString.lowercased()
+    let marker = "/graphcode/project/\(nodeID)/PROMPT.md"
     let banked = UUID().uuidString.lowercased()
     let resolved = UUID().uuidString.lowercased()
     try banked.write(to: idFile, atomically: true, encoding: .ascii)
@@ -479,11 +590,13 @@ final class TranscriptReadTests: XCTestCase {
       """
     _ = try runPython(
       createDatabase,
-      arguments: [database.path, resolved.uppercased(), "/goal \(nodeID)"])
+      arguments: [database.path, resolved.uppercased(), "/goal read \(marker)"])
     XCTAssertEqual(
       try runPython(
         TranscriptReader.remoteCodexResolverProgram,
-        arguments: [idFile.path, codex.path, codex.appendingPathComponent("sessions").path, nodeID]
+        arguments: [
+          idFile.path, codex.path, codex.appendingPathComponent("sessions").path, nodeID, marker,
+        ]
       ).replacingOccurrences(of: "\\", with: "/"),
       rollout.path.replacingOccurrences(of: "\\", with: "/"))
 
@@ -493,12 +606,68 @@ final class TranscriptReadTests: XCTestCase {
       arguments: [
         database.path,
         "x'OR 1---aaaa-bbbb-cccc-dddddddddddd",
-        "/goal \(nodeID)",
+        "/goal read \(marker)",
       ])
     XCTAssertEqual(
       try runPython(
         TranscriptReader.remoteCodexResolverProgram,
-        arguments: [idFile.path, codex.path, codex.appendingPathComponent("sessions").path, nodeID]),
+        arguments: [
+          idFile.path, codex.path, codex.appendingPathComponent("sessions").path, nodeID, marker,
+        ]),
+      "")
+  }
+
+  func testRemoteCodexFallbackRequiresOneExactLaunchMarker() throws {
+    let root = FileManager.default.temporaryDirectory
+      .appendingPathComponent("transcript-remote-codex-marker-\(UUID())", isDirectory: true)
+    let codex = root.appendingPathComponent("codex", isDirectory: true)
+    let sessions = codex.appendingPathComponent("sessions", isDirectory: true)
+    let idFile = root.appendingPathComponent("node.id")
+    let database = codex.appendingPathComponent("state_1.sqlite")
+    try FileManager.default.createDirectory(at: sessions, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+
+    let nodeID = UUID().uuidString.lowercased()
+    let marker = "/graphcode/project/\(nodeID)/PROMPT.md"
+    let banked = UUID().uuidString.lowercased()
+    try banked.write(to: idFile, atomically: true, encoding: .ascii)
+    let createDatabase = """
+      import sqlite3, sys
+      database, rows = sys.argv[1:3]
+      with sqlite3.connect(database) as connection:
+          connection.execute(
+              "CREATE TABLE threads (id TEXT PRIMARY KEY, first_user_message TEXT, created_at_ms INTEGER)"
+          )
+          for index, pair in enumerate(rows.split("\\n")):
+              identifier, message = pair.split("|", 1)
+              connection.execute("INSERT INTO threads VALUES (?, ?, ?)", (identifier, message, index))
+      """
+    func resolve(_ rows: [(String, String)]) throws -> String {
+      try? FileManager.default.removeItem(at: database)
+      let encoded = rows.map { "\($0.0)|\($0.1)" }.joined(separator: "\n")
+      _ = try runPython(createDatabase, arguments: [database.path, encoded])
+      return try runPython(
+        TranscriptReader.remoteCodexResolverProgram,
+        arguments: [
+          idFile.path, codex.path, sessions.path, nodeID, marker,
+        ])
+    }
+
+    XCTAssertEqual(
+      try resolve([
+        (UUID().uuidString.lowercased(), "newer unrelated mention \(nodeID)")
+      ]),
+      "")
+    XCTAssertEqual(
+      try resolve([
+        (UUID().uuidString.lowercased(), "read \(marker)"),
+        (UUID().uuidString.lowercased(), "/goal read \(marker)"),
+      ]),
+      "")
+    XCTAssertEqual(
+      try resolve([
+        ("x'OR 1---aaaa-bbbb-cccc-dddddddddddd", "read \(marker)")
+      ]),
       "")
   }
 
@@ -569,6 +738,7 @@ final class TranscriptReadTests: XCTestCase {
 
       let firstNode = UUID()
       let secondNode = UUID()
+      let projectPath = "C:\\same\\project"
       let firstThread = UUID().uuidString.lowercased()
       let secondThread = UUID().uuidString.lowercased()
       let firstRollout = root.appendingPathComponent(
@@ -589,27 +759,30 @@ final class TranscriptReadTests: XCTestCase {
         nil, nil, nil)
       sqlite3_exec(
         handle,
-        "INSERT INTO threads VALUES ('\(firstThread)', '/goal \(firstNode.uuidString)', 1)",
+        "INSERT INTO threads VALUES ('\(firstThread)', '/goal read \(CodexThreadResolver.launchMarker(forNodeID: firstNode, projectPath: projectPath))', 1)",
         nil, nil, nil)
       sqlite3_exec(
         handle,
-        "INSERT INTO threads VALUES ('\(secondThread)', '/goal \(secondNode.uuidString)', 2)",
+        "INSERT INTO threads VALUES ('\(secondThread)', '/goal read \(CodexThreadResolver.launchMarker(forNodeID: secondNode, projectPath: projectPath))', 2)",
         nil, nil, nil)
 
       let rollouts = [secondRollout, firstRollout]
       XCTAssertEqual(
         TranscriptReader.codexLocalURL(
-          nodeID: firstNode, banked: UUID().uuidString, database: database,
+          nodeID: firstNode, banked: UUID().uuidString, projectPath: projectPath,
+          database: database,
           rollouts: rollouts),
         firstRollout)
       XCTAssertEqual(
         TranscriptReader.codexLocalURL(
-          nodeID: secondNode, banked: UUID().uuidString, database: database,
+          nodeID: secondNode, banked: UUID().uuidString, projectPath: projectPath,
+          database: database,
           rollouts: rollouts),
         secondRollout)
       XCTAssertNil(
         TranscriptReader.codexLocalURL(
-          nodeID: UUID(), banked: UUID().uuidString, database: database,
+          nodeID: UUID(), banked: UUID().uuidString, projectPath: projectPath,
+          database: database,
           rollouts: rollouts))
     }
   #endif

@@ -12,13 +12,21 @@ never supplies a filesystem path or provider session identifier.
 - **Codespace projects:** the same remote command runs through `gh codespace ssh` (and the
   existing multiplexed path after its SSH user is learned).
 
+Claude session IDs are accepted only as canonicalizable hyphenated hexadecimal UUIDs.
+The daemon derives the authorized Claude project directory from the project's resolved
+working directory and accepts only `<canonical-id>.jsonl` as an immediate child of that
+directory. Local and remote resolution reject separators, dot segments, controls,
+absolute paths, shell/path metacharacters, nested files, symlink escapes, and transcripts
+belonging to another project before any transcript is opened.
+
 Codex is resolved by identity, never by working directory. The daemon reads the node's
-banked ID from `SessionIDStore` (or its remote twin), lets `CodexThreadResolver` replace
-an ephemeral notify ID with the node-named persisted thread when Codex's state database
-proves that mapping, and then accepts only a rollout whose filename contains that exact
-thread UUID. Two nodes in the same CWD therefore cannot select each other's rollout. If
-the banked/resolved ID and exact rollout cannot both be established, the read is missing;
-the daemon does not fall back to newest-by-CWD.
+banked ID from `SessionIDStore` (or its remote twin). A persisted banked UUID must match
+Codex's state database exactly. An ephemeral notify UUID can be replaced only when exactly
+one row contains the complete project-scoped `PROMPT.md` path GraphCode generated for that
+node; a bare node UUID or arbitrary user-message mention is not a binding. Zero or
+multiple marker matches are missing. The daemon then accepts only a rollout whose
+filename contains that exact canonical thread UUID. Two nodes in the same CWD therefore
+cannot select each other's rollout, and the daemon never falls back to newest-by-CWD.
 
 Remote Codex resolution treats both the banked file and SQLite result as untrusted text.
 A single Python resolver accepts only the canonical hyphenated hexadecimal UUID shape,

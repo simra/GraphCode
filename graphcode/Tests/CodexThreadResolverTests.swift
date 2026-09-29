@@ -30,38 +30,68 @@ struct CodexThreadResolverTests {
   @Test
   func aBankedIdCodexKnowsIsKept() {
     let node = UUID()
-    let url = database([("real", "/goal read /x/\(node.uuidString)/PROMPT.md", 1)])
+    let projectPath = "/repo/project"
+    let real = UUID().uuidString.lowercased()
+    let url = database([(real, "ordinary prompt", 1)])
     defer { try? FileManager.default.removeItem(at: url) }
 
     #expect(
-      CodexThreadResolver.threadID(forNodeID: node, banked: "real", database: url) == "real")
+      CodexThreadResolver.threadID(
+        forNodeID: node, banked: real.uppercased(), projectPath: projectPath, database: url)
+        == real)
   }
 
   @Test
-  func aBankedIdCodexNeverPersistedResolvesToTheNodesNewestThread() {
+  func anEphemeralBankedIdResolvesOnlyThroughOneExactProjectMarker() {
     let node = UUID()
+    let projectPath = "/repo/project"
+    let marker = CodexThreadResolver.launchMarker(forNodeID: node, projectPath: projectPath)
+    let resolved = UUID().uuidString.lowercased()
     let url = database([
-      ("older", "/goal read /x/\(node.uuidString)/PROMPT.md", 1),
-      ("newer", "/goal read /x/\(node.uuidString)/PROMPT.md", 2),
-      ("other", "/goal read /x/\(UUID().uuidString)/PROMPT.md", 3),
+      (resolved, "/goal read \(marker)", 1),
+      (UUID().uuidString.lowercased(), "newer prompt mentions \(node.uuidString)", 2),
     ])
     defer { try? FileManager.default.removeItem(at: url) }
 
     #expect(
-      CodexThreadResolver.threadID(forNodeID: node, banked: "ephemeral", database: url)
-        == "newer")
-    #expect(CodexThreadResolver.threadID(forNodeID: node, banked: nil, database: url) == "newer")
+      CodexThreadResolver.threadID(
+        forNodeID: node, banked: UUID().uuidString, projectPath: projectPath, database: url)
+        == resolved)
   }
 
   @Test
-  func withNothingToGoOnTheBankedIdStands() {
-    let url = database([("other", "no node here", 1)])
+  func zeroOrMultipleExactMarkersAreRefused() {
+    let node = UUID()
+    let projectPath = "/repo/project"
+    let marker = CodexThreadResolver.launchMarker(forNodeID: node, projectPath: projectPath)
+    let noMatch = database([
+      (UUID().uuidString.lowercased(), "mentions only \(node.uuidString)", 1)
+    ])
+    defer { try? FileManager.default.removeItem(at: noMatch) }
+    #expect(
+      CodexThreadResolver.threadID(
+        forNodeID: node, banked: UUID().uuidString, projectPath: projectPath,
+        database: noMatch) == nil)
+
+    let ambiguous = database([
+      (UUID().uuidString.lowercased(), "read \(marker)", 1),
+      (UUID().uuidString.lowercased(), "/goal read \(marker)", 2),
+    ])
+    defer { try? FileManager.default.removeItem(at: ambiguous) }
+    #expect(
+      CodexThreadResolver.threadID(
+        forNodeID: node, banked: UUID().uuidString, projectPath: projectPath,
+        database: ambiguous) == nil)
+  }
+
+  @Test
+  func malformedBankedIdsAreRefusedBeforeLookup() {
+    let url = database([(UUID().uuidString.lowercased(), "no node here", 1)])
     defer { try? FileManager.default.removeItem(at: url) }
 
     #expect(
-      CodexThreadResolver.threadID(forNodeID: UUID(), banked: "ephemeral", database: url)
-        == "ephemeral")
-    #expect(CodexThreadResolver.threadID(forNodeID: UUID(), banked: nil, database: url) == nil)
+      CodexThreadResolver.threadID(
+        forNodeID: UUID(), banked: "../thread", projectPath: "/repo", database: url) == nil)
   }
 
   @Test

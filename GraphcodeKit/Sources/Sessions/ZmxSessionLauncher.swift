@@ -2359,7 +2359,8 @@ public enum ZmxSessionLauncher {
     // that id fails over to a fresh launch (#346).
     let sessionID =
       node.backend == .codex
-      ? CodexThreadResolver.threadID(forNodeID: node.id, banked: bankedID) : bankedID
+      ? CodexThreadResolver.threadID(
+        forNodeID: node.id, banked: bankedID, projectPath: projectPath) : bankedID
     guard
       let runArgs = arguments(
         forNode: node, projectPath: projectPath, allowsEmptyPrompt: allowsEmptyPrompt)

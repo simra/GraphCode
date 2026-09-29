@@ -49,23 +49,6 @@ extension SessionTransplant {
     return String(resolved.map { $0.isLetter || $0.isNumber ? $0 : "-" })
   }
 
-  static func findClaudeTranscript(sessionID: String) -> URL? {
-    // Found by id across every project directory rather than by reconstructing which
-    // directory the session ran in — a loop bound to a worktree recorded its
-    // transcript under the worktree's slug, not the project's, and the id is unique
-    // either way.
-    let fileManager = FileManager.default
-    guard
-      let projectDirs = try? fileManager.contentsOfDirectory(
-        at: claudeProjectsRoot, includingPropertiesForKeys: nil)
-    else { return nil }
-    for directory in projectDirs {
-      let candidate = directory.appendingPathComponent("\(sessionID).jsonl")
-      if fileManager.fileExists(atPath: candidate.path) { return candidate }
-    }
-    return nil
-  }
-
   static var piSessionsRoot: URL {
     URL(fileURLWithPath: NSHomeDirectory())
       .appendingPathComponent(".pi", isDirectory: true)
@@ -124,8 +107,8 @@ extension SessionTransplant {
     return line + body[newline...]
   }
 
-  /// Found by id across every slug directory, like `findClaudeTranscript`: a
-  /// worktree-bound loop recorded its session under the worktree's slug.
+  /// Found by id across every slug directory because a worktree-bound loop recorded its
+  /// session under the worktree's slug.
   static func findPiSession(sessionID: String) -> URL? {
     let fileManager = FileManager.default
     guard

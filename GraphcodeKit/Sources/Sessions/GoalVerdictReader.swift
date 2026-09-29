@@ -25,15 +25,19 @@ public enum GoalVerdictReader {
     }
     switch node.backend {
     case .claudeCode:
-      guard let sessionID = SessionIDStore.load(forNodeID: node.id),
-        let transcript = ClaudeSessionLog.transcript(forSessionID: sessionID)
+      guard let projectPath,
+        let sessionID = SessionIDStore.load(forNodeID: node.id),
+        let transcript = ClaudeSessionLog.transcript(
+          forSessionID: sessionID,
+          projectPath: node.worktreeBinding?.worktreePath ?? projectPath)
       else { return nil }
       return claudeVerdict(
         lines: CopilotSessionLog.tailLines(ofLogAt: transcript), goalSummary: goal.summary)
     case .codex:
       guard
         let threadID = CodexThreadResolver.threadID(
-          forNodeID: node.id, banked: SessionIDStore.load(forNodeID: node.id))
+          forNodeID: node.id, banked: SessionIDStore.load(forNodeID: node.id),
+          projectPath: projectPath)
       else { return nil }
       return codexVerdict(threadID: threadID, database: codexGoalsDatabase)
     case .copilotCLI:

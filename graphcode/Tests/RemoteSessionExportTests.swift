@@ -34,16 +34,15 @@ struct RemoteSessionExportTests {
   // MARK: - Script shape per backend
 
   @Test
-  func claudeFetchReadsTheBankedIDThenTheTranscriptByID() throws {
-    let node = node(.claudeCode)
+  func claudeFetchValidatesTheBankedIDAndUsesTheExactProjectChild() throws {
+    let node = node(.claudeCode, worktree: "/srv/widget-worktree")
     let script = try script(node)
 
-    // The id decides which transcript; the directory is found, not reconstructed — a
-    // worktree-bound loop's transcript lives under the worktree's slug.
-    #expect(
-      script.contains("S=$(cat \(PresenceHooks.remoteSessionIDExpression(forNodeID: node.id))"))
-    #expect(script.contains("\"$HOME\"/.claude/projects/*/\"$S\".jsonl"))
-    #expect(script.hasSuffix("exec tar -cf - -C \"$(dirname \"$F\")\" \"$S.jsonl\""))
+    #expect(script.contains("python3 -c"))
+    #expect(script.contains(PresenceHooks.remoteSessionIDExpression(forNodeID: node.id)))
+    #expect(script.contains("/srv/widget-worktree"))
+    #expect(!script.contains(".claude/projects/*"))
+    #expect(script.hasSuffix("exec tar -cf - -C \"$(dirname \"$F\")\" -- \"$(basename \"$F\")\""))
   }
 
   @Test

@@ -227,19 +227,25 @@ struct SummaryRailTests {
   @Test
   func theTranscriptIsFoundByTheSessionIDGraphcodeBanked() throws {
     let root = try temporaryRoot("claude-projects")
-    let project = root.appendingPathComponent("-repo-worktree", isDirectory: true)
+    let workingDirectory = root.appendingPathComponent("repo-worktree", isDirectory: true).path
+    let project = root.appendingPathComponent(
+      SessionTransplant.claudeProjectSlug(forWorkingDirectory: workingDirectory),
+      isDirectory: true)
     try FileManager.default.createDirectory(at: project, withIntermediateDirectories: true)
     let sessionID = UUID().uuidString
-    _ = try log([try claudeUser("go", at: 0)], named: "\(sessionID).jsonl", in: project)
+    _ = try log(
+      [try claudeUser("go", at: 0)], named: "\(sessionID.lowercased()).jsonl", in: project)
 
     let previous = ClaudeSessionLog.projectsDirectory
     ClaudeSessionLog.projectsDirectory = root
     defer { ClaudeSessionLog.projectsDirectory = previous }
 
     #expect(
-      ClaudeSessionLog.transcript(forSessionID: sessionID)?.lastPathComponent
-        == "\(sessionID).jsonl")
-    #expect(ClaudeSessionLog.transcript(forSessionID: UUID().uuidString) == nil)
+      ClaudeSessionLog.transcript(forSessionID: sessionID, projectPath: workingDirectory)?
+        .lastPathComponent == "\(sessionID.lowercased()).jsonl")
+    #expect(
+      ClaudeSessionLog.transcript(
+        forSessionID: UUID().uuidString, projectPath: workingDirectory) == nil)
   }
 
   // MARK: - Codex

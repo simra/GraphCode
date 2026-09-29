@@ -109,9 +109,12 @@ public enum CodexSessionLog {
   /// working-directory heuristic. Multiple Codex nodes can share one directory, so CWD
   /// can never prove which node owns a rollout.
   static func rollout(forThreadID threadID: String, among rollouts: [URL]? = nil) -> URL? {
-    guard UUID(uuidString: threadID) != nil else { return nil }
+    guard threadID.utf8.count == 36, let uuid = UUID(uuidString: threadID),
+      uuid.uuidString.lowercased() == threadID.lowercased()
+    else { return nil }
+    let canonical = uuid.uuidString.lowercased()
     return (rollouts ?? allRollouts()).first {
-      SessionTransplant.rolloutUUID(in: $0.lastPathComponent) == threadID
+      SessionTransplant.rolloutUUID(in: $0.lastPathComponent)?.lowercased() == canonical
     }
   }
 

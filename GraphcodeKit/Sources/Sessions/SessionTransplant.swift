@@ -55,11 +55,14 @@ public enum SessionTransplant {
     switch node.backend {
     case .claudeCode:
       guard let sessionID = SessionIDStore.load(forNodeID: node.id) else { return nil }
-      guard let url = findClaudeTranscript(sessionID: sessionID),
+      guard
+        let canonicalID = ClaudeSessionLog.canonicalSessionID(sessionID),
+        let url = ClaudeSessionLog.transcript(
+          forSessionID: canonicalID, projectPath: workingDirectory),
         let transcript = try? Data(contentsOf: url)
       else { return nil }
       return Artifact(
-        backend: .claudeCode, sessionID: sessionID,
+        backend: .claudeCode, sessionID: canonicalID,
         sourceWorkingDirectory: workingDirectory,
         files: ["transcript.jsonl": transcript])
 
@@ -221,8 +224,7 @@ public enum SessionTransplant {
   /// backend's lookup is the one graphcode already trusts elsewhere:
   ///
   /// - Claude Code: the banked id — the file the ensure's resume branch consumes — then
-  ///   the transcript by id across every project directory, because a worktree-bound
-  ///   loop's transcript lives under the worktree's slug (`findClaudeTranscript`).
+  ///   the exact transcript child of the node's resolved working-directory slug.
   /// - Copilot: the banked id, else the directory whose `workspace.yaml` names the zmx
   ///   session graphcode launched it as — the walk `remoteIDBankFragment` does.
   /// - Codex: the newest rollout whose header opened in the loop's working directory,
@@ -242,9 +244,9 @@ public enum SessionTransplant {
     let idFile = PresenceHooks.remoteSessionIDExpression(forNodeID: node.id)
     switch node.backend {
     case .claudeCode:
-      return "S=$(cat \(idFile) 2>/dev/null); [ -n \"$S\" ] || exit 0; "
-        + "F=$(ls -t \"$HOME\"/.claude/projects/*/\"$S\".jsonl 2>/dev/null | head -1); "
-        + "[ -n \"$F\" ] || exit 0; exec tar -cf - -C \"$(dirname \"$F\")\" \"$S.jsonl\""
+      return ClaudeSessionLog.remoteFindExpression(for: node, at: location)
+        + "; [ -n \"$F\" ] || exit 0; "
+        + "exec tar -cf - -C \"$(dirname \"$F\")\" -- \"$(basename \"$F\")\""
     case .copilotCLI:
       let name = SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName
       return "S=$(cat \(idFile) 2>/dev/null); if [ -z \"$S\" ]; then "

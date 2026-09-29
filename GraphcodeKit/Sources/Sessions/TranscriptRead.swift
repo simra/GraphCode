@@ -487,8 +487,11 @@ public enum TranscriptReader {
   private static func localURL(node: LoopNode, projectPath: String?) throws -> URL {
     switch node.backend {
     case .claudeCode:
-      guard let sessionID = SessionIDStore.load(forNodeID: node.id),
-        let url = ClaudeSessionLog.transcript(forSessionID: sessionID)
+      guard let projectPath,
+        let sessionID = SessionIDStore.load(forNodeID: node.id),
+        let url = ClaudeSessionLog.transcript(
+          forSessionID: sessionID,
+          projectPath: node.worktreeBinding?.worktreePath ?? projectPath)
       else { throw TranscriptReadError.missing }
       return url
     case .copilotCLI:
@@ -502,6 +505,7 @@ public enum TranscriptReader {
         let rollout = codexLocalURL(
           nodeID: node.id,
           banked: banked,
+          projectPath: projectPath,
           database: CodexThreadResolver.stateDatabase())
       else { throw TranscriptReadError.missing }
       return rollout
@@ -513,13 +517,15 @@ public enum TranscriptReader {
   static func codexLocalURL(
     nodeID: UUID,
     banked: String?,
+    projectPath: String? = nil,
     database: URL?,
     rollouts: [URL]? = nil
   ) -> URL? {
     guard let banked else { return nil }
     let threadID =
       database.map {
-        CodexThreadResolver.threadID(forNodeID: nodeID, banked: banked, database: $0)
+        CodexThreadResolver.threadID(
+          forNodeID: nodeID, banked: banked, projectPath: projectPath, database: $0)
       } ?? banked
     guard let threadID else { return nil }
     return CodexSessionLog.rollout(forThreadID: threadID, among: rollouts)
@@ -583,10 +589,7 @@ public enum TranscriptReader {
   static func remoteFind(node: LoopNode, location: RemoteProjectLocation) -> String {
     switch node.backend {
     case .claudeCode:
-      let idFile = PresenceHooks.remoteSessionIDExpression(forNodeID: node.id)
-      return
-        "S=$(cat \(idFile) 2>/dev/null); F=''; "
-        + "[ -n \"$S\" ] && F=$(ls -t \"$HOME\"/.claude/projects/*/\"$S\".jsonl 2>/dev/null | head -1)"
+      return ClaudeSessionLog.remoteFindExpression(for: node, at: location)
     case .copilotCLI:
       let name = SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName
       return
@@ -597,9 +600,11 @@ public enum TranscriptReader {
       let idFile = PresenceHooks.remoteSessionIDExpression(forNodeID: node.id)
       let program = RemoteProjectLocation.shellQuoted(remoteCodexResolverProgram)
       let nodeID = RemoteProjectLocation.shellQuoted(node.id.uuidString.lowercased())
+      let marker = RemoteProjectLocation.shellQuoted(
+        RemoteGraphAccess.promptPath(forProjectPath: location.projectPath, nodeID: node.id))
       return
         "F=$(python3 -c \(program) \(idFile) \"$HOME/.codex\" "
-        + "\"$HOME/.codex/sessions\" \(nodeID) 2>/dev/null)"
+        + "\"$HOME/.codex/sessions\" \(nodeID) \(marker) 2>/dev/null)"
     case .openCode, .pi:
       return "F=''"
     }
@@ -607,7 +612,7 @@ public enum TranscriptReader {
 
   static let remoteCodexResolverProgram = """
     import os, re, sqlite3, sys, uuid
-    id_file, codex_root, sessions_root, node_id = sys.argv[1:5]
+    id_file, codex_root, sessions_root, node_id, launch_marker = sys.argv[1:6]
     uuid_pattern = re.compile(r"^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$")
 
     def canonical(value):
@@ -647,11 +652,13 @@ public enum TranscriptReader {
                     "SELECT id FROM threads WHERE id = ? LIMIT 1", (banked,)
                 ).fetchone()
                 if row is None:
-                    row = database.execute(
-                        "SELECT id FROM threads WHERE first_user_message LIKE ? "
-                        "ORDER BY created_at_ms DESC LIMIT 1",
-                        ("%" + node_id + "%",),
-                    ).fetchone()
+                    rows = database.execute(
+                        "SELECT id FROM threads WHERE instr(first_user_message, ?) > 0 LIMIT 2",
+                        (launch_marker,),
+                    ).fetchall()
+                    if len(rows) != 1:
+                        raise SystemExit
+                    row = rows[0]
                 if row is None:
                     raise SystemExit
                 thread_id = canonical(row[0])
