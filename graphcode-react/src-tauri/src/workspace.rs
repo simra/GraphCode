@@ -8,7 +8,6 @@ use serde::Serialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
-#[cfg(test)]
 use uuid::Uuid;
 
 use crate::endpoint;
@@ -18,6 +17,9 @@ const LOCK_FILE: &str = ".graphcode-react.lock";
 const LEGACY_LOCK_FILE: &str = "app.pid";
 const DELETION_LOCK_PREFIX: &str = ".graphcode-deleting-";
 const RENDEZVOUS_FILE: &str = ".graphcode-rendezvous.secret";
+const RECOVERY_DIRECTORY: &str = ".graphcode_recovery";
+const ZMX_NAMESPACE_DIRECTORY: &str = ".graphcode-zmx";
+const ZMX_NAMESPACE_MARKER: &str = ".graphcode-zmx-namespace-v1";
 
 #[derive(Debug, Error)]
 pub enum WorkspaceError {
@@ -53,8 +55,10 @@ pub enum WorkspaceError {
     PermissionDenied(String),
     #[error("workspace teardown did not complete: {0}")]
     TeardownIncomplete(String),
-    #[error("failed to move the workspace to the Windows Recycle Bin: {0}")]
-    RecycleBin(String),
+    #[error("workspace recovery could not be guaranteed: {0}")]
+    RecoveryUncertain(String),
+    #[error("workspace mutation synchronization failed: {0}")]
+    Synchronization(String),
     #[error("workspace confirmation no longer matches the canonical path (expected {expected}, found {actual})")]
     ConfirmationMismatch { expected: String, actual: String },
     #[error("GraphCode helpers are unavailable at {0}")]
@@ -87,9 +91,238 @@ pub struct WorkspaceDeletionPlan {
     pub id: String,
     pub name: String,
     pub canonical_path: String,
+    pub recovery_path: String,
     pub projects: usize,
     pub loops: usize,
     pub terminal_sessions: usize,
+}
+
+#[cfg(windows)]
+struct WorkspaceMutationGuard {
+    handle: windows_sys::Win32::Foundation::HANDLE,
+}
+
+#[cfg(windows)]
+impl WorkspaceMutationGuard {
+    fn acquire(home: &Path) -> Result<Self, WorkspaceError> {
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::Foundation::{
+            CloseHandle, GetLastError, WAIT_ABANDONED, WAIT_OBJECT_0, WAIT_TIMEOUT,
+        };
+        use windows_sys::Win32::System::Threading::{CreateMutexW, WaitForSingleObject};
+
+        let sid = endpoint::current_windows_sid()
+            .map_err(|error| WorkspaceError::Synchronization(error.to_string()))?;
+        let home = canonical_existing(home)?;
+        let identity = hex::encode(Sha256::digest(
+            home.to_string_lossy().to_lowercase().as_bytes(),
+        ));
+        let name = format!(r"Local\GraphCode.Workspaces.{sid}.{}", &identity[..32]);
+        let wide: Vec<u16> = std::ffi::OsStr::new(&name)
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        unsafe {
+            let handle = CreateMutexW(std::ptr::null(), 0, wide.as_ptr());
+            if handle.is_null() {
+                let error = GetLastError();
+                if error == windows_sys::Win32::Foundation::ERROR_ACCESS_DENIED {
+                    return Err(WorkspaceError::PermissionDenied(
+                        "could not create the workspace synchronization mutex".into(),
+                    ));
+                }
+                return Err(WorkspaceError::Synchronization(format!(
+                    "could not create workspace mutex (Windows error {})",
+                    error
+                )));
+            }
+            match WaitForSingleObject(handle, 30_000) {
+                WAIT_OBJECT_0 | WAIT_ABANDONED => Ok(Self { handle }),
+                WAIT_TIMEOUT => {
+                    CloseHandle(handle);
+                    Err(WorkspaceError::Synchronization(
+                        "timed out waiting for another workspace operation".into(),
+                    ))
+                }
+                result => {
+                    CloseHandle(handle);
+                    Err(WorkspaceError::Synchronization(format!(
+                        "workspace mutex wait failed with status {result}"
+                    )))
+                }
+            }
+        }
+    }
+}
+
+#[cfg(windows)]
+impl Drop for WorkspaceMutationGuard {
+    fn drop(&mut self) {
+        use windows_sys::Win32::Foundation::CloseHandle;
+        use windows_sys::Win32::System::Threading::ReleaseMutex;
+        unsafe {
+            ReleaseMutex(self.handle);
+            CloseHandle(self.handle);
+        }
+    }
+}
+
+#[cfg(not(windows))]
+struct WorkspaceMutationGuard;
+
+#[cfg(not(windows))]
+impl WorkspaceMutationGuard {
+    fn acquire(_home: &Path) -> Result<Self, WorkspaceError> {
+        Ok(Self)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct DirectoryIdentity {
+    volume_serial: u64,
+    file_id: [u8; 16],
+}
+
+#[cfg(windows)]
+struct StableDirectory {
+    handle: windows_sys::Win32::Foundation::HANDLE,
+    identity: DirectoryIdentity,
+}
+
+#[cfg(windows)]
+impl StableDirectory {
+    fn open(path: &Path) -> Result<Self, WorkspaceError> {
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::Foundation::{GetLastError, INVALID_HANDLE_VALUE};
+        use windows_sys::Win32::Storage::FileSystem::{
+            CreateFileW, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+            FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+            OPEN_EXISTING,
+        };
+
+        let wide: Vec<u16> = path
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        unsafe {
+            let handle = CreateFileW(
+                wide.as_ptr(),
+                FILE_READ_ATTRIBUTES,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                std::ptr::null(),
+                OPEN_EXISTING,
+                FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+                std::ptr::null_mut(),
+            );
+            if handle == INVALID_HANDLE_VALUE {
+                let error = GetLastError();
+                if error == windows_sys::Win32::Foundation::ERROR_ACCESS_DENIED {
+                    return Err(WorkspaceError::PermissionDenied(format!(
+                        "could not hold directory {}",
+                        path.display()
+                    )));
+                }
+                return Err(WorkspaceError::PathUncertain(format!(
+                    "could not hold directory {} (Windows error {})",
+                    path.display(),
+                    error
+                )));
+            }
+            let identity = match Self::identity_for_handle(handle) {
+                Ok(identity) => identity,
+                Err(error) => {
+                    windows_sys::Win32::Foundation::CloseHandle(handle);
+                    return Err(error);
+                }
+            };
+            Ok(Self { handle, identity })
+        }
+    }
+
+    fn identity_for_handle(
+        handle: windows_sys::Win32::Foundation::HANDLE,
+    ) -> Result<DirectoryIdentity, WorkspaceError> {
+        use windows_sys::Win32::Foundation::GetLastError;
+        use windows_sys::Win32::Storage::FileSystem::{
+            FileIdInfo, GetFileInformationByHandleEx, FILE_ID_INFO,
+        };
+        let mut info = FILE_ID_INFO::default();
+        unsafe {
+            if GetFileInformationByHandleEx(
+                handle,
+                FileIdInfo,
+                (&mut info as *mut FILE_ID_INFO).cast(),
+                std::mem::size_of::<FILE_ID_INFO>() as u32,
+            ) == 0
+            {
+                let error = GetLastError();
+                if error == windows_sys::Win32::Foundation::ERROR_ACCESS_DENIED {
+                    return Err(WorkspaceError::PermissionDenied(
+                        "could not read stable directory identity".into(),
+                    ));
+                }
+                return Err(WorkspaceError::PathUncertain(format!(
+                    "could not read stable directory identity (Windows error {})",
+                    error
+                )));
+            }
+        }
+        Ok(DirectoryIdentity {
+            volume_serial: info.VolumeSerialNumber,
+            file_id: info.FileId.Identifier,
+        })
+    }
+
+    fn verify_path(&self, path: &Path) -> Result<(), WorkspaceError> {
+        let current = Self::open(path)?;
+        if current.identity != self.identity {
+            return Err(WorkspaceError::PathUncertain(format!(
+                "{} was replaced while deletion was pending",
+                path.display()
+            )));
+        }
+        Ok(())
+    }
+}
+
+#[cfg(windows)]
+impl Drop for StableDirectory {
+    fn drop(&mut self) {
+        unsafe {
+            windows_sys::Win32::Foundation::CloseHandle(self.handle);
+        }
+    }
+}
+
+#[cfg(not(windows))]
+struct StableDirectory {
+    path: PathBuf,
+    identity: DirectoryIdentity,
+}
+
+#[cfg(not(windows))]
+impl StableDirectory {
+    fn open(path: &Path) -> Result<Self, WorkspaceError> {
+        Ok(Self {
+            path: canonical_existing(path)?,
+            identity: DirectoryIdentity {
+                volume_serial: 0,
+                file_id: [0; 16],
+            },
+        })
+    }
+
+    fn verify_path(&self, path: &Path) -> Result<(), WorkspaceError> {
+        if same_path(&self.path, &canonical_existing(path)?) {
+            Ok(())
+        } else {
+            Err(WorkspaceError::PathUncertain(format!(
+                "{} was replaced while deletion was pending",
+                path.display()
+            )))
+        }
+    }
 }
 
 pub struct WorkspaceGuard {
@@ -142,6 +375,7 @@ pub fn list() -> Result<Vec<WorkspaceSummary>, WorkspaceError> {
 
 pub fn create(name: &str) -> Result<WorkspaceSummary, WorkspaceError> {
     let home = home_directory()?;
+    let _synchronization = WorkspaceMutationGuard::acquire(&home)?;
     let slug = slug(name)?;
     let path = home.join(format!("{DIRECTORY_PREFIX}{slug}"));
     if path.exists() {
@@ -152,11 +386,13 @@ pub fn create(name: &str) -> Result<WorkspaceSummary, WorkspaceError> {
         let _ = fs::remove_dir_all(&path);
         return Err(error);
     }
+    initialize_zmx_namespace(&path)?;
     summarize(&path, &current_directory()?, &home)
 }
 
 pub fn rename(id: &str, name: &str) -> Result<WorkspaceSummary, WorkspaceError> {
     let home = home_directory()?;
+    let _synchronization = WorkspaceMutationGuard::acquire(&home)?;
     let current = current_directory()?;
     let source = resolve_known(&home, id)?;
     if same_path(&source, &home.join(".graphcode")) {
@@ -168,6 +404,14 @@ pub fn rename(id: &str, name: &str) -> Result<WorkspaceSummary, WorkspaceError> 
     if workspace_is_open(&source) {
         return Err(WorkspaceError::OpenWorkspace);
     }
+    ensure_zmx_namespace_for_open(&source)?;
+    if !zmx_sessions(&source)?.is_empty() {
+        return Err(WorkspaceError::OwnershipUncertain(
+            "stop all workspace-scoped terminal sessions before renaming this workspace".into(),
+        ));
+    }
+    let zmx_secret = zmx_namespace_secret(&source)?;
+    write_zmx_namespace_marker(&source, &zmx_secret, false)?;
     let destination = home.join(format!("{DIRECTORY_PREFIX}{}", slug(name)?));
     if destination.exists() {
         return Err(WorkspaceError::AlreadyExists(
@@ -180,6 +424,7 @@ pub fn rename(id: &str, name: &str) -> Result<WorkspaceSummary, WorkspaceError> 
         ));
     }
     stop_scheduled_daemon(&source)?;
+    verify_no_owned_processes(&source)?;
     let deadline = Instant::now() + Duration::from_secs(2);
     loop {
         match fs::rename(&source, &destination) {
@@ -193,26 +438,40 @@ pub fn rename(id: &str, name: &str) -> Result<WorkspaceSummary, WorkspaceError> 
             Err(error) => return Err(WorkspaceError::Io(error.to_string())),
         }
     }
+    write_zmx_namespace_marker(&destination, &zmx_secret, false)?;
+    verify_zmx_namespace(&destination)?;
     summarize(&destination, &current, &home)
 }
 
-pub fn delete(id: &str, expected_path: &str) -> Result<(), WorkspaceError> {
+pub fn delete(
+    id: &str,
+    expected_path: &str,
+    expected_recovery_path: &str,
+) -> Result<(), WorkspaceError> {
+    let home = home_directory()?;
+    let _synchronization = WorkspaceMutationGuard::acquire(&home)?;
     delete_from(
-        &home_directory()?,
+        &home,
         &current_directory()?,
         id,
         expected_path,
-        move_to_recycle_bin,
+        expected_recovery_path,
+        zmx_sessions,
+        move_to_recovery,
     )
 }
 
 pub fn prepare_delete(id: &str) -> Result<WorkspaceDeletionPlan, WorkspaceError> {
     let home = home_directory()?;
+    let _synchronization = WorkspaceMutationGuard::acquire(&home)?;
     let current = current_directory()?;
     let target = validate_deletion_target(&home, &current, id)?;
     inspect_workspace_locks(&target)?;
     preflight_process_ownership(&target)?;
+    verify_zmx_namespace(&target)?;
+    let sessions = zmx_sessions(&target)?;
     let contents = workspace_contents(&target);
+    let recovery_path = recovery_destination(&home, &target)?;
     let name = target
         .file_name()
         .and_then(|name| name.to_str())
@@ -223,20 +482,23 @@ pub fn prepare_delete(id: &str) -> Result<WorkspaceDeletionPlan, WorkspaceError>
         id: id.to_string(),
         name,
         canonical_path: target.display().to_string(),
+        recovery_path: recovery_path.display().to_string(),
         projects: contents.projects,
         loops: contents.loops,
-        terminal_sessions: contents.session_names.len(),
+        terminal_sessions: sessions.len(),
     })
 }
 
 pub fn open(id: &str) -> Result<(), WorkspaceError> {
     let home = home_directory()?;
+    let _synchronization = WorkspaceMutationGuard::acquire(&home)?;
     let target = resolve_known(&home, id)?;
     if same_path(&target, &current_directory()?) {
         return Ok(());
     }
     ensure_not_deleting(&target)?;
     install_helpers(&home, &target)?;
+    ensure_zmx_namespace_for_open(&target)?;
     start_daemon(&target)?;
 
     let executable =
@@ -244,14 +506,16 @@ pub fn open(id: &str) -> Result<(), WorkspaceError> {
     let mut command = Command::new(executable);
     command
         .env("GRAPHCODE_SUPPORT_DIR", &target)
+        .env("ZMX_DIR", zmx_namespace_directory(&target))
         .current_dir(&target)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
     hide_console(&mut command);
-    command
+    let child = command
         .spawn()
         .map_err(|error| WorkspaceError::AppStart(error.to_string()))?;
+    wait_for_workspace_window(&target, child.id())?;
     Ok(())
 }
 
@@ -434,6 +698,163 @@ fn current_directory() -> Result<PathBuf, WorkspaceError> {
     endpoint::configured_support_directory().map_err(|error| WorkspaceError::Io(error.to_string()))
 }
 
+pub(crate) fn zmx_namespace_directory(workspace: &Path) -> PathBuf {
+    workspace.join(ZMX_NAMESPACE_DIRECTORY)
+}
+
+pub(crate) fn configured_zmx_namespace() -> Result<Option<PathBuf>, WorkspaceError> {
+    let workspace = current_directory()?;
+    if !workspace.join(ZMX_NAMESPACE_MARKER).is_file() {
+        return Err(WorkspaceError::OwnershipUncertain(format!(
+            "workspace has no trusted zmx namespace marker at {}; reopen it after all legacy sessions have stopped before creating or attaching terminals",
+            workspace.join(ZMX_NAMESPACE_MARKER).display()
+        )));
+    }
+    verify_zmx_namespace(&workspace)?;
+    Ok(Some(zmx_namespace_directory(&workspace)))
+}
+
+fn workspace_identity(workspace: &Path) -> String {
+    hex::encode(Sha256::digest(
+        workspace.to_string_lossy().to_lowercase().as_bytes(),
+    ))
+}
+
+fn zmx_namespace_secret(workspace: &Path) -> Result<String, WorkspaceError> {
+    let workspace = canonical_existing(workspace)?;
+    let marker = workspace.join(ZMX_NAMESPACE_MARKER);
+    let actual = fs::read_to_string(&marker).map_err(|error| {
+        WorkspaceError::OwnershipUncertain(format!(
+            "workspace has no trusted zmx namespace marker at {}: {error}; reopen it after all legacy sessions have stopped",
+            marker.display()
+        ))
+    })?;
+    let mut lines = actual.lines();
+    let version = lines.next();
+    let identity = lines.next();
+    let secret = lines.next();
+    if version != Some("v1")
+        || identity != Some(workspace_identity(&workspace).as_str())
+        || secret.is_none_or(|value| {
+            value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit())
+        })
+        || lines.next().is_some()
+    {
+        return Err(WorkspaceError::OwnershipUncertain(format!(
+            "zmx namespace marker {} does not match this workspace",
+            marker.display()
+        )));
+    }
+    Ok(secret.expect("validated above").to_ascii_lowercase())
+}
+
+fn write_zmx_namespace_marker(
+    workspace: &Path,
+    secret: &str,
+    create_new: bool,
+) -> Result<(), WorkspaceError> {
+    use std::io::Write;
+
+    let marker = workspace.join(ZMX_NAMESPACE_MARKER);
+    let mut options = fs::OpenOptions::new();
+    options.write(true);
+    if create_new {
+        options.create_new(true);
+    } else {
+        options.create(true).truncate(true);
+    }
+    let mut file = options.open(&marker).map_err(|error| {
+        map_io_error(
+            error,
+            format!("could not write zmx namespace marker {}", marker.display()),
+        )
+    })?;
+    file.write_all(format!("v1\n{}\n{secret}\n", workspace_identity(workspace)).as_bytes())
+        .map_err(|error| {
+            map_io_error(
+                error,
+                format!("could not write zmx namespace marker {}", marker.display()),
+            )
+        })
+}
+
+fn initialize_zmx_namespace(workspace: &Path) -> Result<(), WorkspaceError> {
+    let workspace = canonical_existing(workspace)?;
+    if workspace.join(ZMX_NAMESPACE_MARKER).exists() {
+        verify_zmx_namespace(&workspace)?;
+        return Ok(());
+    }
+    let namespace = zmx_namespace_directory(&workspace);
+    fs::create_dir(&namespace).map_err(|error| {
+        map_io_error(
+            error,
+            format!("could not create zmx namespace {}", namespace.display()),
+        )
+    })?;
+    reject_reparse_points(&namespace)?;
+    let secret = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
+    write_zmx_namespace_marker(&workspace, &secret, true)
+}
+
+fn verify_zmx_namespace(workspace: &Path) -> Result<PathBuf, WorkspaceError> {
+    let workspace = canonical_existing(workspace)?;
+    zmx_namespace_secret(&workspace)?;
+    let namespace = zmx_namespace_directory(&workspace);
+    reject_reparse_points(&namespace)?;
+    let canonical_namespace = canonical_existing(&namespace)?;
+    if !canonical_namespace
+        .parent()
+        .is_some_and(|parent| same_path(parent, &workspace))
+    {
+        return Err(WorkspaceError::OwnershipUncertain(format!(
+            "{} is not owned by {}",
+            canonical_namespace.display(),
+            workspace.display()
+        )));
+    }
+    Ok(canonical_namespace)
+}
+
+fn ensure_zmx_namespace_for_open(workspace: &Path) -> Result<(), WorkspaceError> {
+    if workspace.join(ZMX_NAMESPACE_MARKER).is_file() {
+        verify_zmx_namespace(workspace)?;
+        return Ok(());
+    }
+    if !owned_processes(workspace, "zmx.exe")?.is_empty() {
+        return Err(WorkspaceError::OwnershipUncertain(
+            "legacy zmx processes are still running; stop them before reopening this workspace"
+                .into(),
+        ));
+    }
+    if !owned_processes(workspace, "graphcoded.exe")?.is_empty() {
+        return Err(WorkspaceError::OwnershipUncertain(
+            "a legacy workspace daemon is still running; stop it before reopening this workspace"
+                .into(),
+        ));
+    }
+    initialize_zmx_namespace(workspace)
+}
+
+fn wait_for_workspace_window(workspace: &Path, expected_pid: u32) -> Result<(), WorkspaceError> {
+    let path = workspace.join(LOCK_FILE);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        if fs::read_to_string(&path)
+            .ok()
+            .and_then(|value| value.trim().parse::<u32>().ok())
+            == Some(expected_pid)
+            && matches!(inspect_pid(expected_pid), PidState::Running)
+        {
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    Err(WorkspaceError::AppStart(format!(
+        "workspace window {expected_pid} did not acquire {}",
+        path.display()
+    )))
+}
+
 fn resolve_known(home: &Path, id: &str) -> Result<PathBuf, WorkspaceError> {
     resolve_known_from(home, &current_directory()?, id)
 }
@@ -447,15 +868,18 @@ fn resolve_known_from(home: &Path, current: &Path, id: &str) -> Result<PathBuf, 
         .ok_or(WorkspaceError::NotFound)
 }
 
-fn delete_from<F>(
+fn delete_from<L, F>(
     home: &Path,
     current: &Path,
     id: &str,
     expected_path: &str,
-    recycle: F,
+    expected_recovery_path: &str,
+    list_sessions: L,
+    recover: F,
 ) -> Result<(), WorkspaceError>
 where
-    F: FnOnce(&Path) -> Result<(), WorkspaceError>,
+    L: FnOnce(&Path) -> Result<Vec<String>, WorkspaceError>,
+    F: FnOnce(&Path, &Path, &StableDirectory) -> Result<(), WorkspaceError>,
 {
     let target = validate_deletion_target(home, current, id)?;
     let confirmed = canonical_existing(Path::new(expected_path))?;
@@ -465,23 +889,30 @@ where
             actual: target.display().to_string(),
         });
     }
+    let stable = StableDirectory::open(&target)?;
+    let recovery = validate_recovery_destination(home, &target, expected_recovery_path)?;
+    let sessions = list_sessions(&target)?;
 
     inspect_workspace_locks(&target)?;
-    preflight_process_ownership(&target)?;
+    let zmx_processes = owned_processes(&target, "zmx.exe")?;
+    let daemon_processes = owned_processes(&target, "graphcoded.exe")?;
     let lease = DeletionLease::acquire(&target)?;
     inspect_workspace_locks(&target)?;
+    stable.verify_path(&target)?;
 
     stop_scheduled_daemon(&target)?;
-    let contents = workspace_contents(&target);
-    end_zmx_sessions(&target, &contents.session_names)?;
-    terminate_owned_processes(&target, "zmx.exe")?;
-    terminate_owned_processes(&target, "graphcoded.exe")?;
+    end_zmx_sessions(&target, &sessions)?;
+    terminate_owned_processes(zmx_processes)?;
+    terminate_owned_processes(daemon_processes)?;
+    terminate_owned_processes(owned_processes(&target, "zmx.exe")?)?;
+    terminate_owned_processes(owned_processes(&target, "graphcoded.exe")?)?;
     verify_no_owned_processes(&target)?;
     remove_owned_runtime_files(&target)?;
     inspect_workspace_locks(&target)?;
     verify_no_owned_processes(&target)?;
+    stable.verify_path(&target)?;
 
-    recycle(&target)?;
+    recover(&target, &recovery, &stable)?;
     lease.release()?;
     Ok(())
 }
@@ -797,14 +1228,87 @@ fn deletion_lease_path(workspace: &Path) -> Result<PathBuf, WorkspaceError> {
     Ok(parent.join(format!("{DELETION_LOCK_PREFIX}{}.lock", &hash[..24])))
 }
 
-fn end_zmx_sessions(workspace: &Path, session_names: &[String]) -> Result<(), WorkspaceError> {
-    if session_names.is_empty() {
-        return Ok(());
+fn zmx_sessions(workspace: &Path) -> Result<Vec<String>, WorkspaceError> {
+    use std::io::Read;
+
+    let namespace = verify_zmx_namespace(workspace)?;
+    let zmx = workspace.join("bin").join("zmx.exe");
+    let mut child = Command::new(&zmx)
+        .args(["list", "--short"])
+        .env("ZMX_DIR", namespace)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| {
+            WorkspaceError::OwnershipUncertain(format!(
+                "could not enumerate workspace-scoped zmx sessions: {error}"
+            ))
+        })?;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(WorkspaceError::OwnershipUncertain(
+                    "workspace-scoped zmx session enumeration timed out".into(),
+                ));
+            }
+            Err(error) => {
+                return Err(WorkspaceError::OwnershipUncertain(format!(
+                    "could not verify workspace-scoped zmx sessions: {error}"
+                )))
+            }
+        }
+    };
+    let mut stdout = String::new();
+    let mut stderr = String::new();
+    child
+        .stdout
+        .take()
+        .expect("zmx stdout was piped")
+        .read_to_string(&mut stdout)
+        .map_err(|error| {
+            WorkspaceError::OwnershipUncertain(format!(
+                "could not read workspace-scoped zmx sessions: {error}"
+            ))
+        })?;
+    child
+        .stderr
+        .take()
+        .expect("zmx stderr was piped")
+        .read_to_string(&mut stderr)
+        .map_err(|error| {
+            WorkspaceError::OwnershipUncertain(format!(
+                "could not read workspace-scoped zmx diagnostics: {error}"
+            ))
+        })?;
+    if !status.success() {
+        return Err(WorkspaceError::OwnershipUncertain(format!(
+            "workspace-scoped zmx session enumeration failed: {}",
+            stderr.trim()
+        )));
     }
+    Ok(stdout
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_string)
+        .collect())
+}
+
+fn end_zmx_sessions(workspace: &Path, session_names: &[String]) -> Result<(), WorkspaceError> {
+    let namespace = verify_zmx_namespace(workspace)?;
     let zmx = workspace.join("bin").join("zmx.exe");
     for session_name in session_names {
         let mut child = Command::new(&zmx)
             .args(["kill", session_name, "--force"])
+            .env("ZMX_DIR", &namespace)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -895,6 +1399,7 @@ fn start_daemon(workspace: &Path) -> Result<(), WorkspaceError> {
     let mut command = Command::new(daemon);
     command
         .env("GRAPHCODE_SUPPORT_DIR", workspace)
+        .env("ZMX_DIR", zmx_namespace_directory(workspace))
         .current_dir(workspace)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -1045,7 +1550,7 @@ fn verify_no_owned_processes(workspace: &Path) -> Result<(), WorkspaceError> {
                 executable,
                 processes
                     .iter()
-                    .map(u32::to_string)
+                    .map(|process| process.pid.to_string())
                     .collect::<Vec<_>>()
                     .join(", ")
             )));
@@ -1060,7 +1565,117 @@ fn verify_no_owned_processes(_workspace: &Path) -> Result<(), WorkspaceError> {
 }
 
 #[cfg(windows)]
-fn owned_processes(workspace: &Path, executable: &str) -> Result<Vec<u32>, WorkspaceError> {
+struct OwnedProcess {
+    handle: windows_sys::Win32::Foundation::HANDLE,
+    pid: u32,
+    executable: String,
+    expected_path: PathBuf,
+}
+
+#[cfg(not(windows))]
+struct OwnedProcess;
+
+#[cfg(windows)]
+impl OwnedProcess {
+    fn image_path(&self) -> Result<PathBuf, WorkspaceError> {
+        use windows_sys::Win32::Foundation::GetLastError;
+        use windows_sys::Win32::System::Threading::QueryFullProcessImageNameW;
+
+        let mut buffer = vec![0u16; 32_768];
+        let mut length = buffer.len() as u32;
+        unsafe {
+            if QueryFullProcessImageNameW(self.handle, 0, buffer.as_mut_ptr(), &mut length) == 0 {
+                let error = GetLastError();
+                if error == windows_sys::Win32::Foundation::ERROR_ACCESS_DENIED {
+                    return Err(WorkspaceError::PermissionDenied(format!(
+                        "could not resolve {} process {}",
+                        self.executable, self.pid
+                    )));
+                }
+                return Err(WorkspaceError::ProcessOwnershipUncertain(format!(
+                    "could not resolve {} process {} (Windows error {error})",
+                    self.executable, self.pid
+                )));
+            }
+        }
+        canonical_existing(Path::new(&String::from_utf16_lossy(
+            &buffer[..length as usize],
+        )))
+    }
+
+    fn is_running(&self) -> Result<bool, WorkspaceError> {
+        use windows_sys::Win32::Foundation::{GetLastError, STILL_ACTIVE};
+        use windows_sys::Win32::System::Threading::GetExitCodeProcess;
+
+        let mut exit_code = 0;
+        unsafe {
+            if GetExitCodeProcess(self.handle, &mut exit_code) == 0 {
+                return Err(WorkspaceError::ProcessOwnershipUncertain(format!(
+                    "could not inspect {} process {} (Windows error {})",
+                    self.executable,
+                    self.pid,
+                    GetLastError()
+                )));
+            }
+        }
+        Ok(exit_code == STILL_ACTIVE as u32)
+    }
+
+    fn terminate(self) -> Result<(), WorkspaceError> {
+        use windows_sys::Win32::Foundation::{GetLastError, WAIT_OBJECT_0};
+        use windows_sys::Win32::System::Threading::{TerminateProcess, WaitForSingleObject};
+
+        if !self.is_running()? {
+            return Ok(());
+        }
+        let actual = match self.image_path() {
+            Ok(path) => path,
+            Err(_) if !self.is_running()? => return Ok(()),
+            Err(error) => return Err(error),
+        };
+        if !same_path(&actual, &self.expected_path) {
+            return Err(WorkspaceError::ProcessOwnershipUncertain(format!(
+                "{} process {} changed executable identity before termination",
+                self.executable, self.pid
+            )));
+        }
+        unsafe {
+            if TerminateProcess(self.handle, 1) == 0 {
+                if !self.is_running()? {
+                    return Ok(());
+                }
+                return Err(WorkspaceError::TeardownIncomplete(format!(
+                    "could not stop {} process {} (Windows error {})",
+                    self.executable,
+                    self.pid,
+                    GetLastError()
+                )));
+            }
+            if WaitForSingleObject(self.handle, 5_000) != WAIT_OBJECT_0 {
+                return Err(WorkspaceError::TeardownIncomplete(format!(
+                    "{} process {} did not stop within five seconds",
+                    self.executable, self.pid
+                )));
+            }
+        }
+        Ok(())
+    }
+}
+
+#[cfg(windows)]
+impl Drop for OwnedProcess {
+    fn drop(&mut self) {
+        unsafe {
+            windows_sys::Win32::Foundation::CloseHandle(self.handle);
+        }
+    }
+}
+
+#[cfg(windows)]
+fn owned_processes(
+    workspace: &Path,
+    executable: &str,
+) -> Result<Vec<OwnedProcess>, WorkspaceError> {
     use std::mem::size_of;
     use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, INVALID_HANDLE_VALUE};
     use windows_sys::Win32::System::Diagnostics::ToolHelp::{
@@ -1068,9 +1683,10 @@ fn owned_processes(workspace: &Path, executable: &str) -> Result<Vec<u32>, Works
         TH32CS_SNAPPROCESS,
     };
     use windows_sys::Win32::System::Threading::{
-        OpenProcess, QueryFullProcessImageNameW, PROCESS_QUERY_LIMITED_INFORMATION,
+        OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE,
     };
 
+    const PROCESS_SYNCHRONIZE: u32 = 0x0010_0000;
     let expected = canonical_existing(&workspace.join("bin").join(executable))?;
     let mut owned = Vec::new();
     unsafe {
@@ -1106,8 +1722,11 @@ fn owned_processes(workspace: &Path, executable: &str) -> Result<Vec<u32>, Works
                 .unwrap_or(entry.szExeFile.len());
             let name = String::from_utf16_lossy(&entry.szExeFile[..length]);
             if name.eq_ignore_ascii_case(executable) {
-                let process =
-                    OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, entry.th32ProcessID);
+                let process = OpenProcess(
+                    PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_TERMINATE | PROCESS_SYNCHRONIZE,
+                    0,
+                    entry.th32ProcessID,
+                );
                 if process.is_null() {
                     let error = GetLastError();
                     if error == windows_sys::Win32::Foundation::ERROR_ACCESS_DENIED {
@@ -1121,35 +1740,15 @@ fn owned_processes(workspace: &Path, executable: &str) -> Result<Vec<u32>, Works
                         entry.th32ProcessID
                     )));
                 }
-                struct Process(windows_sys::Win32::Foundation::HANDLE);
-                impl Drop for Process {
-                    fn drop(&mut self) {
-                        unsafe {
-                            CloseHandle(self.0);
-                        }
-                    }
-                }
-                let process = Process(process);
-                let mut buffer = vec![0u16; 32_768];
-                let mut length = buffer.len() as u32;
-                if QueryFullProcessImageNameW(process.0, 0, buffer.as_mut_ptr(), &mut length) == 0 {
-                    let error = GetLastError();
-                    if error == windows_sys::Win32::Foundation::ERROR_ACCESS_DENIED {
-                        return Err(WorkspaceError::PermissionDenied(format!(
-                            "could not resolve {executable} process {}",
-                            entry.th32ProcessID
-                        )));
-                    }
-                    return Err(WorkspaceError::ProcessOwnershipUncertain(format!(
-                        "could not resolve {executable} process {} (Windows error {error})",
-                        entry.th32ProcessID
-                    )));
-                }
-                let actual = canonical_existing(Path::new(&String::from_utf16_lossy(
-                    &buffer[..length as usize],
-                )))?;
+                let process = OwnedProcess {
+                    handle: process,
+                    pid: entry.th32ProcessID,
+                    executable: executable.to_string(),
+                    expected_path: expected.clone(),
+                };
+                let actual = process.image_path()?;
                 if same_path(&actual, &expected) {
-                    owned.push(entry.th32ProcessID);
+                    owned.push(process);
                 }
             }
             has_entry = Process32NextW(snapshot, &mut entry) != 0;
@@ -1158,91 +1757,261 @@ fn owned_processes(workspace: &Path, executable: &str) -> Result<Vec<u32>, Works
     Ok(owned)
 }
 
-#[cfg(windows)]
-fn terminate_owned_processes(workspace: &Path, executable: &str) -> Result<(), WorkspaceError> {
-    use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, WAIT_OBJECT_0};
-    use windows_sys::Win32::System::Threading::{
-        OpenProcess, TerminateProcess, WaitForSingleObject, PROCESS_TERMINATE,
-    };
+#[cfg(not(windows))]
+fn owned_processes(
+    _workspace: &Path,
+    _executable: &str,
+) -> Result<Vec<OwnedProcess>, WorkspaceError> {
+    Ok(Vec::new())
+}
 
-    const PROCESS_SYNCHRONIZE: u32 = 0x0010_0000;
-    for pid in owned_processes(workspace, executable)? {
+#[cfg(windows)]
+fn terminate_owned_processes(processes: Vec<OwnedProcess>) -> Result<(), WorkspaceError> {
+    for process in processes {
+        process.terminate()?;
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn terminate_owned_processes(_processes: Vec<OwnedProcess>) -> Result<(), WorkspaceError> {
+    Ok(())
+}
+
+fn recovery_root(home: &Path) -> Result<PathBuf, WorkspaceError> {
+    let home = canonical_existing(home)?;
+    let root = home.join(RECOVERY_DIRECTORY);
+    match fs::create_dir(&root) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+        Err(error) => {
+            return Err(map_io_error(
+                error,
+                format!("could not create recovery directory {}", root.display()),
+            ))
+        }
+    }
+    let metadata = fs::symlink_metadata(&root).map_err(|error| {
+        map_io_error(
+            error,
+            format!("could not inspect recovery directory {}", root.display()),
+        )
+    })?;
+    if metadata_is_reparse_point(&metadata) || !metadata.is_dir() {
+        return Err(WorkspaceError::RecoveryUncertain(format!(
+            "{} is not a plain local directory",
+            root.display()
+        )));
+    }
+    let root = canonical_existing(&root)?;
+    if root.parent().is_none_or(|parent| !same_path(parent, &home)) {
+        return Err(WorkspaceError::RecoveryUncertain(format!(
+            "{} is not a direct child of {}",
+            root.display(),
+            home.display()
+        )));
+    }
+    Ok(root)
+}
+
+fn recovery_destination(home: &Path, target: &Path) -> Result<PathBuf, WorkspaceError> {
+    let root = recovery_root(home)?;
+    verify_local_recovery_volume(target, &root)?;
+    probe_recovery_rename(&root)?;
+    let name = target
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| {
+            WorkspaceError::RecoveryUncertain(format!(
+                "{} has no valid recovery name",
+                target.display()
+            ))
+        })?;
+    for _ in 0..16 {
+        let candidate = root.join(format!("{name}-{}", Uuid::new_v4()));
+        if !candidate.exists() {
+            return Ok(candidate);
+        }
+    }
+    Err(WorkspaceError::RecoveryUncertain(
+        "could not allocate a unique recovery location".into(),
+    ))
+}
+
+fn validate_recovery_destination(
+    home: &Path,
+    target: &Path,
+    expected: &str,
+) -> Result<PathBuf, WorkspaceError> {
+    let root = recovery_root(home)?;
+    verify_local_recovery_volume(target, &root)?;
+    probe_recovery_rename(&root)?;
+    let expected = PathBuf::from(expected);
+    let parent = expected
+        .parent()
+        .ok_or_else(|| WorkspaceError::ConfirmationMismatch {
+            expected: expected.display().to_string(),
+            actual: root.display().to_string(),
+        })?;
+    let parent = canonical_existing(parent)?;
+    if !same_path(&parent, &root) || expected.exists() {
+        return Err(WorkspaceError::ConfirmationMismatch {
+            expected: expected.display().to_string(),
+            actual: root.display().to_string(),
+        });
+    }
+    if expected.file_name().is_none() {
+        return Err(WorkspaceError::RecoveryUncertain(
+            "the confirmed recovery destination has no file name".into(),
+        ));
+    }
+    Ok(root.join(expected.file_name().expect("checked above")))
+}
+
+fn probe_recovery_rename(root: &Path) -> Result<(), WorkspaceError> {
+    let source = root.join(format!(".graphcode-recovery-probe-{}", Uuid::new_v4()));
+    let destination = source.with_extension("moved");
+    fs::create_dir(&source).map_err(|error| {
+        map_io_error(
+            error,
+            format!("could not create a recovery probe in {}", root.display()),
+        )
+    })?;
+    let result = fs::rename(&source, &destination).and_then(|()| fs::remove_dir(&destination));
+    if let Err(error) = result {
+        let _ = fs::remove_dir(&source);
+        let _ = fs::remove_dir(&destination);
+        return Err(map_io_error(
+            error,
+            format!(
+                "could not prove atomic rename permission in {}",
+                root.display()
+            ),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn verify_local_recovery_volume(target: &Path, recovery_root: &Path) -> Result<(), WorkspaceError> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::{GetDriveTypeW, GetVolumePathNameW};
+    use windows_sys::Win32::System::WindowsProgramming::DRIVE_FIXED;
+
+    fn volume_root(path: &Path) -> Result<Vec<u16>, WorkspaceError> {
+        let wide: Vec<u16> = path
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        let mut root = vec![0u16; 32_768];
         unsafe {
-            let process = OpenProcess(PROCESS_TERMINATE | PROCESS_SYNCHRONIZE, 0, pid);
-            if process.is_null() {
-                return Err(WorkspaceError::PermissionDenied(format!(
-                    "could not open {executable} process {pid} for termination (Windows error {})",
-                    GetLastError()
-                )));
-            }
-            struct Process(windows_sys::Win32::Foundation::HANDLE);
-            impl Drop for Process {
-                fn drop(&mut self) {
-                    unsafe {
-                        CloseHandle(self.0);
-                    }
-                }
-            }
-            let process = Process(process);
-            if TerminateProcess(process.0, 1) == 0 {
-                return Err(WorkspaceError::TeardownIncomplete(format!(
-                    "could not stop {executable} process {pid} (Windows error {})",
-                    GetLastError()
-                )));
-            }
-            if WaitForSingleObject(process.0, 5_000) != WAIT_OBJECT_0 {
-                return Err(WorkspaceError::TeardownIncomplete(format!(
-                    "{executable} process {pid} did not stop within five seconds"
+            if GetVolumePathNameW(wide.as_ptr(), root.as_mut_ptr(), root.len() as u32) == 0 {
+                return Err(WorkspaceError::RecoveryUncertain(format!(
+                    "could not determine the volume for {}",
+                    path.display()
                 )));
             }
         }
+        Ok(root)
+    }
+
+    let target_root = volume_root(target)?;
+    let recovery_volume = volume_root(recovery_root)?;
+    unsafe {
+        if GetDriveTypeW(target_root.as_ptr()) != DRIVE_FIXED
+            || GetDriveTypeW(recovery_volume.as_ptr()) != DRIVE_FIXED
+        {
+            return Err(WorkspaceError::RecoveryUncertain(
+                "recoverable deletion requires a fixed local volume".into(),
+            ));
+        }
+    }
+    let target_identity = StableDirectory::open(target)?;
+    let recovery_identity = StableDirectory::open(recovery_root)?;
+    if target_identity.identity.volume_serial != recovery_identity.identity.volume_serial {
+        return Err(WorkspaceError::RecoveryUncertain(
+            "workspace and recovery directory are not on the same volume".into(),
+        ));
     }
     Ok(())
 }
 
 #[cfg(not(windows))]
-fn terminate_owned_processes(_workspace: &Path, _executable: &str) -> Result<(), WorkspaceError> {
+fn verify_local_recovery_volume(
+    _target: &Path,
+    _recovery_root: &Path,
+) -> Result<(), WorkspaceError> {
     Ok(())
 }
 
 #[cfg(windows)]
-fn move_to_recycle_bin(path: &Path) -> Result<(), WorkspaceError> {
+fn move_to_recovery(
+    source: &Path,
+    destination: &Path,
+    stable: &StableDirectory,
+) -> Result<(), WorkspaceError> {
     use std::os::windows::ffi::OsStrExt;
-    use windows_sys::Win32::UI::Shell::{
-        SHFileOperationW, FOF_ALLOWUNDO, FOF_NOCONFIRMATION, FOF_SILENT, FO_DELETE, SHFILEOPSTRUCTW,
-    };
+    use windows_sys::Win32::Foundation::GetLastError;
+    use windows_sys::Win32::Storage::FileSystem::{MoveFileExW, MOVEFILE_WRITE_THROUGH};
 
-    let mut from: Vec<u16> = path.as_os_str().encode_wide().collect();
-    from.extend([0, 0]);
-    let mut operation: SHFILEOPSTRUCTW = unsafe { std::mem::zeroed() };
-    operation.wFunc = FO_DELETE;
-    operation.pFrom = from.as_ptr();
-    operation.fFlags = (FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_SILENT) as u16;
-    let result = unsafe { SHFileOperationW(&mut operation) };
-    if result != 0 {
-        return Err(WorkspaceError::RecycleBin(format!(
-            "Windows shell error {result}"
-        )));
+    stable.verify_path(source)?;
+    let source_wide: Vec<u16> = source
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let destination_wide: Vec<u16> = destination
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    unsafe {
+        if MoveFileExW(
+            source_wide.as_ptr(),
+            destination_wide.as_ptr(),
+            MOVEFILE_WRITE_THROUGH,
+        ) == 0
+        {
+            let error = GetLastError();
+            if error == windows_sys::Win32::Foundation::ERROR_ACCESS_DENIED {
+                return Err(WorkspaceError::PermissionDenied(format!(
+                    "could not move {} to {}",
+                    source.display(),
+                    destination.display()
+                )));
+            }
+            return Err(WorkspaceError::RecoveryUncertain(format!(
+                "could not move {} to {} (Windows error {})",
+                source.display(),
+                destination.display(),
+                error
+            )));
+        }
     }
-    if operation.fAnyOperationsAborted != 0 {
-        return Err(WorkspaceError::RecycleBin(
-            "the Windows shell aborted the operation".into(),
-        ));
-    }
-    if path.exists() {
-        return Err(WorkspaceError::RecycleBin(format!(
-            "{} still exists after the shell operation",
-            path.display()
+    stable.verify_path(destination)?;
+    if source.exists() {
+        return Err(WorkspaceError::RecoveryUncertain(format!(
+            "{} still exists after the recovery move",
+            source.display()
         )));
     }
     Ok(())
 }
 
 #[cfg(not(windows))]
-fn move_to_recycle_bin(_path: &Path) -> Result<(), WorkspaceError> {
-    Err(WorkspaceError::RecycleBin(
-        "recoverable workspace deletion is only implemented on Windows".into(),
-    ))
+fn move_to_recovery(
+    source: &Path,
+    destination: &Path,
+    stable: &StableDirectory,
+) -> Result<(), WorkspaceError> {
+    stable.verify_path(source)?;
+    fs::rename(source, destination).map_err(|error| {
+        map_io_error(
+            error,
+            format!("could not move {} to recovery", source.display()),
+        )
+    })
 }
 
 #[cfg(windows)]
@@ -1345,17 +2114,107 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
+    fn stable_directory_identity_rejects_path_replacement() {
+        let root = std::env::temp_dir().join(format!("graphcode-identity-{}", Uuid::new_v4()));
+        let target = root.join("target");
+        let original = root.join("original");
+        fs::create_dir_all(&target).unwrap();
+        let stable = StableDirectory::open(&target).unwrap();
+
+        fs::rename(&target, &original).unwrap();
+        fs::create_dir(&target).unwrap();
+        assert!(matches!(
+            stable.verify_path(&target),
+            Err(WorkspaceError::PathUncertain(_))
+        ));
+
+        drop(stable);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn recovery_destination_must_stay_in_graphcode_recovery_root() {
+        let root = std::env::temp_dir().join(format!("graphcode-recovery-{}", Uuid::new_v4()));
+        let home = root.join("home");
+        let target = home.join(".graphcode-research");
+        fs::create_dir_all(&target).unwrap();
+        let outside = home.join("not-recovery").join("workspace");
+        fs::create_dir_all(outside.parent().unwrap()).unwrap();
+
+        assert!(matches!(
+            validate_recovery_destination(&home, &target, outside.to_str().unwrap()),
+            Err(WorkspaceError::ConfirmationMismatch { .. })
+        ));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn zmx_namespace_record_is_random_and_workspace_scoped() {
+        let root = std::env::temp_dir().join(format!("graphcode-zmx-owner-{}", Uuid::new_v4()));
+        let first = root.join(".graphcode-first");
+        let second = root.join(".graphcode-second");
+        fs::create_dir_all(&first).unwrap();
+        fs::create_dir_all(&second).unwrap();
+        initialize_zmx_namespace(&first).unwrap();
+
+        let marker = fs::read_to_string(first.join(ZMX_NAMESPACE_MARKER)).unwrap();
+        let secret = marker.lines().nth(2).unwrap();
+        assert_eq!(secret.len(), 64);
+        assert!(secret.bytes().all(|byte| byte.is_ascii_hexdigit()));
+
+        fs::create_dir(second.join(ZMX_NAMESPACE_DIRECTORY)).unwrap();
+        fs::write(second.join(ZMX_NAMESPACE_MARKER), marker).unwrap();
+        assert!(matches!(
+            verify_zmx_namespace(&second),
+            Err(WorkspaceError::OwnershipUncertain(_))
+        ));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn workspace_mutations_share_one_cross_thread_mutex() {
+        use std::sync::mpsc;
+
+        let root = std::env::temp_dir().join(format!("graphcode-mutex-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let first = WorkspaceMutationGuard::acquire(&root).unwrap();
+        let second_root = root.clone();
+        let (sender, receiver) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let _second = WorkspaceMutationGuard::acquire(&second_root).unwrap();
+            sender.send(()).unwrap();
+        });
+
+        assert!(receiver.recv_timeout(Duration::from_millis(150)).is_err());
+        drop(first);
+        receiver.recv_timeout(Duration::from_secs(2)).unwrap();
+        worker.join().unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
     fn deletion_transaction_cleans_runtime_files_before_recoverable_move() {
         let root = std::env::temp_dir().join(format!("graphcode-delete-flow-{}", Uuid::new_v4()));
         let home = root.join("home");
         let default = home.join(".graphcode");
         let target = home.join(".graphcode-research");
-        let recovered = root.join("recovered-workspace");
+        let recovered = home.join(RECOVERY_DIRECTORY).join("research-test-recovery");
         for workspace in [&default, &target] {
             fs::create_dir_all(workspace.join("bin")).unwrap();
             fs::write(workspace.join("bin").join("graphcoded.exe"), b"test").unwrap();
             fs::write(workspace.join("bin").join("zmx.exe"), b"test").unwrap();
         }
+        initialize_zmx_namespace(&target).unwrap();
+        fs::create_dir_all(target.join("projects")).unwrap();
+        fs::write(
+            target.join("projects").join("forged.json"),
+            br#"{"nodes":[{"id":"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(workspace_contents(&target).session_names.len(), 1);
         fs::write(target.join(LOCK_FILE), "999999").unwrap();
         fs::write(target.join(LEGACY_LOCK_FILE), "999999").unwrap();
         fs::write(target.join(RENDEZVOUS_FILE), [7u8; 32]).unwrap();
@@ -1367,11 +2226,11 @@ mod tests {
             &default,
             target.to_str().unwrap(),
             expected.to_str().unwrap(),
-            |path| {
-                fs::rename(path, &recovered).map_err(|error| {
-                    WorkspaceError::RecycleBin(format!("test move failed: {error}"))
-                })
-            },
+            recovered.to_str().unwrap(),
+            // Editable graph IDs are impact metadata only; the trusted namespace
+            // is the sole source of sessions authorized for teardown.
+            |_| Ok(Vec::new()),
+            move_to_recovery,
         )
         .unwrap();
 
@@ -1386,17 +2245,26 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    #[ignore = "moves an explicitly approved disposable directory to the Windows Recycle Bin"]
-    fn recycle_bin_moves_only_disposable_directory() {
+    #[ignore = "atomically moves only an explicitly approved disposable directory"]
+    fn recovery_move_uses_only_disposable_directory() {
         let approved = std::env::var_os("GRAPHCODE_TEST_DISPOSABLE_ROOT")
             .map(PathBuf::from)
             .expect("GRAPHCODE_TEST_DISPOSABLE_ROOT must name the approved session folder");
         let approved = canonical_existing(&approved).unwrap();
-        let target = approved.join(format!("graphcode-recycle-test-{}", Uuid::new_v4()));
+        let root = approved.join(format!("graphcode-recovery-test-{}", Uuid::new_v4()));
+        let target = root.join("workspace");
+        let recovery = root.join("recovery");
+        fs::create_dir(&root).unwrap();
         fs::create_dir(&target).unwrap();
+        fs::create_dir(&recovery).unwrap();
         fs::write(target.join("marker.txt"), b"disposable").unwrap();
+        let destination = recovery.join("workspace-recovered");
+        let stable = StableDirectory::open(&target).unwrap();
 
-        move_to_recycle_bin(&target).unwrap();
+        verify_local_recovery_volume(&target, &recovery).unwrap();
+        move_to_recovery(&target, &destination, &stable).unwrap();
         assert!(!target.exists());
+        assert!(destination.join("marker.txt").is_file());
+        fs::remove_dir_all(root).unwrap();
     }
 }

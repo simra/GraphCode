@@ -170,8 +170,8 @@ export function WorkspacesDialog({ onClose }: { onClose(): void }) {
                 This ends its graphcoded process and {deleting.terminalSessions}{" "}
                 terminal session
                 {deleting.terminalSessions === 1 ? "" : "s"}, removes its owned
-                lock and rendezvous files, and moves the workspace folder to the
-                Windows Recycle Bin.
+                lock and rendezvous files, and atomically moves the workspace
+                folder to the GraphCode recovery folder.
               </p>
               <p>
                 It contains {deleting.projects} project
@@ -179,6 +179,8 @@ export function WorkspacesDialog({ onClose }: { onClose(): void }) {
                 {deleting.loops === 1 ? "" : "s"}.
               </p>
               <code>{deleting.canonicalPath}</code>
+              <p>Recovery location (move this folder back to restore it):</p>
+              <code>{deleting.recoveryPath}</code>
               <div className="workspace-delete-actions">
                 <button
                   type="button"
@@ -193,7 +195,11 @@ export function WorkspacesDialog({ onClose }: { onClose(): void }) {
                   disabled={busy !== undefined}
                   onClick={() =>
                     void run(`delete:${deleting.id}`, () =>
-                      deleteWorkspace(deleting.id, deleting.canonicalPath),
+                      deleteWorkspace(
+                        deleting.id,
+                        deleting.canonicalPath,
+                        deleting.recoveryPath,
+                      ),
                     ).then((succeeded) => {
                       if (succeeded) setDeleting(undefined);
                     })

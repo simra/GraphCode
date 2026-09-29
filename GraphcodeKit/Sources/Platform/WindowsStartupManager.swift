@@ -343,7 +343,11 @@ import Foundation
       pipeOverride: String? = nil
     ) -> String {
       var lines = [
-        "$env:GRAPHCODE_SUPPORT_DIR = \(powerShellLiteral(supportDirectory.path))"
+        "$env:GRAPHCODE_SUPPORT_DIR = \(powerShellLiteral(supportDirectory.path))",
+        "$graphcodeZmxMarker = Join-Path $env:GRAPHCODE_SUPPORT_DIR '.graphcode-zmx-namespace-v1'",
+        "if (Test-Path -LiteralPath $graphcodeZmxMarker -PathType Leaf) {",
+        "  $env:ZMX_DIR = Join-Path $env:GRAPHCODE_SUPPORT_DIR '.graphcode-zmx'",
+        "}",
       ]
       if let pipeOverride {
         lines.append(

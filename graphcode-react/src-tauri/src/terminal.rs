@@ -431,7 +431,7 @@ pub async fn history(node_id: &str, max_bytes: usize) -> Result<TerminalHistory,
     let session_name = session_name(node_id);
     let zmx = zmx_binary()?;
     session_info(&zmx, &session_name).await?;
-    let mut child = zmx_command(&zmx)
+    let mut child = zmx_command(&zmx)?
         .args(["history", &session_name, "--vt"])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -673,7 +673,7 @@ fn spawn_attach(
     session_name: &str,
     working_directory: Option<&Path>,
 ) -> Result<Child, TerminalError> {
-    let mut command = zmx_command(zmx);
+    let mut command = zmx_command(zmx)?;
     command
         .args(["attach", session_name])
         .stdin(Stdio::piped())
@@ -993,7 +993,7 @@ async fn run_command<const N: usize>(
 ) -> Result<std::process::Output, TerminalError> {
     timeout(
         PROCESS_TIMEOUT,
-        zmx_command(zmx)
+        zmx_command(zmx)?
             .args(arguments)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -1006,14 +1006,19 @@ async fn run_command<const N: usize>(
     .map_err(|error| TerminalError::Launch(error.to_string()))
 }
 
-fn zmx_command(zmx: &Path) -> Command {
+fn zmx_command(zmx: &Path) -> Result<Command, TerminalError> {
     let mut command = Command::new(zmx);
+    if let Some(namespace) = crate::workspace::configured_zmx_namespace()
+        .map_err(|error| TerminalError::ZmxUnavailable(error.to_string()))?
+    {
+        command.env("ZMX_DIR", namespace);
+    }
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
         command.as_std_mut().creation_flags(0x0800_0000);
     }
-    command
+    Ok(command)
 }
 
 async fn read_bounded_tail<R: AsyncRead + Unpin>(

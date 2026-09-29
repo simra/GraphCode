@@ -16,6 +16,7 @@ export interface WorkspaceDeletionPlan {
   id: string;
   name: string;
   canonicalPath: string;
+  recoveryPath: string;
   projects: number;
   loops: number;
   terminalSessions: number;
@@ -45,8 +46,13 @@ export function prepareWorkspaceDeletion(
 export function deleteWorkspace(
   id: string,
   expectedPath: string,
+  expectedRecoveryPath: string,
 ): Promise<void> {
-  return invoke("delete_workspace", { id, expectedPath });
+  return invoke("delete_workspace", {
+    id,
+    expectedPath,
+    expectedRecoveryPath,
+  });
 }
 
 export function openWorkspace(id: string): Promise<void> {

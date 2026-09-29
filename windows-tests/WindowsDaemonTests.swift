@@ -888,12 +888,14 @@ final class WindowsDaemonTests: XCTestCase {
           .trimmingCharacters(in: .whitespacesAndNewlines)
           .replacingOccurrences(of: "\\", with: "/"),
         support.path.replacingOccurrences(of: "\\", with: "/"))
-      XCTAssertFalse(
-        WindowsStartupManager.launcherContents(
-          daemonURL: daemon,
-          supportDirectory: support
-        )
-        .contains("GRAPHCODE_SOCKET"))
+      let launcher = WindowsStartupManager.launcherContents(
+        daemonURL: daemon,
+        supportDirectory: support
+      )
+      XCTAssertFalse(launcher.contains("GRAPHCODE_SOCKET"))
+      XCTAssertTrue(launcher.contains(".graphcode-zmx-namespace-v1"))
+      XCTAssertTrue(launcher.contains("$env:ZMX_DIR"))
+      XCTAssertTrue(launcher.contains(".graphcode-zmx"))
     }
 
     func testWindowsScheduledTaskXMLRegistersLongUnicodeSupportAndPipe() async throws {

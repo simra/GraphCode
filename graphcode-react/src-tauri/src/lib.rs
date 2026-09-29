@@ -309,11 +309,17 @@ async fn prepare_workspace_deletion(
 }
 
 #[tauri::command]
-async fn delete_workspace(id: String, expected_path: String) -> Result<(), BridgeError> {
-    tauri::async_runtime::spawn_blocking(move || workspace::delete(&id, &expected_path))
-        .await
-        .map_err(|error| BridgeError::WorkspaceTask(error.to_string()))?
-        .map_err(Into::into)
+async fn delete_workspace(
+    id: String,
+    expected_path: String,
+    expected_recovery_path: String,
+) -> Result<(), BridgeError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        workspace::delete(&id, &expected_path, &expected_recovery_path)
+    })
+    .await
+    .map_err(|error| BridgeError::WorkspaceTask(error.to_string()))?
+    .map_err(Into::into)
 }
 
 #[tauri::command]

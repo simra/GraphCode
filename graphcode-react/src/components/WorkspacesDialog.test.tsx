@@ -68,6 +68,7 @@ beforeEach(() => {
       id: workspace.id,
       name: workspace.name,
       canonicalPath: workspace.path,
+      recoveryPath: "C:\\Users\\me\\.graphcode_recovery\\research-123",
       projects: workspace.projects,
       loops: workspace.loops,
       terminalSessions: workspace.terminalSessions,
@@ -127,7 +128,10 @@ describe("WorkspacesDialog", () => {
     expect(container.textContent).toContain("1 project");
     expect(container.textContent).toContain("3 loops");
     expect(container.textContent).toContain("4 terminal sessions");
-    expect(container.textContent).toContain("Windows Recycle Bin");
+    expect(container.textContent).toContain(
+      "C:\\Users\\me\\.graphcode_recovery\\research-123",
+    );
+    expect(container.textContent).toContain("GraphCode recovery folder");
     expect(workspaceBridge.delete).not.toHaveBeenCalled();
 
     const confirm = Array.from(container.querySelectorAll("button")).find(
@@ -140,6 +144,7 @@ describe("WorkspacesDialog", () => {
     expect(workspaceBridge.delete).toHaveBeenCalledWith(
       workspaces[1].id,
       workspaces[1].path,
+      "C:\\Users\\me\\.graphcode_recovery\\research-123",
     );
   });
 });
