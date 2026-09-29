@@ -1,9 +1,12 @@
 import { useEffect, useState } from "react";
 import {
   createWorkspace,
+  deleteWorkspace,
   listWorkspaces,
   openWorkspace,
+  prepareWorkspaceDeletion,
   renameWorkspace,
+  type WorkspaceDeletionPlan,
   type WorkspaceSummary,
 } from "../bridge/workspaces";
 
@@ -11,6 +14,7 @@ export function WorkspacesDialog({ onClose }: { onClose(): void }) {
   const [workspaces, setWorkspaces] = useState<WorkspaceSummary[]>([]);
   const [newName, setNewName] = useState("");
   const [renaming, setRenaming] = useState<WorkspaceSummary>();
+  const [deleting, setDeleting] = useState<WorkspaceDeletionPlan>();
   const [renameValue, setRenameValue] = useState("");
   const [busy, setBusy] = useState<string>();
   const [error, setError] = useState<string>();
@@ -36,6 +40,18 @@ export function WorkspacesDialog({ onClose }: { onClose(): void }) {
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught));
       return false;
+    } finally {
+      setBusy(undefined);
+    }
+  };
+
+  const prepareDeletion = async (workspace: WorkspaceSummary) => {
+    setBusy(`prepare-delete:${workspace.id}`);
+    setError(undefined);
+    try {
+      setDeleting(await prepareWorkspaceDeletion(workspace.id));
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : String(caught));
     } finally {
       setBusy(undefined);
     }
@@ -114,15 +130,82 @@ export function WorkspacesDialog({ onClose }: { onClose(): void }) {
                   </button>
                   <button
                     type="button"
-                    disabled
-                    title="Deletion remains disabled until Windows can stop the workspace daemon and preserve recovery"
+                    disabled={
+                      workspace.isDefault ||
+                      workspace.isCurrent ||
+                      workspace.isOpen ||
+                      busy !== undefined
+                    }
+                    title={
+                      workspace.isDefault
+                        ? "The default workspace cannot be deleted"
+                        : workspace.isCurrent
+                          ? "Switch to another workspace before deleting this one"
+                          : workspace.isOpen
+                            ? "Quit the other GraphCode window before deleting this workspace"
+                            : undefined
+                    }
+                    onClick={() => void prepareDeletion(workspace)}
                   >
-                    Delete
+                    {busy === `prepare-delete:${workspace.id}`
+                      ? "Checking…"
+                      : "Delete"}
                   </button>
                 </div>
               </li>
             ))}
           </ul>
+          {deleting ? (
+            <section
+              className="workspace-delete-confirmation"
+              aria-labelledby="workspace-delete-title"
+            >
+              <div>
+                <p className="eyebrow">Recoverable workspace deletion</p>
+                <h3 id="workspace-delete-title">
+                  Delete the “{deleting.name}” workspace?
+                </h3>
+              </div>
+              <p>
+                This ends its graphcoded process and {deleting.terminalSessions}{" "}
+                terminal session
+                {deleting.terminalSessions === 1 ? "" : "s"}, removes its owned
+                lock and rendezvous files, and moves the workspace folder to the
+                Windows Recycle Bin.
+              </p>
+              <p>
+                It contains {deleting.projects} project
+                {deleting.projects === 1 ? "" : "s"} and {deleting.loops} loop
+                {deleting.loops === 1 ? "" : "s"}.
+              </p>
+              <code>{deleting.canonicalPath}</code>
+              <div className="workspace-delete-actions">
+                <button
+                  type="button"
+                  disabled={busy !== undefined}
+                  onClick={() => setDeleting(undefined)}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  className="danger-button"
+                  disabled={busy !== undefined}
+                  onClick={() =>
+                    void run(`delete:${deleting.id}`, () =>
+                      deleteWorkspace(deleting.id, deleting.canonicalPath),
+                    ).then((succeeded) => {
+                      if (succeeded) setDeleting(undefined);
+                    })
+                  }
+                >
+                  {busy === `delete:${deleting.id}`
+                    ? "Deleting…"
+                    : "Delete Workspace"}
+                </button>
+              </div>
+            </section>
+          ) : null}
           <form
             className="workspace-create"
             onSubmit={(event) => {

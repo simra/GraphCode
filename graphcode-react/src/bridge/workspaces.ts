@@ -9,6 +9,16 @@ export interface WorkspaceSummary {
   isOpen: boolean;
   projects: number;
   loops: number;
+  terminalSessions: number;
+}
+
+export interface WorkspaceDeletionPlan {
+  id: string;
+  name: string;
+  canonicalPath: string;
+  projects: number;
+  loops: number;
+  terminalSessions: number;
 }
 
 export function listWorkspaces(): Promise<WorkspaceSummary[]> {
@@ -24,6 +34,19 @@ export function renameWorkspace(
   name: string,
 ): Promise<WorkspaceSummary> {
   return invoke("rename_workspace", { id, name });
+}
+
+export function prepareWorkspaceDeletion(
+  id: string,
+): Promise<WorkspaceDeletionPlan> {
+  return invoke("prepare_workspace_deletion", { id });
+}
+
+export function deleteWorkspace(
+  id: string,
+  expectedPath: string,
+): Promise<void> {
+  return invoke("delete_workspace", { id, expectedPath });
 }
 
 export function openWorkspace(id: string): Promise<void> {

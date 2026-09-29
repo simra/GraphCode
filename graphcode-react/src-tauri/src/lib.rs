@@ -299,6 +299,24 @@ async fn rename_workspace(
 }
 
 #[tauri::command]
+async fn prepare_workspace_deletion(
+    id: String,
+) -> Result<workspace::WorkspaceDeletionPlan, BridgeError> {
+    tauri::async_runtime::spawn_blocking(move || workspace::prepare_delete(&id))
+        .await
+        .map_err(|error| BridgeError::WorkspaceTask(error.to_string()))?
+        .map_err(Into::into)
+}
+
+#[tauri::command]
+async fn delete_workspace(id: String, expected_path: String) -> Result<(), BridgeError> {
+    tauri::async_runtime::spawn_blocking(move || workspace::delete(&id, &expected_path))
+        .await
+        .map_err(|error| BridgeError::WorkspaceTask(error.to_string()))?
+        .map_err(Into::into)
+}
+
+#[tauri::command]
 async fn open_workspace(id: String) -> Result<(), BridgeError> {
     tauri::async_runtime::spawn_blocking(move || workspace::open(&id))
         .await
@@ -480,6 +498,8 @@ pub fn run() {
             list_workspaces,
             create_workspace,
             rename_workspace,
+            prepare_workspace_deletion,
+            delete_workspace,
             open_workspace,
             set_native_menu,
             load_navigation_history,

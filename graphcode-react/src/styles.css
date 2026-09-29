@@ -3094,7 +3094,8 @@ kbd {
 }
 
 .workspace-row-actions button,
-.workspace-create button {
+.workspace-create button,
+.workspace-delete-actions button {
   padding: 7px 10px;
   border: 1px solid #40483c;
   border-radius: 7px;
@@ -3104,9 +3105,48 @@ kbd {
 }
 
 .workspace-row-actions button:disabled,
-.workspace-create button:disabled {
+.workspace-create button:disabled,
+.workspace-delete-actions button:disabled {
   cursor: not-allowed;
   opacity: 0.42;
+}
+
+.workspace-delete-confirmation {
+  display: grid;
+  gap: 10px;
+  padding: 16px;
+  border: 1px solid #74443a;
+  border-radius: 10px;
+  background: #211512;
+}
+
+.workspace-delete-confirmation h3,
+.workspace-delete-confirmation p {
+  margin: 0;
+}
+
+.workspace-delete-confirmation p {
+  color: #c8b8b2;
+  font-size: 0.84rem;
+  line-height: 1.5;
+}
+
+.workspace-delete-confirmation code {
+  overflow-wrap: anywhere;
+  color: #f0d7ce;
+  font-size: 0.78rem;
+}
+
+.workspace-delete-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.workspace-delete-actions .danger-button {
+  border-color: #9b5548;
+  color: #fff2ed;
+  background: #6d3026;
 }
 
 .workspace-create {
