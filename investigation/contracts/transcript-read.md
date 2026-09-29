@@ -20,6 +20,14 @@ thread UUID. Two nodes in the same CWD therefore cannot select each other's roll
 the banked/resolved ID and exact rollout cannot both be established, the read is missing;
 the daemon does not fall back to newest-by-CWD.
 
+Remote Codex resolution treats both the banked file and SQLite result as untrusted text.
+A single Python resolver accepts only the canonical hyphenated hexadecimal UUID shape,
+normalizes valid uppercase IDs to lowercase, and rejects quotes, glob characters,
+whitespace, controls, and SQL-shaped values before lookup. SQLite queries use bound
+parameters. Rollout discovery walks filenames and compares an exact suffix constructed
+only from the validated canonical UUID; no provider-controlled text enters SQL, a shell
+command, or a `find` glob.
+
 The API is `DaemonCommand.transcript(projectPath:query:)`, available only in protocol v2.
 Its `DaemonEvent.transcriptPage` answer is a response carrying the request ID. It is never
 broadcast, sequenced, retained for replay, persisted in a graph, or included in

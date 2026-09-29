@@ -8,6 +8,37 @@ import XCTest
 #endif
 
 final class TranscriptReadTests: XCTestCase {
+  private func pythonExecutable() throws -> URL {
+    let path = ProcessInfo.processInfo.environment["PATH"] ?? ""
+    for directory in path.split(separator: ";").map(String.init) {
+      for name in ["python.exe", "python3.exe"] {
+        let candidate = URL(fileURLWithPath: directory).appendingPathComponent(name)
+        if FileManager.default.fileExists(atPath: candidate.path) {
+          return candidate
+        }
+      }
+    }
+    throw XCTSkip("Python is unavailable for the synthetic remote resolver test")
+  }
+
+  private func runPython(_ program: String, arguments: [String]) throws -> String {
+    let process = Process()
+    process.executableURL = try pythonExecutable()
+    process.arguments = ["-c", program] + arguments
+    let output = Pipe()
+    let error = Pipe()
+    process.standardOutput = output
+    process.standardError = error
+    try process.run()
+    process.waitUntilExit()
+    let stderr = String(
+      decoding: error.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+    XCTAssertEqual(process.terminationStatus, 0, stderr)
+    return String(
+      decoding: output.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self
+    ).trimmingCharacters(in: .whitespacesAndNewlines)
+  }
+
   private func fixture(_ name: String) throws -> Data {
     let root = URL(fileURLWithPath: #filePath)
       .deletingLastPathComponent()
@@ -319,9 +350,9 @@ final class TranscriptReadTests: XCTestCase {
     let remote = TranscriptReader.remoteFind(
       node: node,
       location: RemoteProjectLocation(host: "synthetic", remotePath: "/same/project"))
-    XCTAssertTrue(remote.contains(firstNode.uuidString))
-    XCTAssertTrue(remote.contains("SELECT id FROM threads WHERE id="))
-    XCTAssertTrue(remote.contains("rollout-*-$T.jsonl"))
+    XCTAssertTrue(remote.contains(firstNode.uuidString.lowercased()))
+    XCTAssertTrue(remote.contains("SELECT id FROM threads WHERE id = ?"))
+    XCTAssertTrue(remote.contains("name.endswith(suffix)"))
     XCTAssertFalse(remote.contains(#""cwd":"#))
   }
 
@@ -355,6 +386,120 @@ final class TranscriptReadTests: XCTestCase {
       TranscriptReader.codexLocalURL(
         nodeID: UUID(), banked: targetThread, database: nil),
       target)
+  }
+
+  func testRemoteCodexResolverRejectsUnsafeIdentifiersAndNormalizesUppercase() throws {
+    let root = FileManager.default.temporaryDirectory
+      .appendingPathComponent("transcript-remote-codex-id-\(UUID())", isDirectory: true)
+    let codex = root.appendingPathComponent("codex", isDirectory: true)
+    let sessions = codex.appendingPathComponent("sessions/2026/09/29", isDirectory: true)
+    let idFile = root.appendingPathComponent("node.id")
+    try FileManager.default.createDirectory(at: sessions, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+
+    let nodeID = UUID().uuidString.lowercased()
+    let threadID = UUID().uuidString.lowercased()
+    let rollout = sessions.appendingPathComponent(
+      "rollout-2026-09-29T00-00-00-\(threadID).jsonl")
+    try Data().write(to: rollout)
+
+    try threadID.uppercased().write(to: idFile, atomically: true, encoding: .ascii)
+    XCTAssertEqual(
+      try runPython(
+        TranscriptReader.remoteCodexResolverProgram,
+        arguments: [idFile.path, codex.path, codex.appendingPathComponent("sessions").path, nodeID]
+      ).replacingOccurrences(of: "\\", with: "/"),
+      rollout.path.replacingOccurrences(of: "\\", with: "/"))
+
+    let malformed = [
+      "'",
+      "*?[abc]",
+      " \(threadID)",
+      "\(threadID)\n",
+      "\(threadID)\u{0000}",
+      "x'OR 1---aaaa-bbbb-cccc-dddddddddddd",
+    ]
+    for value in malformed {
+      try Data(value.utf8).write(to: idFile)
+      XCTAssertEqual(
+        try runPython(
+          TranscriptReader.remoteCodexResolverProgram,
+          arguments: [
+            idFile.path, codex.path, codex.appendingPathComponent("sessions").path, nodeID,
+          ]),
+        "",
+        "unsafe banked identifier selected a rollout: \(value.debugDescription)")
+    }
+
+    let resolver = TranscriptReader.remoteCodexResolverProgram
+    XCTAssertTrue(resolver.contains("WHERE id = ?"))
+    XCTAssertTrue(resolver.contains("first_user_message LIKE ?"))
+    XCTAssertTrue(resolver.contains("name.endswith(suffix)"))
+    XCTAssertFalse(resolver.contains("WHERE id='"))
+    var node = LoopNode(
+      id: UUID(), title: "Remote Codex", loopType: .turnBased, firstInstruction: "test")
+    node.backend = .codex
+    let command = TranscriptReader.remoteFind(
+      node: node,
+      location: RemoteProjectLocation(host: "synthetic", remotePath: "/project"))
+    XCTAssertFalse(command.contains("sqlite3 "))
+    XCTAssertFalse(command.contains("find "))
+    XCTAssertFalse(command.contains("-name"))
+    XCTAssertFalse(command.contains("*?[abc]"))
+    XCTAssertFalse(command.contains("x'OR 1---aaaa-bbbb-cccc-dddddddddddd"))
+    XCTAssertFalse(command.contains(" \(threadID)"))
+  }
+
+  func testRemoteCodexResolverValidatesResolvedSQLiteThreadID() throws {
+    let root = FileManager.default.temporaryDirectory
+      .appendingPathComponent("transcript-remote-codex-db-\(UUID())", isDirectory: true)
+    let codex = root.appendingPathComponent("codex", isDirectory: true)
+    let sessions = codex.appendingPathComponent("sessions/2026/09/29", isDirectory: true)
+    let idFile = root.appendingPathComponent("node.id")
+    let database = codex.appendingPathComponent("state_12.sqlite")
+    try FileManager.default.createDirectory(at: sessions, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+
+    let nodeID = UUID().uuidString.lowercased()
+    let banked = UUID().uuidString.lowercased()
+    let resolved = UUID().uuidString.lowercased()
+    try banked.write(to: idFile, atomically: true, encoding: .ascii)
+    let rollout = sessions.appendingPathComponent(
+      "rollout-2026-09-29T00-00-00-\(resolved).jsonl")
+    try Data().write(to: rollout)
+
+    let createDatabase = """
+      import sqlite3, sys
+      database, identifier, message = sys.argv[1:4]
+      with sqlite3.connect(database) as connection:
+          connection.execute(
+              "CREATE TABLE threads (id TEXT PRIMARY KEY, first_user_message TEXT, created_at_ms INTEGER)"
+          )
+          connection.execute("INSERT INTO threads VALUES (?, ?, 1)", (identifier, message))
+      """
+    _ = try runPython(
+      createDatabase,
+      arguments: [database.path, resolved.uppercased(), "/goal \(nodeID)"])
+    XCTAssertEqual(
+      try runPython(
+        TranscriptReader.remoteCodexResolverProgram,
+        arguments: [idFile.path, codex.path, codex.appendingPathComponent("sessions").path, nodeID]
+      ).replacingOccurrences(of: "\\", with: "/"),
+      rollout.path.replacingOccurrences(of: "\\", with: "/"))
+
+    try FileManager.default.removeItem(at: database)
+    _ = try runPython(
+      createDatabase,
+      arguments: [
+        database.path,
+        "x'OR 1---aaaa-bbbb-cccc-dddddddddddd",
+        "/goal \(nodeID)",
+      ])
+    XCTAssertEqual(
+      try runPython(
+        TranscriptReader.remoteCodexResolverProgram,
+        arguments: [idFile.path, codex.path, codex.appendingPathComponent("sessions").path, nodeID]),
+      "")
   }
 
   func testSourceWorkIsBoundedIndependentOfCursorDepth() throws {

@@ -595,27 +595,81 @@ public enum TranscriptReader {
         + "then F=\"$HOME/.copilot/session-state/$d/events.jsonl\"; break; fi; done"
     case .codex:
       let idFile = PresenceHooks.remoteSessionIDExpression(forNodeID: node.id)
-      let nodeID = node.id.uuidString
+      let program = RemoteProjectLocation.shellQuoted(remoteCodexResolverProgram)
+      let nodeID = RemoteProjectLocation.shellQuoted(node.id.uuidString.lowercased())
       return
-        "S=$(cat \(idFile) 2>/dev/null | tr -d '\\r\\n'); F=''; T=''; "
-        + "case \"$S\" in ????????-????-????-????-????????????) ;; *) S='';; esac; "
-        + "DB=''; V=-1; for d in \"$HOME\"/.codex/state_*.sqlite; do [ -f \"$d\" ] || continue; "
-        + "B=${d##*/}; X=${B#state_}; X=${X%.sqlite}; "
-        + "case \"$X\" in ''|*[!0-9]*) continue;; esac; "
-        + "if [ \"$X\" -gt \"$V\" ]; then V=\"$X\"; DB=\"$d\"; fi; done; "
-        + "if [ -n \"$S\" ] && [ -n \"$DB\" ] && command -v sqlite3 >/dev/null 2>&1; then "
-        + "T=$(sqlite3 \"$DB\" \"SELECT id FROM threads WHERE id='$S' LIMIT 1\" 2>/dev/null); "
-        + "if [ -z \"$T\" ]; then T=$(sqlite3 \"$DB\" "
-        + "\"SELECT id FROM threads WHERE first_user_message LIKE '%\(nodeID)%' "
-        + "ORDER BY created_at_ms DESC LIMIT 1\" 2>/dev/null); fi; "
-        + "elif [ -n \"$S\" ]; then T=\"$S\"; fi; "
-        + "case \"$T\" in ????????-????-????-????-????????????) ;; *) T='';; esac; "
-        + "if [ -n \"$T\" ]; then F=$(find \"$HOME/.codex/sessions\" -type f "
-        + "-name \"rollout-*-$T.jsonl\" -print -quit 2>/dev/null); fi"
+        "F=$(python3 -c \(program) \(idFile) \"$HOME/.codex\" "
+        + "\"$HOME/.codex/sessions\" \(nodeID) 2>/dev/null)"
     case .openCode, .pi:
       return "F=''"
     }
   }
+
+  static let remoteCodexResolverProgram = """
+    import os, re, sqlite3, sys, uuid
+    id_file, codex_root, sessions_root, node_id = sys.argv[1:5]
+    uuid_pattern = re.compile(r"^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$")
+
+    def canonical(value):
+        if not isinstance(value, str) or uuid_pattern.fullmatch(value) is None:
+            return None
+        try:
+            return str(uuid.UUID(value))
+        except ValueError:
+            return None
+
+    try:
+        with open(id_file, "r", encoding="ascii") as source:
+            banked = source.read(128)
+    except (OSError, UnicodeError):
+        raise SystemExit
+
+    banked = canonical(banked)
+    node_id = canonical(node_id)
+    if banked is None or node_id is None:
+        raise SystemExit
+
+    versions = []
+    try:
+        for name in os.listdir(codex_root):
+            match = re.fullmatch(r"state_([0-9]+)\\.sqlite", name)
+            if match:
+                versions.append((int(match.group(1)), os.path.join(codex_root, name)))
+    except OSError:
+        pass
+
+    thread_id = banked
+    if versions:
+        database_path = max(versions)[1]
+        try:
+            with sqlite3.connect("file:" + database_path + "?mode=ro", uri=True) as database:
+                row = database.execute(
+                    "SELECT id FROM threads WHERE id = ? LIMIT 1", (banked,)
+                ).fetchone()
+                if row is None:
+                    row = database.execute(
+                        "SELECT id FROM threads WHERE first_user_message LIKE ? "
+                        "ORDER BY created_at_ms DESC LIMIT 1",
+                        ("%" + node_id + "%",),
+                    ).fetchone()
+                if row is None:
+                    raise SystemExit
+                thread_id = canonical(row[0])
+        except (sqlite3.Error, TypeError, ValueError):
+            raise SystemExit
+        if thread_id is None:
+            raise SystemExit
+
+    suffix = "-" + thread_id + ".jsonl"
+    try:
+        for directory, _, names in os.walk(sessions_root):
+            for name in names:
+                if name.startswith("rollout-") and name.endswith(suffix):
+                    print(os.path.join(directory, name))
+                    raise SystemExit
+    except OSError:
+        pass
+    """
 
   static let remoteSnapshotProgram = """
     import base64, os, sys
