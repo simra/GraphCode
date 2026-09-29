@@ -1,4 +1,7 @@
 import { z } from "zod";
+import { MAX_RESOLVED_SESSION_GRACE_MINUTES } from "../protocol/domain";
+
+export { MAX_RESOLVED_SESSION_GRACE_MINUTES } from "../protocol/domain";
 
 const backendSchema = z.enum([
   "claudeCode",
@@ -30,12 +33,6 @@ const copilotPermissionsSchema = z.enum([
   "yoloAutopilot",
 ]);
 
-// JavaScript must preserve the integer exactly, and converting minutes to seconds must
-// remain inside Swift's 64-bit Int on supported platforms.
-export const MAX_RESOLVED_SESSION_GRACE_MINUTES = Math.floor(
-  Number.MAX_SAFE_INTEGER / 60,
-);
-
 export const graphcodeSettingsSchema = z
   .object({
     defaultBackend: backendSchema.default("claudeCode"),
@@ -49,8 +46,13 @@ export const graphcodeSettingsSchema = z
     briefsSessionsAboutTheGraph: z.boolean().default(true),
     endsResolvedSessionsAfterMinutes: z
       .number()
-      .int()
-      .transform((value) => Math.max(0, value))
+      .finite()
+      .transform((value) =>
+        Math.min(
+          MAX_RESOLVED_SESSION_GRACE_MINUTES,
+          Math.max(0, Math.trunc(value)),
+        ),
+      )
       .default(10),
     autoSelectsModel: z.boolean().default(false),
     worktreePolicies: z

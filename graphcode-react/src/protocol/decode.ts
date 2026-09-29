@@ -8,6 +8,7 @@ import type {
   QuickChat,
   QuickChatActivity,
 } from "./domain";
+import { MAX_RESOLVED_SESSION_GRACE_MINUTES } from "./domain";
 
 const uuidLike = z.string().min(1);
 const encodedEnum = z.union([z.string(), z.record(z.string(), z.unknown())]);
@@ -289,7 +290,21 @@ const nodesChangedSchema = z.object({
 });
 
 const settingsSnapshotSchema = z.object({
-  settings: z.object({ daemonHeartbeatEnabled: z.boolean() }).passthrough(),
+  settings: z
+    .object({
+      daemonHeartbeatEnabled: z.boolean(),
+      endsResolvedSessionsAfterMinutes: z
+        .number()
+        .finite()
+        .transform((value) =>
+          Math.min(
+            MAX_RESOLVED_SESSION_GRACE_MINUTES,
+            Math.max(0, Math.trunc(value)),
+          ),
+        )
+        .optional(),
+    })
+    .passthrough(),
   revision: z.string().min(1),
   exists: z.boolean(),
   supportDirectory: z.string(),

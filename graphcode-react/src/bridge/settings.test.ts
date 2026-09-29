@@ -1,13 +1,13 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const eventMock = vi.hoisted(() => ({
-  handler: undefined as ((event: { payload: unknown }) => void) | undefined,
+  handlers: new Map<string, (event: { payload: unknown }) => void>(),
 }));
 
 vi.mock("@tauri-apps/api/event", () => ({
   listen: vi.fn(
-    async (_event: string, handler: (event: { payload: unknown }) => void) => {
-      eventMock.handler = handler;
+    async (event: string, handler: (event: { payload: unknown }) => void) => {
+      eventMock.handlers.set(event, handler);
       return () => undefined;
     },
   ),
@@ -24,8 +24,12 @@ const snapshot = {
   fields: [{ field: "daemonHeartbeatEnabled", timing: "live" }],
 };
 
-function emit(kind: "event" | "response", revision: string) {
-  eventMock.handler?.({
+function emit(
+  channel: "daemon://frame" | "settings://changed",
+  kind: "event" | "response",
+  revision: string,
+) {
+  eventMock.handlers.get(channel)?.({
     payload: {
       version: 2,
       kind,
@@ -41,28 +45,30 @@ function emit(kind: "event" | "response", revision: string) {
 }
 
 beforeEach(() => {
-  eventMock.handler = undefined;
+  eventMock.handlers.clear();
 });
 
 describe("settings change subscription", () => {
-  it("ignores correlated load and conflict-reload responses", async () => {
+  it("ignores correlated load and conflict-reload responses on the daemon frame channel", async () => {
     const changed = vi.fn();
     await listenForSettingsChanges(changed);
 
-    emit("response", "load-response");
-    emit("response", "conflict-reload-response");
+    emit("daemon://frame", "response", "load-response");
+    emit("daemon://frame", "response", "conflict-reload-response");
 
     expect(changed).not.toHaveBeenCalled();
   });
 
-  it("publishes unsolicited settingsChanged events", async () => {
+  it("publishes reconnect bootstrap responses and unsolicited events routed with settings provenance", async () => {
     const changed = vi.fn();
     await listenForSettingsChanges(changed);
 
-    emit("event", "cross-client");
+    emit("settings://changed", "response", "reconnect-bootstrap");
+    emit("settings://changed", "event", "cross-client");
 
-    expect(changed).toHaveBeenCalledWith(
-      expect.objectContaining({ revision: "cross-client" }),
-    );
+    expect(changed.mock.calls.map(([value]) => value.revision)).toEqual([
+      "reconnect-bootstrap",
+      "cross-client",
+    ]);
   });
 });

@@ -218,6 +218,7 @@ async function installTauriMock(page: Page) {
           args: Record<string, unknown>;
         }[];
         __GRAPHCODE_E2E_SETTINGS_CONFLICT_ONCE__: boolean;
+        __GRAPHCODE_E2E_RECONNECT_SETTINGS__(): void;
       };
 
       const target = window as TauriMockWindow;
@@ -243,6 +244,25 @@ async function installTauriMock(page: Page) {
         for (const id of listeners.get(event) ?? []) {
           runCallback(id, { event, id, payload });
         }
+
+        target.__GRAPHCODE_E2E_RECONNECT_SETTINGS__ = () => {
+          currentSettings = {
+            ...currentSettings,
+            revision: "settings-revision-reconnect",
+            settings: {
+              ...currentSettings.settings,
+              mailroomEnabled: false,
+            },
+          };
+          const frame = {
+            version: 2,
+            kind: "response",
+            requestID: crypto.randomUUID(),
+            event: { settingsChanged: { _0: currentSettings } },
+          };
+          emit("daemon://frame", frame);
+          emit("settings://changed", frame);
+        };
       }
 
       target.__TAURI_INTERNALS__ = {
@@ -523,6 +543,29 @@ test("keeps conflict reload source distinct from correlated frame responses", as
   await expect(
     dialog.getByText("Settings refreshed from another client."),
   ).toHaveCount(0);
+  await expect(
+    dialog.getByLabel("Daemon heartbeat (experimental)"),
+  ).toBeChecked();
+  await expect(dialog.getByLabel("Mailroom")).not.toBeChecked();
+});
+
+test("rebases a dirty settings form from reconnect bootstrap output", async ({
+  page,
+}) => {
+  await page.getByRole("button", { name: "Settings", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: "Settings" });
+  await dialog.getByLabel("Daemon heartbeat (experimental)").check();
+
+  await page.evaluate(() => {
+    const target = window as Window & {
+      __GRAPHCODE_E2E_RECONNECT_SETTINGS__(): void;
+    };
+    target.__GRAPHCODE_E2E_RECONNECT_SETTINGS__();
+  });
+
+  await expect(dialog.getByRole("status")).toContainText(
+    "Your edits were reapplied",
+  );
   await expect(
     dialog.getByLabel("Daemon heartbeat (experimental)"),
   ).toBeChecked();

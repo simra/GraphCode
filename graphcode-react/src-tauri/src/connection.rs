@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fs,
     path::{Path, PathBuf},
     time::Duration,
@@ -299,9 +299,10 @@ async fn run_connected(
     receiver: &mut mpsc::Receiver<ActorMessage>,
 ) -> ConnectedExit {
     let (mut reader, mut writer) = tokio::io::split(stream);
-    if let Err(error) = send_bootstrap_requests(&mut writer).await {
-        return ConnectedExit::Disconnected(error.to_string());
-    }
+    let mut bootstrap_requests = match send_bootstrap_requests(&mut writer).await {
+        Ok(requests) => requests,
+        Err(error) => return ConnectedExit::Disconnected(error.to_string()),
+    };
 
     let mut pending = HashMap::<Uuid, PendingRequest>::new();
     let mut timeout_check = interval(Duration::from_secs(1));
@@ -314,7 +315,7 @@ async fn run_connected(
                         if let Some(reason) = replay_rejection(&frame) {
                             break ConnectedExit::ReplayUnavailable(reason);
                         }
-                        route_frame(app, frame, &mut pending);
+                        route_frame(app, frame, &mut pending, &mut bootstrap_requests);
                     }
                     Err(error) => break ConnectedExit::Disconnected(error.to_string()),
                 }
@@ -370,10 +371,13 @@ fn replay_rejection(frame: &Value) -> Option<String> {
     })
 }
 
-async fn send_bootstrap_requests<W>(writer: &mut W) -> Result<(), protocol::ProtocolError>
+async fn send_bootstrap_requests<W>(
+    writer: &mut W,
+) -> Result<HashSet<Uuid>, protocol::ProtocolError>
 where
     W: AsyncWrite + Unpin,
 {
+    let mut request_ids = HashSet::new();
     for command in [
         json!({ "announce": { "capabilities": ["nodesChanged", "settingsChanged"] } }),
         json!({ "loadSettings": {} }),
@@ -382,32 +386,63 @@ where
         json!({ "listRecentProjects": {} }),
         json!({ "listQuickChats": {} }),
     ] {
-        let (_, frame) = request(command);
+        let (request_id, frame) = request(command);
         write_frame(writer, &frame).await?;
+        request_ids.insert(request_id);
     }
-    Ok(())
+    Ok(request_ids)
 }
 
-fn route_frame(app: &AppHandle, frame: Value, pending: &mut HashMap<Uuid, PendingRequest>) {
-    route_frame_to(frame, pending, |frame| {
-        let _ = app.emit("daemon://frame", frame);
-    });
+fn route_frame(
+    app: &AppHandle,
+    frame: Value,
+    pending: &mut HashMap<Uuid, PendingRequest>,
+    bootstrap_requests: &mut HashSet<Uuid>,
+) {
+    route_frame_to(
+        frame,
+        pending,
+        bootstrap_requests,
+        |frame| {
+            let _ = app.emit("daemon://frame", frame);
+        },
+        |frame| {
+            let _ = app.emit("settings://changed", frame);
+        },
+    );
 }
 
-fn route_frame_to<F>(frame: Value, pending: &mut HashMap<Uuid, PendingRequest>, emit: F)
-where
+fn route_frame_to<F, S>(
+    frame: Value,
+    pending: &mut HashMap<Uuid, PendingRequest>,
+    bootstrap_requests: &mut HashSet<Uuid>,
+    emit_frame: F,
+    emit_settings: S,
+) where
     F: FnOnce(Value),
+    S: FnOnce(Value),
 {
-    resolve_pending(&frame, pending);
-    emit(frame);
+    let resolved_frontend_request = resolve_pending(&frame, pending);
+    let resolved_bootstrap_request = !resolved_frontend_request
+        && take_request_id(&frame).is_some_and(|request_id| bootstrap_requests.remove(&request_id));
+    let publishes_settings = frame.pointer("/event/settingsChanged").is_some()
+        && (frame.get("kind") == Some(&Value::String("event".into()))
+            || resolved_bootstrap_request);
+    if publishes_settings {
+        emit_settings(frame.clone());
+    }
+    emit_frame(frame);
 }
 
-fn resolve_pending(frame: &Value, pending: &mut HashMap<Uuid, PendingRequest>) {
-    let request_id = frame
+fn take_request_id(frame: &Value) -> Option<Uuid> {
+    frame
         .get("requestID")
         .and_then(Value::as_str)
-        .and_then(|value| Uuid::parse_str(value).ok());
+        .and_then(|value| Uuid::parse_str(value).ok())
+}
 
+fn resolve_pending(frame: &Value, pending: &mut HashMap<Uuid, PendingRequest>) -> bool {
+    let request_id = take_request_id(frame);
     if let Some(request_id) = request_id {
         if let Some(pending_request) = pending.remove(&request_id) {
             let result = if frame.get("kind") == Some(&Value::String("error".into())) {
@@ -427,8 +462,10 @@ fn resolve_pending(frame: &Value, pending: &mut HashMap<Uuid, PendingRequest>) {
                 Ok(frame.clone())
             };
             let _ = pending_request.response.send(result);
+            return true;
         }
     }
+    false
 }
 
 fn expire_requests(pending: &mut HashMap<Uuid, PendingRequest>) {
@@ -608,7 +645,7 @@ mod tests {
                     load_request = frame.get("requestID").cloned();
                 }
             }
-            client_task.await.unwrap();
+            let mut bootstrap_requests = client_task.await.unwrap();
             let response = json!({
                 "version": 2,
                 "kind": "response",
@@ -621,19 +658,66 @@ mod tests {
                     }
                 }
             });
-            route_frame_to(response, &mut HashMap::new(), |frame| {
-                published_revisions.push(
-                    frame
-                        .pointer("/event/settingsChanged/_0/revision")
-                        .and_then(Value::as_str)
-                        .unwrap()
-                        .to_owned(),
-                );
-            });
+            route_frame_to(
+                response,
+                &mut HashMap::new(),
+                &mut bootstrap_requests,
+                |_| {},
+                |frame| {
+                    published_revisions.push(
+                        frame
+                            .pointer("/event/settingsChanged/_0/revision")
+                            .and_then(Value::as_str)
+                            .unwrap()
+                            .to_owned(),
+                    );
+                },
+            );
         }
         assert_eq!(
             published_revisions,
             ["before-offline", "changed-while-offline"]
+        );
+    }
+
+    #[tokio::test]
+    async fn correlated_frontend_settings_responses_are_not_published_as_refreshes() {
+        let request_id = Uuid::new_v4();
+        let (response_tx, response_rx) = oneshot::channel();
+        let mut pending = HashMap::from([(
+            request_id,
+            PendingRequest {
+                started_at: Instant::now(),
+                response: response_tx,
+            },
+        )]);
+        let mut published = Vec::new();
+        route_frame_to(
+            json!({
+                "version": 2,
+                "kind": "response",
+                "requestID": request_id,
+                "event": {
+                    "settingsChanged": {
+                        "_0": { "revision": "correlated" }
+                    }
+                }
+            }),
+            &mut pending,
+            &mut HashSet::new(),
+            |_| {},
+            |frame| published.push(frame),
+        );
+
+        assert!(published.is_empty());
+        assert_eq!(
+            response_rx
+                .await
+                .unwrap()
+                .unwrap()
+                .pointer("/event/settingsChanged/_0/revision")
+                .and_then(Value::as_str),
+            Some("correlated")
         );
     }
 

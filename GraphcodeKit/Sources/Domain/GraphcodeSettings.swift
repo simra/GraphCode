@@ -323,8 +323,16 @@ public struct GraphcodeSettings: Codable, Equatable, Sendable {
   /// an optional because an encoded `nil` is an absent key, which reads back as the default.
   public var endsResolvedSessionsAfterMinutes: Int
 
-  /// Multiplying by sixty must stay representable when constructing `Duration`.
-  public static let maximumResolvedSessionGraceMinutes = Int.max / 60
+  public static let maximumResolvedSessionGraceMinutes =
+    GraphcodeSettingsContract.maximumResolvedSessionGraceMinutes
+
+  public var protocolNormalized: Self {
+    var normalized = self
+    normalized.endsResolvedSessionsAfterMinutes = min(
+      max(0, endsResolvedSessionsAfterMinutes),
+      Self.maximumResolvedSessionGraceMinutes)
+    return normalized
+  }
 
   public var resolvedSessionGrace: Duration? {
     guard endsResolvedSessionsAfterMinutes > 0 else { return nil }
@@ -489,7 +497,9 @@ public struct GraphcodeSettings: Codable, Equatable, Sendable {
     endsResolvedSessionsAfterMinutes: Int = 10,
     worktreePolicies: [String: WorktreeHygienePolicy] = [:]
   ) {
-    self.endsResolvedSessionsAfterMinutes = endsResolvedSessionsAfterMinutes
+    self.endsResolvedSessionsAfterMinutes = min(
+      max(0, endsResolvedSessionsAfterMinutes),
+      Self.maximumResolvedSessionGraceMinutes)
     self.defaultBackend = defaultBackend.isSpiked ? defaultBackend : .claudeCode
     self.defaultModelTier = defaultModelTier
     self.codexApprovals = codexApprovals
@@ -539,9 +549,11 @@ public struct GraphcodeSettings: Codable, Equatable, Sendable {
       try container.decodeIfPresent(String.self, forKey: .copilotPreferredVersion) ?? ""
     briefsSessionsAboutTheGraph =
       try container.decodeIfPresent(Bool.self, forKey: .briefsSessionsAboutTheGraph) ?? true
-    endsResolvedSessionsAfterMinutes =
+    endsResolvedSessionsAfterMinutes = min(
       max(
-        0, try container.decodeIfPresent(Int.self, forKey: .endsResolvedSessionsAfterMinutes) ?? 10)
+        0,
+        try container.decodeIfPresent(Int.self, forKey: .endsResolvedSessionsAfterMinutes) ?? 10),
+      Self.maximumResolvedSessionGraceMinutes)
     // Absent in files written before the setting existed, and those loops were all being
     // routed by graphcode. They take the new default — off — which is the point of #10:
     // the fix has to reach people who already have a settings file, not just new ones.

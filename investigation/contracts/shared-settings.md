@@ -13,7 +13,10 @@ not a client ownership boundary.
 - A successful update returns the new snapshot and broadcasts the same event to clients
   that announced the `settingsChanged` capability.
 - Clients re-announce that capability and issue `loadSettings` on every reconnect, so an
-  offline edit is published even when replay contains no settings event.
+  offline edit is published even when replay contains no settings event. The native
+  connection actor tracks bootstrap request IDs separately from frontend invoke request
+  IDs and publishes bootstrap/unsolicited settings through `settings://changed`; ordinary
+  correlated load/update responses remain on their invoke path.
 - Conflicts use `settingsConflict`; invalid JSON or a non-object document uses
   `settingsCorrupt`; unreadable/write failures use `settingsUnavailable`; oversized
   documents use `settingsPayloadTooLarge`.
@@ -68,8 +71,9 @@ refreshes a clean form or rebases dirty fields over the newer snapshot. A
 saves again rather than the client retrying an unseen merge. Corrupt and unavailable files
 remain errors with an explicit repair-and-reload path.
 
-Resolved-session grace is entered as whole minutes. The Tauri form accepts zero through
-`150,119,987,579,016` (`floor(Number.MAX_SAFE_INTEGER / 60)`), ensuring both that the
-browser preserves the integer exactly and that conversion to seconds fits Swift's
-64-bit `Int`. `GraphcodeSettings.resolvedSessionGrace` independently clamps hand-edited
-larger values before multiplying, so malformed-but-decodable settings cannot overflow.
+Resolved-session grace is entered as whole minutes. The protocol maximum is
+`150,119,987,579,016` (`floor(Number.MAX_SAFE_INTEGER / 60)`), shared by the Swift
+contract and TypeScript decoder/form. Swift clamps decoded and snapshot values before
+encoding, while the frontend decoder defensively clamps older oversized snapshots.
+`GraphcodeSettings.resolvedSessionGrace` independently uses the same maximum before
+multiplying, so malformed-but-decodable settings cannot overflow.

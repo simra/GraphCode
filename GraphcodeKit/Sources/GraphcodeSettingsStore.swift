@@ -57,7 +57,8 @@ public enum GraphcodeSettingsStore {
       throw StoreError.conflict(currentRevision: currentRevision)
     }
     var object = try decodeObject(from: document.data, exists: document.exists)
-    let canonical = try encodedObject(settings)
+    let normalizedSettings = settings.protocolNormalized
+    let canonical = try encodedObject(normalizedSettings)
     for (key, value) in canonical {
       if key == "worktreePolicies",
         let existingPolicies = object[key] as? [String: Any],
@@ -85,7 +86,7 @@ public enum GraphcodeSettingsStore {
       throw StoreError.writeFailed(error.localizedDescription)
     }
     return GraphcodeSettingsSnapshot(
-      settings: settings, revision: revision(of: data), exists: true,
+      settings: normalizedSettings, revision: revision(of: data), exists: true,
       supportDirectory: url.deletingLastPathComponent().path,
       filePath: url.path)
   }
@@ -115,7 +116,7 @@ public enum GraphcodeSettingsStore {
     // Sorted and indented because this file is meant to be readable — and editable — by
     // the person whose machine it is.
     encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-    guard let data = try? encoder.encode(settings) else { return false }
+    guard let data = try? encoder.encode(settings.protocolNormalized) else { return false }
     do {
       try FileManager.default.createDirectory(
         at: url.deletingLastPathComponent(), withIntermediateDirectories: true)

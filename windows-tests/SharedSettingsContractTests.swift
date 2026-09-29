@@ -62,6 +62,29 @@ final class SharedSettingsContractTests: XCTestCase {
       .seconds(GraphcodeSettings.maximumResolvedSessionGraceMinutes * 60))
   }
 
+  func testOversizedGraceFixtureIsNormalizedBeforeSnapshotEncoding() throws {
+    let url = try temporarySettings(copying: fixture("oversized-grace"))
+    let snapshot = try GraphcodeSettingsStore.snapshot(from: url)
+
+    XCTAssertEqual(
+      GraphcodeSettingsContract.maximumResolvedSessionGraceMinutes,
+      150_119_987_579_016)
+    XCTAssertEqual(
+      snapshot.settings.endsResolvedSessionsAfterMinutes,
+      GraphcodeSettingsContract.maximumResolvedSessionGraceMinutes)
+
+    var mutated = snapshot.settings
+    mutated.endsResolvedSessionsAfterMinutes = Int.max
+    let normalizedSnapshot = GraphcodeSettingsSnapshot(
+      settings: mutated,
+      revision: snapshot.revision,
+      exists: true)
+    XCTAssertEqual(
+      normalizedSnapshot.settings.endsResolvedSessionsAfterMinutes,
+      GraphcodeSettingsContract.maximumResolvedSessionGraceMinutes)
+    XCTAssertNoThrow(try JSONEncoder().encode(normalizedSnapshot))
+  }
+
   func testConcurrentWritersReceiveAnExplicitRevisionConflict() throws {
     let url = try temporarySettings(copying: fixture("macos-defaults"))
     let original = try GraphcodeSettingsStore.snapshot(from: url)

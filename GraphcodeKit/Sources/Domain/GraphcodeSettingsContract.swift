@@ -32,7 +32,7 @@ public struct GraphcodeSettingsSnapshot: Codable, Equatable, Sendable {
     filePath: String = "",
     fields: [SettingsFieldContract] = GraphcodeSettingsContract.fields
   ) {
-    self.settings = settings
+    self.settings = settings.protocolNormalized
     self.revision = revision
     self.exists = exists
     self.supportDirectory = supportDirectory
@@ -41,6 +41,10 @@ public struct GraphcodeSettingsSnapshot: Codable, Equatable, Sendable {
   }
 }
 public enum GraphcodeSettingsContract {
+  /// The largest whole-minute value that remains exact after JSON decoding in JavaScript
+  /// and after conversion to seconds in Swift.
+  public static let maximumResolvedSessionGraceMinutes = 150_119_987_579_016
+
   public static let fields: [SettingsFieldContract] = [
     .init(field: "defaultBackend", timing: .nextLoop),
     .init(field: "defaultModelTier", timing: .nextLoop),

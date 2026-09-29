@@ -230,6 +230,9 @@ export interface NodesChanged {
 export type SettingsApplicationTiming =
   "live" | "nextLoop" | "nextSession" | "appRestart" | "daemonRestart";
 
+// Must match GraphcodeSettingsContract.maximumResolvedSessionGraceMinutes.
+export const MAX_RESOLVED_SESSION_GRACE_MINUTES = 150_119_987_579_016;
+
 export interface SettingsSnapshot {
   settings: Record<string, unknown>;
   revision: string;

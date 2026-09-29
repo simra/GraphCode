@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
+import oversizedGrace from "../../../windows-tests/fixtures/settings/oversized-grace.json";
 import { decodeEnvelope, ProtocolDecodeError } from "./decode";
+import { MAX_RESOLVED_SESSION_GRACE_MINUTES } from "./domain";
 
 describe("decodeEnvelope", () => {
   it("decodes the frozen graphChanged event shape", () => {
@@ -109,6 +111,41 @@ describe("decodeEnvelope", () => {
     expect(envelope.event.snapshot.settings.daemonHeartbeatEnabled).toBe(true);
     expect(envelope.event.snapshot.settings.futureSetting).toBe(7);
     expect(envelope.event.snapshot.fields[1].timing).toBe("nextSession");
+  });
+
+  it("normalizes the oversized shared fixture at the protocol boundary", () => {
+    expect(MAX_RESOLVED_SESSION_GRACE_MINUTES).toBe(
+      Math.floor(Number.MAX_SAFE_INTEGER / 60),
+    );
+    const envelope = decodeEnvelope({
+      version: 2,
+      kind: "response",
+      requestID: "bootstrap-load",
+      event: {
+        settingsChanged: {
+          _0: {
+            settings: oversizedGrace,
+            revision: "oversized-fixture",
+            exists: true,
+            supportDirectory: "C:\\fixture",
+            filePath: "C:\\fixture\\settings.json",
+            fields: [
+              { field: "endsResolvedSessionsAfterMinutes", timing: "live" },
+            ],
+          },
+        },
+      },
+    });
+
+    if (
+      envelope.kind !== "response" ||
+      envelope.event?.type !== "settingsChanged"
+    ) {
+      throw new Error("Expected settingsChanged response");
+    }
+    expect(
+      envelope.event.snapshot.settings.endsResolvedSessionsAfterMinutes,
+    ).toBe(MAX_RESOLVED_SESSION_GRACE_MINUTES);
   });
 
   it("validates inspector fields already carried by LoopNode snapshots", () => {

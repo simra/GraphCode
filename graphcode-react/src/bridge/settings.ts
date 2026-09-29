@@ -32,10 +32,10 @@ export function settingsTiming(
 export async function listenForSettingsChanges(
   onChange: (snapshot: SettingsSnapshot) => void,
 ): Promise<UnlistenFn> {
-  return listen<unknown>("daemon://frame", ({ payload }) => {
+  return listen<unknown>("settings://changed", ({ payload }) => {
     const envelope = decodeEnvelope(payload);
     if (
-      envelope.kind === "event" &&
+      (envelope.kind === "event" || envelope.kind === "response") &&
       envelope.event?.type === "settingsChanged"
     ) {
       onChange({

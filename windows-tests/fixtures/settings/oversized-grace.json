@@ -1,0 +1,4 @@
+{
+  "daemonHeartbeatEnabled": false,
+  "endsResolvedSessionsAfterMinutes": 9223372036854775807
+}
