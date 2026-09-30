@@ -567,8 +567,7 @@ public enum NodeResourceReader {
       throw NodeResourceReadError.transportFailure
     }
     guard raw.count == Int(requestedExtent) else {
-      throw frozenExtent == nil
-        ? NodeResourceReadError.transportFailure : NodeResourceReadError.invalidCursor
+      throw NodeResourceReadError.transportFailure
     }
     let completeExtent: Int
     if frozenExtent != nil {
@@ -645,11 +644,18 @@ public enum NodeResourceReader {
     }
     defer { fileAccess.close(handle) }
     do {
-      return try readUpToLimit(
+      let data = try readUpToLimit(
         handle: handle,
         limit: count,
         fileAccess: fileAccess)
+      guard data.count == count else {
+        throw NodeResourceReadError.transportFailure
+      }
+      return data
     } catch {
+      if let error = error as? NodeResourceReadError {
+        throw error
+      }
       throw NodeResourceReadError.transportFailure
     }
   }

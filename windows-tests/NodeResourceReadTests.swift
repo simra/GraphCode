@@ -719,6 +719,95 @@ final class NodeResourceReadTests: XCTestCase {
     ) { XCTAssertEqual($0 as? NodeResourceReadError, .transportFailure) }
   }
 
+  func testContinuationShortReadsAreTransportFailuresAndRetryable() throws {
+    let base = try temporaryBase()
+    defer { try? FileManager.default.removeItem(at: base) }
+    let project = "/synthetic/continuation-short-read"
+    let node = node()
+    for value in 1...3 {
+      NodeMemory.append(
+        "entry-\(value)", projectPath: project, nodeID: node.id, baseURL: base)
+    }
+    let first = try page(
+      node: node,
+      projectPath: project,
+      resource: .memory,
+      baseURL: base,
+      maxEntries: 1)
+    let cursor = try XCTUnwrap(first.nextCursor)
+
+    var dataReadCalls = 0
+    var shortDataRead = NodeResourceFileAccess.live
+    shortDataRead.read = { handle, count in
+      dataReadCalls += 1
+      if dataReadCalls == 1 {
+        return try NodeResourceFileAccess.live.read(handle, count - 1)
+      }
+      if dataReadCalls == 2 {
+        return Data()
+      }
+      return try NodeResourceFileAccess.live.read(handle, count)
+    }
+    XCTAssertThrowsError(
+      try page(
+        node: node,
+        projectPath: project,
+        resource: .memory,
+        baseURL: base,
+        cursor: cursor,
+        maxEntries: 1,
+        fileAccess: shortDataRead)
+    ) { XCTAssertEqual($0 as? NodeResourceReadError, .transportFailure) }
+    XCTAssertEqual(
+      try page(
+        node: node,
+        projectPath: project,
+        resource: .memory,
+        baseURL: base,
+        cursor: cursor,
+        maxEntries: 1
+      ).entries.map(\.content),
+      ["entry-2"])
+
+    var openCount = 0
+    var verificationReadCalls = 0
+    var shortVerificationRead = NodeResourceFileAccess.live
+    shortVerificationRead.open = { url in
+      openCount += 1
+      return try NodeResourceFileAccess.live.open(url)
+    }
+    shortVerificationRead.read = { handle, count in
+      guard openCount == 2 else {
+        return try NodeResourceFileAccess.live.read(handle, count)
+      }
+      verificationReadCalls += 1
+      if verificationReadCalls == 1 {
+        return try NodeResourceFileAccess.live.read(handle, count - 1)
+      }
+      return Data()
+    }
+    XCTAssertThrowsError(
+      try page(
+        node: node,
+        projectPath: project,
+        resource: .memory,
+        baseURL: base,
+        cursor: cursor,
+        maxEntries: 1,
+        fileAccess: shortVerificationRead)
+    ) { XCTAssertEqual($0 as? NodeResourceReadError, .transportFailure) }
+    XCTAssertEqual(
+      try page(
+        node: node,
+        projectPath: project,
+        resource: .memory,
+        baseURL: base,
+        cursor: cursor,
+        maxEntries: 1
+      ).entries.map(\.content),
+      ["entry-2"])
+  }
+
   func testProjectTextCannotEscapeStorageAndLocationDoesNotChangeSemantics() throws {
     let base = try temporaryBase()
     defer { try? FileManager.default.removeItem(at: base) }
