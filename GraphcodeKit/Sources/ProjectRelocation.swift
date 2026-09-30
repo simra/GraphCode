@@ -56,6 +56,7 @@ public enum ProjectRelocationRecoveryDisposition: String, Codable, Equatable, Se
   case recovered
   case abandonedBeforeCommit
   case quarantined
+  case unsupported
 }
 public struct ProjectRelocationRecoveryStatus: Codable, Equatable, Sendable {
   public var operationID: UUID?
@@ -190,7 +191,10 @@ public final class ProjectRelocationCoordinator: @unchecked Sendable {
     options: ProjectRelocationOptions = ProjectRelocationOptions(),
     persistence: ProjectPersistence? = nil
   ) throws -> ProjectRelocationPlan {
-    try withMutationLock {
+    guard ProjectRelocationPlatform.isSupported else {
+      throw ProjectRelocationError.unsupported
+    }
+    return try withMutationLock {
       let persistence =
         persistence
         ?? ProjectPersistence(
@@ -219,7 +223,10 @@ public final class ProjectRelocationCoordinator: @unchecked Sendable {
     graph: LoopGraph,
     persistence: ProjectPersistence
   ) throws -> ProjectRelocationResult {
-    try withMutationLock {
+    guard ProjectRelocationPlatform.isSupported else {
+      throw ProjectRelocationError.unsupported
+    }
+    return try withMutationLock {
       guard request.options.migrateSupportState else {
         throw ProjectRelocationError.unsupported
       }
@@ -361,7 +368,10 @@ public final class ProjectRelocationCoordinator: @unchecked Sendable {
     for request: ProjectRelocationRequest,
     authorizedClientID: UUID
   ) throws -> ProjectRelocationResult? {
-    try withMutationLock {
+    guard ProjectRelocationPlatform.isSupported else {
+      throw ProjectRelocationError.unsupported
+    }
+    return try withMutationLock {
       try validatedReplay(for: request, authorizedClientID: authorizedClientID)
     }
   }
@@ -383,6 +393,14 @@ public final class ProjectRelocationCoordinator: @unchecked Sendable {
   public func recoverPending(
     persistence: ProjectPersistence
   ) -> [ProjectRelocationRecoveryStatus] {
+    guard ProjectRelocationPlatform.isSupported else {
+      return [
+        ProjectRelocationRecoveryStatus(
+          operationID: nil,
+          disposition: .unsupported,
+          detail: ProjectRelocationError.unsupported.localizedDescription)
+      ]
+    }
     do {
       return try withMutationLock {
         let directory = journalDirectory

@@ -13,6 +13,10 @@ explicit options.
 - Darwin and Glibc builds do not advertise the server capability and return
   `projectRelocationUnsupported` before path or filesystem mutation. Their pathname-based
   rename APIs do not currently prove that the verified source object is the object renamed.
+- Every public coordinator entry point checks platform support before taking the mutation
+  lock, constructing fallback persistence, reading receipts or journals, canonicalizing
+  paths, or touching the filesystem. Unsupported recovery reports an `unsupported`
+  disposition without probing or creating the support directory.
 - SSH and Codespace projects return `projectRelocationUnsupported`.
 - Relocation is an atomic rename on one filesystem volume. Cross-volume copy/delete is
   unsupported because GraphCode does not yet have a copy/fsync/verify/delete journal.

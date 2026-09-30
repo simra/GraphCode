@@ -1105,6 +1105,11 @@ public actor ProjectRegistry {
 
     case .prepareProjectRelocation(
       let operationID, let sourcePath, let destinationPath, let options):
+      guard ProjectRelocationPlatform.isSupported else {
+        return ProjectRegistryCommandResult(
+          error: ProjectRelocationError.unsupported.localizedDescription,
+          errorCode: .projectRelocationUnsupported)
+      }
       guard case .v2 = channel.mode,
         connectionCapabilities[connectionID]?.contains(
           ClientCapability.projectRelocation.rawValue) == true
@@ -1235,6 +1240,11 @@ public actor ProjectRegistry {
       }
 
     case .relocateProject(let request):
+      guard ProjectRelocationPlatform.isSupported else {
+        return ProjectRegistryCommandResult(
+          error: ProjectRelocationError.unsupported.localizedDescription,
+          errorCode: .projectRelocationUnsupported)
+      }
       guard case .v2 = channel.mode,
         connectionCapabilities[connectionID]?.contains(
           ClientCapability.projectRelocation.rawValue) == true
