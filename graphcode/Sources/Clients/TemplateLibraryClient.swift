@@ -9,7 +9,7 @@ import GraphcodeKit
 /// pull` shows up without a relaunch, which is the design's whole argument for
 /// reading templates from files rather than holding them in the app.
 struct TemplateLibraryClient: Sendable {
-  var load: @Sendable (_ projectPath: String?) async -> [PromptTemplate]
+  var load: @Sendable (_ project: ProjectRef?) async -> [PromptTemplate]
   /// Saves and answers what actually landed — a read-only checkout falls back to
   /// home, and the caller says so rather than pretending the save went where it
   /// was asked.
@@ -23,15 +23,15 @@ struct TemplateLibraryClient: Sendable {
       async throws -> PromptTemplate
   var delete: @Sendable (_ template: PromptTemplate) async throws -> Void
   /// Fires once per change to either location while the stream lives.
-  var watch: @Sendable (_ projectPath: String?) -> AsyncStream<Void>
+  var watch: @Sendable (_ project: ProjectRef?) -> AsyncStream<Void>
   /// Resolves a template by id — the same read the daemon performs when a
   /// following loop next runs.
-  var template: @Sendable (_ id: UUID, _ projectPath: String?) async -> PromptTemplate?
+  var template: @Sendable (_ id: UUID, _ project: ProjectRef?) async -> PromptTemplate?
   /// Whether a project folder can take a `.graphcode/templates` — the save sheet
   /// greys the project option out rather than offering a save that falls back
   /// silently. Answering must not *create* the folder: nothing lands in a checkout
   /// until a save asks for it.
-  var projectIsWritable: @Sendable (_ projectPath: String) -> Bool
+  var projectIsWritable: @Sendable (_ project: ProjectRef) -> Bool
   /// One more use of this template, as the picker counts them. App-local: applying a
   /// template must never write to the file, which may live in a repository.
   var recordUse: @Sendable (_ template: PromptTemplate) -> Void
@@ -42,7 +42,18 @@ struct TemplateLibraryClient: Sendable {
 
 extension TemplateLibraryClient: DependencyKey {
   static let liveValue = TemplateLibraryClient(
-    load: { projectPath in
+    load: { project in
+      if let project {
+        do {
+          let templates = try await RemoteAssetClient.liveValue.templates(project.path)
+          return overlayUseCounts(templates)
+        } catch {
+          let metadata =
+            project.metadata ?? ProjectMetadata.inferred(fromProjectPath: project.path)
+          if metadata.location != .local { return [] }
+        }
+      }
+      let projectPath = project?.path
       let storage = TemplateStorage.shared
       let templates = await Task.detached(priority: .userInitiated) {
         storage.load(projectPath: projectPath)
@@ -64,17 +75,34 @@ extension TemplateLibraryClient: DependencyKey {
         try TemplateStorage.shared.delete(template)
       }.value
     },
-    watch: { projectPath in
-      TemplateStorage.shared.watch(projectPath: projectPath)
+    watch: { project in
+      let metadata =
+        project.flatMap(\.metadata)
+        ?? project.map { ProjectMetadata.inferred(fromProjectPath: $0.path) }
+      guard metadata?.location != .ssh, metadata?.location != .codespace else {
+        return AsyncStream { $0.finish() }
+      }
+      return TemplateStorage.shared.watch(projectPath: project?.path)
     },
-    template: { id, projectPath in
+    template: { id, project in
+      if let project {
+        if let templates = try? await RemoteAssetClient.liveValue.templates(project.path) {
+          return templates.first(where: { $0.id == id })
+        }
+        let metadata =
+          project.metadata ?? ProjectMetadata.inferred(fromProjectPath: project.path)
+        if metadata.location != .local { return nil }
+      }
       await Task.detached(priority: .userInitiated) {
-        TemplateStorage.shared.template(withID: id, projectPath: projectPath)
+        TemplateStorage.shared.template(withID: id, projectPath: project?.path)
       }.value
     },
-    projectIsWritable: { projectPath in
+    projectIsWritable: { project in
+      let metadata =
+        project.metadata ?? ProjectMetadata.inferred(fromProjectPath: project.path)
+      guard metadata.location == .local else { return false }
       let storage = TemplateStorage.shared
-      return storage.canWrite(to: storage.projectDirectory(projectPath))
+      return storage.canWrite(to: storage.projectDirectory(project.path))
     },
     recordUse: { template in
       bumpUseCount(for: template)

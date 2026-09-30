@@ -257,6 +257,7 @@ struct NodeDraftForm: View {
 
   private var isCreateEnabled: Bool {
     store.draft.isValid && !store.draftBlocksOnTokens
+      && store.draftAttachments.notice != "Uploading image…"
   }
 
   /// The primary button says what Create will actually do — and when a template

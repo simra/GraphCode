@@ -49,8 +49,9 @@ Current daemon capability defaults reflect implemented behavior:
 Remote diagnostics cover the existing daemon-owned remote usage, presence, summary, and
 transcript reads. Memory reads are location-independent because the daemon-owned durable
 memory store remains local even for remote sessions; see `node-resource-read.md`. Remote
-template resolution, attachment staging, local file-manager
-reveal, and Tauri terminal streaming are not advertised.
+template resolution and attachment staging use the bounded daemon-owned v2 contract in
+`remote-assets.md`. Local file-manager reveal and Tauri terminal streaming remain
+unadvertised.
 
 Clients must treat absent metadata or absent capability flags as unsupported. Older
 clients ignore the additive field and retain their existing behavior. The daemon enriches

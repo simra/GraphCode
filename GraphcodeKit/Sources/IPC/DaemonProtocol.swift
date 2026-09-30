@@ -64,6 +64,17 @@ public enum DaemonCommand: Codable, Sendable, Equatable {
   /// refinement/rollback audit history. Version-2 only and response-scoped: content
   /// never enters graph snapshots, broadcasts, or replay.
   case nodeResource(projectPath: String, query: NodeResourceQuery)
+  case listTemplates(projectPath: String, query: RemoteTemplateListQuery)
+  case readTemplate(projectPath: String, query: RemoteTemplateReadQuery)
+  case beginAttachmentUpload(
+    projectPath: String,
+    nodeID: UUID,
+    declaration: AttachmentUploadDeclaration
+  )
+  case uploadAttachmentChunk(transferID: UUID, offset: Int, data: Data)
+  case finalizeAttachmentUpload(transferID: UUID)
+  case cancelAttachmentUpload(transferID: UUID)
+  case discardStagedAttachments(projectPath: String, nodeID: UUID)
   case prepareProjectRelocation(
     operationID: UUID,
     sourcePath: String,
@@ -103,6 +114,7 @@ public enum ClientCapability: String, Sendable {
 
 public enum ServerCapability: String, Sendable {
   case projectRelocation
+  case remoteAssets
 }
 
 extension DaemonEvent {
@@ -118,7 +130,8 @@ extension DaemonEvent {
     switch self {
     case .recentProjectsListed, .graphChanged, .errorOccurred, .mailbox, .transcriptPage,
       .nodeResourcePage, .quickChatsListed, .quickChatChanged, .quickChatDeleted,
-      .quickChatActivity:
+      .quickChatActivity, .templateList, .templateContent, .attachmentUploadBegan,
+      .attachmentUploadProgress, .attachmentStaged:
       return nil
     case .nodesChanged: return .nodesChanged
     case .settingsChanged: return .settingsChanged
@@ -324,6 +337,11 @@ public enum DaemonEvent: Codable, Sendable, Equatable {
   /// The correlated answer to `DaemonCommand.nodeResource`. It is never broadcast,
   /// sequenced, retained for replay, or projected into a graph snapshot.
   case nodeResourcePage(NodeResourcePage)
+  case templateList(RemoteTemplateList)
+  case templateContent(RemoteTemplateContent)
+  case attachmentUploadBegan(AttachmentUploadTicket)
+  case attachmentUploadProgress(AttachmentUploadProgress)
+  case attachmentStaged(PromptAttachment)
   case projectRelocationPrepared(ProjectRelocationPlan)
   case projectRelocated(ProjectRelocationResult)
   /// The presence poll's broadcast: only the loops whose reading, activity, summary or

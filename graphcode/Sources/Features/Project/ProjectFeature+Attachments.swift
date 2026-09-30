@@ -9,9 +9,9 @@ import GraphcodeKit
 /// sits at swiftlint's file and type-body budgets, and a concern that arrives whole is
 /// easier to read whole.
 extension ProjectFeature {
-  /// Images attached to the brief field, already written to disk under the draft's own
-  /// id (`PromptAttachment`). Each one put an `[image #N]` placeholder into the brief;
-  /// the path replaces it when the prompt is composed (`LoopNode.sessionPrompt`).
+  /// Images attached to the brief field, already staged on the authoritative project
+  /// host under the draft's own id. Each one put an `[image #N]` placeholder into the
+  /// brief; the daemon resolves its opaque reference before the prompt is composed.
   struct DraftAttachments: Equatable {
     var items: [PromptAttachment] = []
     /// How many this draft has ever taken, which is what names their files. Position
@@ -28,6 +28,7 @@ extension ProjectFeature {
     /// the decoded bytes because a pasteboard cannot be read from an effect: its
     /// contents belong to the moment of the keystroke.
     case imageArrived(DraftImageImport.Payload)
+    case uploadFinished(number: Int, attachment: PromptAttachment?, error: String?)
     case removed(UUID)
     /// A drop that yielded nothing graphcode could write down.
     case rejected(String)
@@ -38,6 +39,18 @@ extension ProjectFeature {
   ) -> Effect<Action> {
     switch action {
     case .imageArrived(let payload): return attachDraftImage(&state, payload)
+    case .uploadFinished(let number, let attachment, let error):
+      guard let attachment else {
+        state.draftAttachments.notice = error ?? "Couldn't save that image."
+        return .none
+      }
+      state.draftAttachments.items.append(attachment)
+      let placeholder = PromptAttachments.token(state.draftAttachments.items.count)
+      let brief = state.currentBriefText
+      state.setBriefText(brief.isEmpty ? placeholder : brief + " " + placeholder)
+      state.draftAttachments.notice = nil
+      state.draftAttachments.taken = max(state.draftAttachments.taken, number)
+      return .none
     case .removed(let id): return removeDraftAttachment(&state, id)
     case .rejected(let reason):
       state.draftAttachments.notice = reason
@@ -45,20 +58,19 @@ extension ProjectFeature {
     }
   }
 
-  /// Writes a pasted or dropped image down and puts its placeholder in the brief.
-  ///
-  /// Synchronous, where most of this reducer's work is an effect: the number the file is
-  /// named after and the number the placeholder carries have to be decided in the same
-  /// breath, and an effect deciding them from a state that has since taken another paste
-  /// would hand two images the same name. The write is bounded at
-  /// `DraftImageImport.maximumBytes`, which is a few milliseconds of a dialog nobody is
-  /// typing into mid-paste.
+  /// Stages a pasted or dropped image and puts its placeholder in the brief.
   func attachDraftImage(
     _ state: inout State, _ payload: DraftImageImport.Payload
   ) -> Effect<Action> {
     // A composite never opens a session, so it has no prompt for a path to travel in —
     // and no prose field for the placeholder to land in either.
     guard state.draftLoopType != .composite else { return .none }
+    guard state.draftAttachments.notice != "Uploading image…" else { return .none }
+    guard state.draftAttachments.items.count < AttachmentUploadDeclaration.maximumFilesPerNode
+    else {
+      state.draftAttachments.notice = "A loop can have at most 10 images."
+      return .none
+    }
     let project = state.graph.project
     guard project.metadata?.capabilities.attachments == true else {
       state.draftAttachments.notice =
@@ -67,20 +79,27 @@ extension ProjectFeature {
     }
     let projectPath = project.path
     let number = state.draftAttachments.taken + 1
-    let url = DraftImageImport.destination(
-      projectPath: projectPath, nodeID: state.draftID, number: number,
-      fileExtension: payload.fileExtension)
-    guard DraftImageImport.write(payload, to: url) else {
-      state.draftAttachments.notice = "Couldn't save that image."
-      return .none
-    }
     state.draftAttachments.taken = number
-    state.draftAttachments.items.append(PromptAttachment(path: url.path))
-    let placeholder = PromptAttachments.token(state.draftAttachments.items.count)
-    let brief = state.currentBriefText
-    state.setBriefText(brief.isEmpty ? placeholder : brief + " " + placeholder)
-    state.draftAttachments.notice = nil
-    return .none
+    state.draftAttachments.notice = "Uploading image…"
+    let nodeID = state.draftID
+    let name = "image-\(number).\(payload.fileExtension)"
+    let contentType = "image/\(payload.fileExtension == "jpg" ? "jpeg" : payload.fileExtension)"
+    return .run { [remoteAssets] send in
+      do {
+        let attachment = try await remoteAssets.upload(
+          projectPath, nodeID, name, contentType, payload.data)
+        await send(
+          .draftAttachment(
+            .uploadFinished(number: number, attachment: attachment, error: nil)))
+      } catch {
+        await send(
+          .draftAttachment(
+            .uploadFinished(
+              number: number, attachment: nil,
+              error: "Couldn't stage that image on the project host.")))
+      }
+    }
+    .cancellable(id: CancelID.attachmentUpload, cancelInFlight: false)
   }
 
   /// Takes the chip, the file, and the placeholder — and renumbers the placeholders
@@ -95,7 +114,7 @@ extension ProjectFeature {
     else { return .none }
     let total = state.draftAttachments.items.count
     let removed = state.draftAttachments.items.remove(at: index)
-    try? FileManager.default.removeItem(at: URL(fileURLWithPath: removed.path))
+    _ = removed
     state.setBriefText(
       PromptAttachments.removing(
         attachment: index + 1, from: state.currentBriefText, of: total))
@@ -108,11 +127,12 @@ extension ProjectFeature {
   /// left alone: `NodeMemory.remove` takes them when the node itself goes.
   func cancelNodeForm(_ state: inout State) -> Effect<Action> {
     state.showingNewNodeForm = false
-    if state.graph.project.metadata?.capabilities.attachments == true {
-      DraftImageImport.discardAll(
-        projectPath: state.graph.project.path, nodeID: state.draftID)
-    }
+    let projectPath = state.graph.project.path
+    let nodeID = state.draftID
     state.draftAttachments = DraftAttachments()
-    return .cancel(id: CancelID.templateWatch)
+    return .concatenate(
+      .cancel(id: CancelID.attachmentUpload),
+      .cancel(id: CancelID.templateWatch),
+      .run { [remoteAssets] _ in await remoteAssets.discard(projectPath, nodeID) })
   }
 }

@@ -91,7 +91,9 @@ extension ProjectFeature {
   /// back as tokens, not baked in: the filled text is matched against the brief
   /// the template carried, and only a clean match rewinds to `{token}`.
   func templateDraftContext(_ state: inout State) -> TemplateSaveContext? {
-    guard state.graph.project.metadata?.capabilities.templates == true else { return nil }
+    guard state.graph.project.metadata?.capabilities.templates == true,
+      state.graph.project.metadata?.location == .local
+    else { return nil }
     let text = state.currentBriefText
     guard
       !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -144,14 +146,16 @@ extension ProjectFeature {
       origin: .home)
     return TemplateSaveContext(
       name: name, scope: .home, template: template,
-      projectCanSave: templateLibrary.projectIsWritable(state.graph.project.path))
+      projectCanSave: templateLibrary.projectIsWritable(state.graph.project))
   }
 
   /// A card's save context — a finished loop is the most common thing someone
   /// wants to reuse. Saving a shaped loop captures its type and settings
   /// alongside the text; saving a Main loop captures text only.
   func templateContext(fromNode nodeID: UUID, in state: inout State) -> TemplateSaveContext? {
-    guard state.graph.project.metadata?.capabilities.templates == true else { return nil }
+    guard state.graph.project.metadata?.capabilities.templates == true,
+      state.graph.project.metadata?.location == .local
+    else { return nil }
     guard let node = state.graph.nodes[id: nodeID] else { return nil }
     var settings = TemplateSettings()
     settings.backend = Self.templateBackend(node.backend)
@@ -194,7 +198,7 @@ extension ProjectFeature {
       origin: .home)
     return TemplateSaveContext(
       name: node.title, scope: .home, template: template,
-      projectCanSave: templateLibrary.projectIsWritable(state.graph.project.path))
+      projectCanSave: templateLibrary.projectIsWritable(state.graph.project))
   }
 
   /// A template's name when nobody typed one: the brief's own first line — the
@@ -226,13 +230,14 @@ extension ProjectFeature {
       return built
     }()
     state.templates.pendingSave = nil
+    let project = state.graph.project
     let projectPath = state.graph.project.path
     let scope = context.scope
     let library = templateLibrary
     return .run { send in
       guard let (saved, _) = try? await library.save(template, scope, projectPath)
       else { return }
-      await send(.templateLibraryChanged(await library.load(projectPath)))
+      await send(.templateLibraryChanged(await library.load(project)))
       await send(.templateSaved(saved))
     }
   }
@@ -241,6 +246,7 @@ extension ProjectFeature {
     guard state.graph.project.metadata?.capabilities.templates == true else { return .none }
     guard let notice = state.templates.saveNotice else { return .none }
     state.templates.saveNotice = nil
+    let project = state.graph.project
     let projectPath = state.graph.project.path
     let destination: TemplateOrigin = notice.landedInProject ? .home : .project(projectPath)
     let library = templateLibrary
@@ -251,7 +257,7 @@ extension ProjectFeature {
       // template is somewhere it isn't.
       guard let moved = try? await library.move(notice.template, destination, projectPath)
       else { return }
-      await send(.templateLibraryChanged(await library.load(projectPath)))
+      await send(.templateLibraryChanged(await library.load(project)))
       await send(.templateSaved(moved))
     }
   }
@@ -259,11 +265,11 @@ extension ProjectFeature {
   /// One more use of this template, recorded app-locally. Never a write to the file:
   /// applying a template must not dirty a repository's working tree, and a project
   /// folder may not even be writable (PROMPT_TEMPLATES.md § Storage).
-  func countUse(of template: PromptTemplate, in projectPath: String) -> Effect<Action> {
+  func countUse(of template: PromptTemplate, in project: ProjectRef) -> Effect<Action> {
     let library = templateLibrary
     return .run { send in
       library.recordUse(template)
-      await send(.templateLibraryChanged(await library.load(projectPath)))
+      await send(.templateLibraryChanged(await library.load(project)))
     }
   }
 

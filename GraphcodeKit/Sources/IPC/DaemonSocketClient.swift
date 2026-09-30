@@ -31,6 +31,52 @@ public struct DaemonSocketClient: Sendable {
 
   public static let ambiguousExitCode: Int32 = 75
 
+  public final class V2Session: @unchecked Sendable {
+    private let client: DaemonSocketClient
+
+    fileprivate init(client: DaemonSocketClient, clientID: Foundation.UUID) throws {
+      self.client = client
+      try client.sendData(
+        JSONEncoder().encode(
+          DaemonWireEnvelope.hello(
+            supportedVersions: [DaemonWireProtocol.currentVersion], clientID: clientID)))
+      let hello = try client.decodedEnvelope(from: client.receiveData())
+      guard hello.kind == .hello, hello.selectedVersion == DaemonWireProtocol.currentVersion,
+        hello.capabilities?.contains(ServerCapability.remoteAssets.rawValue) == true
+      else {
+        throw ClientError.malformedResponse
+      }
+    }
+
+    public func request(_ command: DaemonCommand) throws -> DaemonEvent? {
+      let requestID = Foundation.UUID()
+      try client.sendData(
+        JSONEncoder().encode(DaemonWireEnvelope.request(id: requestID, command: command)))
+      for _ in 0..<64 {
+        let envelope = try client.decodedEnvelope(from: client.receiveData())
+        guard envelope.requestID == requestID else { continue }
+        switch envelope.kind {
+        case .response: return envelope.event
+        case .error:
+          guard let error = envelope.error else { throw ClientError.malformedResponse }
+          throw ClientError.daemon(code: error.code, message: error.message)
+        default: throw ClientError.malformedResponse
+        }
+      }
+      throw ClientError.timedOut
+    }
+
+    public func close() {
+      client.closeConnection()
+    }
+  }
+
+  public func v2Session(
+    clientID: Foundation.UUID = Foundation.UUID()
+  ) throws -> V2Session {
+    try V2Session(client: self, clientID: clientID)
+  }
+
   public static func isAmbiguousConnectionClose(_ error: Error) -> Bool {
     if case FramedMessageIO.IOError.connectionClosed = error {
       return true

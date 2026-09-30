@@ -87,11 +87,13 @@ public struct ProjectMetadata: Codable, Equatable, Sendable {
 
   public static let ssh = ProjectMetadata(
     location: .ssh,
-    capabilities: ProjectCapabilities(diagnostics: true, memoryReads: true))
+    capabilities: ProjectCapabilities(
+      templates: true, attachments: true, diagnostics: true, memoryReads: true))
 
   public static let codespace = ProjectMetadata(
     location: .codespace,
-    capabilities: ProjectCapabilities(diagnostics: true, memoryReads: true))
+    capabilities: ProjectCapabilities(
+      templates: true, attachments: true, diagnostics: true, memoryReads: true))
 
   public static func inferred(fromProjectPath path: String) -> ProjectMetadata {
     guard let remote = RemoteProjectLocation.parse(projectPath: path) else { return .local }

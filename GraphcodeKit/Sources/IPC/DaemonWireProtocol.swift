@@ -93,10 +93,10 @@ public struct DaemonWireEnvelope: Codable, Equatable, Sendable {
   }
 
   public static func helloResponse(selectedVersion: Int) -> Self {
-    let capabilities =
-      ProjectRelocationPlatform.isSupported
-      ? [ServerCapability.projectRelocation.rawValue]
-      : []
+    var capabilities = [ServerCapability.remoteAssets.rawValue]
+    if ProjectRelocationPlatform.isSupported {
+      capabilities.append(ServerCapability.projectRelocation.rawValue)
+    }
     return Self(
       version: DaemonWireProtocol.currentVersion,
       kind: .hello,

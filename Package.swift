@@ -45,6 +45,8 @@ import PackageDescription
       "Sessions/MessageBus.swift",
       "Sessions/NodeMemory.swift",
       "Sessions/NodeResourceRead.swift",
+      "Sessions/RemoteAssetStore.swift",
+      "Sessions/SafeLocalFile.swift",
       "GraphcodeSettingsStore.swift",
       "Sessions/AgentEnvironment.swift",
       "Sessions/CLISessionBackend.swift",

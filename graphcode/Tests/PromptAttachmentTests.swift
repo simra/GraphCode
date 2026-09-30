@@ -201,8 +201,8 @@ struct DraftImageImportTests {
   }
 }
 
-/// The dialog's half: a pasted image is written down, its placeholder lands in the field
-/// the human is filling in, and the draft carries the path.
+/// The dialog's half: a pasted image is staged on the project host, its placeholder lands
+/// in the field the human is filling in, and the draft carries the opaque reference.
 @Suite
 struct DraftAttachmentReducerTests {
   private static let project = ProjectRef(
@@ -215,63 +215,77 @@ struct DraftAttachmentReducerTests {
     )!, fileExtension: "png")
 
   private static func store(
-    _ project: ProjectRef = project, loopType: LoopType = .sketch, note: String = ""
+    _ project: ProjectRef = project, loopType: LoopType = .sketch, note: String = "",
+    remoteAssets: RemoteAssetClient = .testValue
   ) -> TestStore<ProjectFeature.State, ProjectFeature.Action> {
     var state = ProjectFeature.State(graph: LoopGraph(project: project))
     state.draftLoopType = loopType
     state.draftSketchNote = note
-    let store = TestStore(initialState: state) { ProjectFeature() }
+    let store = TestStore(initialState: state) {
+      ProjectFeature()
+    } withDependencies: {
+      $0.remoteAssets = remoteAssets
+    }
     store.exhaustivity = .off
     return store
   }
 
-  private static func cleanUp(_ store: TestStore<ProjectFeature.State, ProjectFeature.Action>) {
-    NodeMemory.remove(projectPath: store.state.graph.project.path, nodeID: store.state.draftID)
-  }
-
   @Test
   @MainActor
-  func apastedImageIsWrittenDownAndStandsInTheBriefAsAPlaceholder() async throws {
+  func apastedImageIsStagedAndStandsInTheBriefAsAPlaceholder() async throws {
     let store = Self.store(note: "match this")
-    defer { Self.cleanUp(store) }
 
     await store.send(.draftAttachment(.imageArrived(Self.payload))) {
-      $0.draftSketchNote = "match this [image #1]"
       $0.draftAttachments.taken = 1
+      $0.draftAttachments.notice = "Uploading image…"
     }
-    let path = try #require(store.state.draftAttachments.items.first?.path)
-    #expect(FileManager.default.fileExists(atPath: path))
+    await store.receive(\.draftAttachment.uploadFinished)
+    let reference = try #require(store.state.draftAttachments.items.first?.path)
+    #expect(reference.hasPrefix(PromptAttachment.opaqueReferencePrefix))
+    #expect(store.state.draftSketchNote == "match this [image #1]")
     // The draft is what crosses the wire, and the node's prompt is composed from it.
-    #expect(store.state.draft.attachments.map(\.path) == [path])
-    #expect(store.state.draft.makeNode().sessionPrompt?.contains(path) == true)
+    #expect(store.state.draft.attachments.map(\.path) == [reference])
   }
 
   @Test
   @MainActor
-  func aSecondImageNeverLandsOnTheFirstOnesFile() async throws {
+  func aSecondImageGetsADistinctOpaqueReference() async {
     let store = Self.store()
-    defer { Self.cleanUp(store) }
 
     await store.send(.draftAttachment(.imageArrived(Self.payload)))
+    await store.receive(\.draftAttachment.uploadFinished)
     await store.send(.draftAttachment(.imageArrived(Self.payload)))
-    let paths = store.state.draftAttachments.items.map(\.path)
-    #expect(paths.count == 2)
-    #expect(Set(paths).count == 2)
+    await store.receive(\.draftAttachment.uploadFinished)
+    let references = store.state.draftAttachments.items.map(\.path)
+    #expect(references.count == 2)
+    #expect(Set(references).count == 2)
     #expect(store.state.draftSketchNote == "[image #1] [image #2]")
   }
 
   @Test
   @MainActor
-  func identicalLookingRemoteProjectsCannotWriteAttachmentsLocally() async {
+  func identicalLookingRemoteProjectsUseTheirAuthoritativeClassification() async {
     let path = Self.project.path
     for metadata in [ProjectMetadata.ssh, .codespace] {
-      let store = Self.store(ProjectRef(path: path, name: "remote", metadata: metadata))
+      let uploadedProject = LockIsolated<String?>(nil)
+      let remoteAssets = RemoteAssetClient(
+        templates: { _ in [] },
+        upload: { projectPath, _, name, _, _ in
+          uploadedProject.setValue(projectPath)
+          return PromptAttachment(
+            path: "\(PromptAttachment.opaqueReferencePrefix)\(metadata.location.rawValue)-\(name)",
+            name: name)
+        },
+        discard: { _, _ in })
+      let store = Self.store(
+        ProjectRef(path: path, name: "remote", metadata: metadata),
+        remoteAssets: remoteAssets)
 
       await store.send(.draftAttachment(.imageArrived(Self.payload)))
+      await store.receive(\.draftAttachment.uploadFinished)
 
-      #expect(store.state.draftAttachments.items.isEmpty)
-      #expect(store.state.draftAttachments.taken == 0)
-      #expect(store.state.draftAttachments.notice?.contains("did not advertise") == true)
+      #expect(uploadedProject.value == path)
+      #expect(store.state.draftAttachments.items.count == 1)
       #expect(
         !FileManager.default.fileExists(
           atPath: NodeMemory.attachmentsDirectory(
@@ -282,16 +296,16 @@ struct DraftAttachmentReducerTests {
 
   @Test
   @MainActor
-  func removingAChipTakesItsFileAndItsPlaceholder() async throws {
+  func removingAChipTakesItsReferenceAndItsPlaceholder() async throws {
     let store = Self.store()
-    defer { Self.cleanUp(store) }
 
     await store.send(.draftAttachment(.imageArrived(Self.payload)))
+    await store.receive(\.draftAttachment.uploadFinished)
     await store.send(.draftAttachment(.imageArrived(Self.payload)))
+    await store.receive(\.draftAttachment.uploadFinished)
     let first = try #require(store.state.draftAttachments.items.first)
     await store.send(.draftAttachment(.removed(first.id)))
 
-    #expect(!FileManager.default.fileExists(atPath: first.path))
     #expect(store.state.draftAttachments.items.count == 1)
     // Renumbered, so the placeholder left behind still resolves.
     #expect(store.state.draftSketchNote == "[image #1]")
@@ -299,49 +313,54 @@ struct DraftAttachmentReducerTests {
 
   @Test
   @MainActor
-  func theNextPasteAfterARemovalStillGetsAFileOfItsOwn() async throws {
-    // Numbering files by position would hand this one the name the surviving image
-    // already has.
+  func theNextPasteAfterARemovalStillGetsAReferenceOfItsOwn() async throws {
     let store = Self.store()
-    defer { Self.cleanUp(store) }
 
     await store.send(.draftAttachment(.imageArrived(Self.payload)))
+    await store.receive(\.draftAttachment.uploadFinished)
     await store.send(.draftAttachment(.imageArrived(Self.payload)))
+    await store.receive(\.draftAttachment.uploadFinished)
     let first = try #require(store.state.draftAttachments.items.first)
     await store.send(.draftAttachment(.removed(first.id)))
     let survivor = try #require(store.state.draftAttachments.items.first?.path)
     await store.send(.draftAttachment(.imageArrived(Self.payload)))
+    await store.receive(\.draftAttachment.uploadFinished)
 
     #expect(store.state.draftAttachments.items.map(\.path).contains(survivor))
     #expect(Set(store.state.draftAttachments.items.map(\.path)).count == 2)
-    #expect(FileManager.default.fileExists(atPath: survivor))
   }
 
   @Test
   @MainActor
-  func cancellingTheDialogTakesThePicturesWithIt() async throws {
-    let store = Self.store()
+  func cancellingTheDialogDiscardsTheStagedDraft() async throws {
+    let discardedNode = LockIsolated<UUID?>(nil)
+    let remoteAssets = RemoteAssetClient(
+      templates: { _ in [] },
+      upload: RemoteAssetClient.testValue.upload,
+      discard: { _, nodeID in discardedNode.setValue(nodeID) })
+    let store = Self.store(remoteAssets: remoteAssets)
+    let nodeID = store.state.draftID
     await store.send(.draftAttachment(.imageArrived(Self.payload)))
-    let path = try #require(store.state.draftAttachments.items.first?.path)
+    await store.receive(\.draftAttachment.uploadFinished)
 
     await store.send(.cancelNewNodeForm) {
       $0.showingNewNodeForm = false
       $0.draftAttachments = ProjectFeature.DraftAttachments()
     }
-    #expect(!FileManager.default.fileExists(atPath: path))
+    await store.finish()
+    #expect(discardedNode.value == nodeID)
   }
 
   @Test
   @MainActor
   func aLoopOnAnotherMachineSaysSoRatherThanNamingAFileThatHostNeverSaw() async {
-    // The ensure dial that delivers graphcode's files to a remote host carries text.
+    // Missing authoritative metadata fails closed rather than guessing from the URI.
     let remote = ProjectRef(path: "ssh://box/~/work/repo", name: "repo")
     let store = Self.store(remote)
-    defer { Self.cleanUp(store) }
 
     await store.send(.draftAttachment(.imageArrived(Self.payload))) {
       $0.draftAttachments.notice =
-        "Images can't be attached to a loop on another machine yet."
+        "Images can't be attached because this project did not advertise support."
     }
     #expect(store.state.draftAttachments.items.isEmpty)
   }
@@ -350,7 +369,6 @@ struct DraftAttachmentReducerTests {
   @MainActor
   func aCompositeHasNoPromptForAPathToTravelIn() async {
     let store = Self.store(loopType: .composite)
-    defer { Self.cleanUp(store) }
 
     await store.send(.draftAttachment(.imageArrived(Self.payload)))
     #expect(store.state.draftAttachments.items.isEmpty)

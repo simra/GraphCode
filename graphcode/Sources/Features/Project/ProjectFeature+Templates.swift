@@ -96,10 +96,10 @@ extension ProjectFeature {
       // The library is re-read on open, not only when the form opened: an edit
       // between the two moments, or a watcher that never got to fire, shows up
       // the moment ⌘T is pressed.
-      let projectPath = state.graph.project.path
+      let project = state.graph.project
       let library = templateLibrary
       return .run { send in
-        await send(.templateLibraryChanged(await library.load(projectPath)))
+        await send(.templateLibraryChanged(await library.load(project)))
       }
 
     case .templatePickerClosed:
@@ -151,10 +151,10 @@ extension ProjectFeature {
       guard state.graph.project.metadata?.capabilities.templates == true else { return .none }
       // The empty canvas offers starters, and it is the one surface that needs the
       // library before anybody has opened the New Node dialog.
-      let projectPath = state.graph.project.path
+      let project = state.graph.project
       let library = templateLibrary
       return .run { send in
-        await send(.templateLibraryChanged(await library.load(projectPath)))
+        await send(.templateLibraryChanged(await library.load(project)))
       }
 
     case .startFromTemplateTapped(let id):
@@ -169,7 +169,7 @@ extension ProjectFeature {
       state.templates.library = library
       applyTemplate(&state, template)
       state.templates.focusRequest = .brief
-      return .merge(opened, countUse(of: template, in: state.graph.project.path))
+      return .merge(opened, countUse(of: template, in: state.graph.project))
 
     case .templateFocusConsumed:
       state.templates.focusRequest = nil
@@ -183,7 +183,7 @@ extension ProjectFeature {
       state.templates.isPickerOpen = false
       applyTemplate(&state, template)
       state.templates.focusRequest = .brief
-      return countUse(of: template, in: state.graph.project.path)
+      return countUse(of: template, in: state.graph.project)
 
     case .templateLaunched(let id):
       guard state.graph.project.metadata?.capabilities.templates == true else { return .none }
@@ -192,7 +192,7 @@ extension ProjectFeature {
       }
       state.templates.isPickerOpen = false
       applyTemplate(&state, template)
-      let counted = countUse(of: template, in: state.graph.project.path)
+      let counted = countUse(of: template, in: state.graph.project)
       // ⌘⏎ is "start now", and a brief with a hole in it is not one: the same
       // unfilled-token gate the Create button obeys. The fill still happened, so the
       // human lands on the brief with the holes to fill, exactly as ⏎ leaves them.

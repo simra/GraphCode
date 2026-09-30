@@ -334,12 +334,14 @@ struct ProjectFeature {
   @Dependency(\.loopTitleDirectory) var loopTitleDirectory
 
   @Dependency(\.orchestratorClient) var orchestratorClient
+  @Dependency(\.remoteAssets) var remoteAssets
   @Dependency(\.templateLibrary) var templateLibrary
 
   /// The one long-lived effect the template feature owns: the directory watch that
   /// keeps `templateLibrary` current while the form is open. Cancelled when the
   /// form closes.
   enum CancelID {
+    case attachmentUpload
     case templateWatch
   }
 
@@ -384,7 +386,9 @@ struct ProjectFeature {
           state.graph.mailroomDigest = mailbox.digest
         case .errorOccurred(let message):
           state.connectionError = message
-        case .recentProjectsListed, .transcriptPage, .nodeResourcePage, .nodesChanged:
+        case .recentProjectsListed, .transcriptPage, .nodeResourcePage, .nodesChanged,
+          .templateList, .templateContent, .attachmentUploadBegan, .attachmentUploadProgress,
+          .attachmentStaged:
           // Not this feature's concern: AppFeature routes the listing to `welcome`
           // and folds a delta into the snapshot it holds before routing it here.
           break

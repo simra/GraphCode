@@ -73,6 +73,7 @@ export interface WorktreeRef {
 export interface PromptAttachment {
   id: string;
   path: string;
+  name?: string;
 }
 
 export interface MetricSample {

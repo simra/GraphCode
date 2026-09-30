@@ -1,6 +1,6 @@
 import Foundation
 
-/// An image a human dropped into the New Node dialog, and where it landed on disk.
+/// An image a human dropped into the New Node dialog.
 ///
 /// **The image itself can never travel.** `zmx` starts a session by *typing* its launch
 /// command into a PTY (`SessionBriefing`), so everything a loop opens with is text on a
@@ -9,28 +9,32 @@ import Foundation
 /// `pi` have a flag for it, and the rest read the file with their own tools once the
 /// prompt names it.
 ///
-/// So the form writes the bytes down once, beside the node's memory
-/// (`NodeMemory.attachmentsDirectory`), and the prompt carries the path. The node id is
-/// chosen by the client (`NodeDraft.id`), which is what makes that possible before the
-/// node exists.
-///
-/// Local graphs only. A remote project's session runs on another machine, and the ensure
-/// dial that delivers graphcode's files there carries text (`remoteDeliveryScript`) — a
-/// path to a file that host has never seen would read to the agent as a missing file.
+/// The client uploads bytes through the daemon and stores only an authenticated opaque
+/// reference in the graph. Before launch, the daemon verifies the staged file on the
+/// authoritative project host and gives the session launcher a copied attachment with
+/// that host-local path. The node id is chosen by the client (`NodeDraft.id`), so staging
+/// can be project- and node-scoped before the node exists.
 public struct PromptAttachment: Codable, Equatable, Sendable, Identifiable {
-  public var id: UUID
-  /// Absolute, on the machine that runs the loop.
-  public var path: String
+  public static let opaqueReferencePrefix = "graphcode-attachment:v1:"
 
-  public init(id: UUID = UUID(), path: String) {
+  public var id: UUID
+  /// An authenticated opaque daemon reference in new drafts, or a legacy local path.
+  public var path: String
+  /// Safe display name supplied by the daemon. Older drafts derive it from `path`.
+  public var name: String?
+
+  public init(id: UUID = UUID(), path: String, name: String? = nil) {
     self.id = id
     self.path = path
+    self.name = name
   }
 
-  public var fileName: String { URL(fileURLWithPath: path).lastPathComponent }
+  public var fileName: String { name ?? URL(fileURLWithPath: path).lastPathComponent }
+
+  public var isOpaqueReference: Bool { path.hasPrefix(Self.opaqueReferencePrefix) }
 }
 
-/// How an attachment's path gets into the sentence a human wrote.
+/// How a launch-resolved attachment path gets into the sentence a human wrote.
 ///
 /// The human never types or sees a path: `[image #1]` stands in its place in the field,
 /// and the token is swapped for the path when the prompt is composed

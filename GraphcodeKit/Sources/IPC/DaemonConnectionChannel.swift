@@ -33,6 +33,20 @@ public enum DaemonWireErrorCode: String, Codable, Sendable {
   case nodeResourceInvalidCursor
   case nodeResourceUnsupportedResource
   case nodeResourceTransportFailure
+  case remoteAssetUnauthorized
+  case remoteAssetUnsupported
+  case remoteAssetInvalidBounds
+  case remoteAssetInvalidDeclaration
+  case remoteAssetTooManyAttachments
+  case remoteAssetUnknownTransfer
+  case remoteAssetExpiredTransfer
+  case remoteAssetInvalidOffset
+  case remoteAssetOversized
+  case remoteAssetHashMismatch
+  case remoteAssetInvalidReference
+  case remoteAssetMissing
+  case remoteAssetUnsafeFile
+  case remoteAssetTransportFailure
   case projectRelocationUnauthorized
   case projectRelocationUnsupported
   case projectRelocationSourceMissing
@@ -715,7 +729,8 @@ public actor DaemonConnectionChannel {
       return paths.contains(plan.sourcePath) || paths.contains(plan.destinationPath)
     case .projectRelocated(let result):
       return paths.contains(result.sourcePath) || paths.contains(result.destinationPath)
-    case .transcriptPage, .nodeResourcePage:
+    case .transcriptPage, .nodeResourcePage, .templateList, .templateContent,
+      .attachmentUploadBegan, .attachmentUploadProgress, .attachmentStaged:
       return true
     case .recentProjectsListed:
       return true

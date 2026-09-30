@@ -16,7 +16,9 @@ extension ProjectFeature {
     // `isValid` carries the same rules the daemon enforces, so an incomplete form
     // simply doesn't submit — the Create button is disabled on it too, and this is
     // the backstop for the keyboard shortcut path.
-    guard draft.isValid else { return .none }
+    guard draft.isValid, state.draftAttachments.notice != "Uploading image…" else {
+      return .none
+    }
     // Composite is deliberately not remembered: creating one is a rare, structural
     // act, and the *next* loop is almost never another composite — remembering it
     // made the heaviest type the default everywhere (see `loopType(remembered:)`).
@@ -184,14 +186,14 @@ extension ProjectFeature {
     let loadTemplates: Effect<Action> =
       supportsTemplates
       ? .run { send in
-        await send(.templateLibraryChanged(await templateLibrary.load(repositoryPath)))
+        await send(.templateLibraryChanged(await templateLibrary.load(project)))
       }
       : .none
     let watchTemplates: Effect<Action> =
       supportsTemplates
-      ? .run { [projectPath = repositoryPath] send in
-        for await _ in templateLibrary.watch(projectPath) {
-          await send(.templateLibraryChanged(await templateLibrary.load(projectPath)))
+      ? .run { send in
+        for await _ in templateLibrary.watch(project) {
+          await send(.templateLibraryChanged(await templateLibrary.load(project)))
         }
       }
       .cancellable(id: CancelID.templateWatch, cancelInFlight: true)

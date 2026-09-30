@@ -118,7 +118,8 @@ func openProject(_ projectPath: String) throws -> LoopGraph? {
     case .graphChanged, .errorOccurred: return true
     case .recentProjectsListed, .mailbox, .transcriptPage, .nodeResourcePage, .nodesChanged,
       .quickChatsListed, .quickChatChanged, .quickChatDeleted, .quickChatActivity,
-      .settingsChanged, .projectRelocationPrepared, .projectRelocated:
+      .settingsChanged, .projectRelocationPrepared, .projectRelocated, .templateList,
+      .templateContent, .attachmentUploadBegan, .attachmentUploadProgress, .attachmentStaged:
       return false
     }
   }

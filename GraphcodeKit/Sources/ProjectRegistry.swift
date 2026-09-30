@@ -156,6 +156,7 @@ public actor ProjectRegistry {
   private let quickChatStore: QuickChatStore
   private let platformPaths: any PlatformPaths
   private let replayStore: DaemonReplayStore
+  private let remoteAssets: RemoteAssetStore
   private let settingsURL: URL
   private let classifyProject: @Sendable (String) -> ProjectMetadata
   private let relocationCoordinator: ProjectRelocationCoordinator
@@ -262,6 +263,7 @@ public actor ProjectRegistry {
     persistenceDirectory: URL,
     platformPaths: any PlatformPaths = CurrentPlatformPaths.value,
     replayStore: DaemonReplayStore = DaemonReplayStore(),
+    remoteAssets: RemoteAssetStore = RemoteAssetStore(),
     settingsURL: URL = GraphcodeSettingsStore.url,
     ensureSession: (@Sendable (LoopNode, String?) async -> Void)? = CLISessionBackend.ensureSession,
     terminateSession: (@Sendable (LoopNode, String?) -> Void)? =
@@ -326,6 +328,7 @@ public actor ProjectRegistry {
     self.persistsSynchronously = persistsSynchronously
     quickChatStore = QuickChatStore(baseDirectory: persistenceDirectory)
     self.replayStore = replayStore
+    self.remoteAssets = remoteAssets
     self.settingsURL = settingsURL
     self.classifyProject = classifyProject
     self.relocationCoordinator =
@@ -463,6 +466,7 @@ public actor ProjectRegistry {
   #endif
 
   public func removeConnection(_ id: UUID) async {
+    await remoteAssets.disconnected(owner: id)
     let preparing = preparingRelocations.filter { $0.value.connectionID == id }
     for (operationID, operation) in preparing {
       preparingRelocations.removeValue(forKey: operationID)
@@ -937,10 +941,26 @@ public actor ProjectRegistry {
           error = "project relocation is in progress"
           break
         }
-        guard let node = await store.nodeForSessionLaunch(nodeID), let startNodeSession else {
+        guard var node = await store.nodeForSessionLaunch(nodeID), let startNodeSession else {
           error = "loop session unavailable: session launcher unavailable"
           break
         }
+        var resolvedAttachments: [PromptAttachment] = []
+        for attachment in node.attachments {
+          switch await remoteAssets.resolvedPath(
+            for: attachment, projectPath: canonicalPath, nodeID: node.id,
+            metadata: graph.project.metadata
+              ?? ProjectMetadata.inferred(fromProjectPath: canonicalPath)
+          ) {
+          case .success(let path):
+            resolvedAttachments.append(
+              PromptAttachment(id: attachment.id, path: path, name: attachment.fileName))
+          case .failure(let failure):
+            error = failure.message
+          }
+        }
+        guard error == nil else { break }
+        node.attachments = resolvedAttachments
         guard sessionLaunchBarrier.isCurrent(launchToken) else {
           error = "project relocation is in progress"
           break
@@ -991,6 +1011,43 @@ public actor ProjectRegistry {
         guard let store = stores[canonicalPath] else {
           return ProjectRegistryCommandResult(error: "\(path) isn't open — open it first.")
         }
+        let authoritativeGraph = await store.graph
+        if case .createNode(let draft) = inner {
+          let opaqueAttachments = draft.attachments.filter(\.isOpaqueReference)
+          let metadata =
+            authoritativeGraph.project.metadata
+            ?? ProjectMetadata.inferred(fromProjectPath: canonicalPath)
+          if !opaqueAttachments.isEmpty {
+            guard
+              case .success = await remoteAssets.validate(
+                opaqueAttachments, projectPath: canonicalPath,
+                metadata: metadata,
+                nodeID: draft.id)
+            else {
+              return ProjectRegistryCommandResult(
+                error: RemoteAssetError.invalidReference.message,
+                errorCode: .remoteAssetInvalidReference)
+            }
+            if case .failure(let failure) = await remoteAssets.retainOnly(
+              opaqueAttachments, projectPath: canonicalPath, metadata: metadata, nodeID: draft.id)
+            {
+              return ProjectRegistryCommandResult(
+                error: failure.message, errorCode: Self.wireCode(for: failure))
+            }
+          } else if case .failure(let failure) = await remoteAssets.discardDraftIfStaged(
+            projectPath: canonicalPath, metadata: metadata, nodeID: draft.id)
+          {
+            return ProjectRegistryCommandResult(
+              error: failure.message, errorCode: Self.wireCode(for: failure))
+          }
+          if authoritativeGraph.project.metadata?.location != .local,
+            opaqueAttachments.count != draft.attachments.count
+          {
+            return ProjectRegistryCommandResult(
+              error: RemoteAssetError.invalidReference.message,
+              errorCode: .remoteAssetInvalidReference)
+          }
+        }
         let v2PayloadLimit: Int? =
           if case .v2 = channel.mode { FramedMessageIO.v2MaxPayloadBytes } else { nil }
         let requester: UUID? = if case .v1 = channel.mode { connectionID } else { nil }
@@ -1001,9 +1058,29 @@ public actor ProjectRegistry {
           v2PayloadLimit: v2PayloadLimit)
         switch result {
         case .applied(let graph):
+          if case .createNode(let draft) = inner {
+            await remoteAssets.consumed(
+              projectPath: canonicalPath,
+              metadata: authoritativeGraph.project.metadata
+                ?? ProjectMetadata.inferred(fromProjectPath: canonicalPath),
+              nodeID: draft.id)
+          }
+          if case .deleteNode(let nodeID) = inner,
+            let metadata = authoritativeGraph.project.metadata
+          {
+            await remoteAssets.discard(
+              owner: connectionID, projectPath: canonicalPath, metadata: metadata, nodeID: nodeID)
+          }
           response = .graphChanged(graph)
           error = nil
         case .rejected(let message, _):
+          if case .createNode(let draft) = inner,
+            let metadata = authoritativeGraph.project.metadata
+          {
+            await remoteAssets.discard(
+              owner: connectionID, projectPath: canonicalPath, metadata: metadata,
+              nodeID: draft.id)
+          }
           error = message
         }
       case .refused(let reason):
@@ -1102,6 +1179,138 @@ public actor ProjectRegistry {
           error: NodeResourceReadError.unauthorized.message,
           errorCode: .nodeResourceUnauthorized)
       }
+
+    case .listTemplates(let path, let query):
+      guard case .v2 = channel.mode else {
+        return ProjectRegistryCommandResult(
+          error: RemoteAssetError.unauthorized.message, errorCode: .remoteAssetUnauthorized)
+      }
+      guard
+        case .project(let canonicalPath) = routing(
+          for: path, isSidebar: sidebarConnections.contains(connectionID)),
+        connectionProjectPaths[connectionID]?.contains(canonicalPath) == true,
+        let store = stores[canonicalPath]
+      else {
+        return ProjectRegistryCommandResult(
+          error: RemoteAssetError.unauthorized.message, errorCode: .remoteAssetUnauthorized)
+      }
+      let graph = await store.graph
+      guard graph.project.path == canonicalPath, let metadata = graph.project.metadata else {
+        return ProjectRegistryCommandResult(
+          error: RemoteAssetError.unauthorized.message, errorCode: .remoteAssetUnauthorized)
+      }
+      switch await remoteAssets.listTemplates(
+        owner: connectionID, projectPath: canonicalPath, metadata: metadata, query: query)
+      {
+      case .success(let list): response = .templateList(list)
+      case .failure(let failure):
+        return ProjectRegistryCommandResult(
+          error: failure.message, errorCode: Self.wireCode(for: failure))
+      }
+
+    case .readTemplate(let path, let query):
+      guard case .v2 = channel.mode else {
+        return ProjectRegistryCommandResult(
+          error: RemoteAssetError.unauthorized.message, errorCode: .remoteAssetUnauthorized)
+      }
+      guard
+        case .project(let canonicalPath) = routing(
+          for: path, isSidebar: sidebarConnections.contains(connectionID)),
+        connectionProjectPaths[connectionID]?.contains(canonicalPath) == true,
+        let store = stores[canonicalPath]
+      else {
+        return ProjectRegistryCommandResult(
+          error: RemoteAssetError.unauthorized.message, errorCode: .remoteAssetUnauthorized)
+      }
+      let graph = await store.graph
+      guard graph.project.path == canonicalPath, let metadata = graph.project.metadata else {
+        return ProjectRegistryCommandResult(
+          error: RemoteAssetError.unauthorized.message, errorCode: .remoteAssetUnauthorized)
+      }
+      switch await remoteAssets.readTemplate(
+        owner: connectionID, projectPath: canonicalPath, metadata: metadata, query: query)
+      {
+      case .success(let content): response = .templateContent(content)
+      case .failure(let failure):
+        return ProjectRegistryCommandResult(
+          error: failure.message, errorCode: Self.wireCode(for: failure))
+      }
+
+    case .beginAttachmentUpload(let path, let nodeID, let declaration):
+      guard case .v2 = channel.mode else {
+        return ProjectRegistryCommandResult(
+          error: RemoteAssetError.unauthorized.message, errorCode: .remoteAssetUnauthorized)
+      }
+      guard
+        case .project(let canonicalPath) = routing(
+          for: path, isSidebar: sidebarConnections.contains(connectionID)),
+        connectionProjectPaths[connectionID]?.contains(canonicalPath) == true,
+        let store = stores[canonicalPath]
+      else {
+        return ProjectRegistryCommandResult(
+          error: RemoteAssetError.unauthorized.message, errorCode: .remoteAssetUnauthorized)
+      }
+      let graph = await store.graph
+      guard graph.project.path == canonicalPath, let metadata = graph.project.metadata else {
+        return ProjectRegistryCommandResult(
+          error: RemoteAssetError.unauthorized.message, errorCode: .remoteAssetUnauthorized)
+      }
+      let existing = graph.nodesAtAnyDepth.first(where: { $0.id == nodeID })?.attachments.count ?? 0
+      switch await remoteAssets.beginUpload(
+        owner: connectionID, projectPath: canonicalPath, metadata: metadata, nodeID: nodeID,
+        declaration: declaration, existingCount: existing)
+      {
+      case .success(let ticket): response = .attachmentUploadBegan(ticket)
+      case .failure(let failure):
+        return ProjectRegistryCommandResult(
+          error: failure.message, errorCode: Self.wireCode(for: failure))
+      }
+
+    case .uploadAttachmentChunk(let transferID, let offset, let data):
+      switch await remoteAssets.append(
+        owner: connectionID, transferID: transferID, offset: offset, data: data)
+      {
+      case .success(let progress): response = .attachmentUploadProgress(progress)
+      case .failure(let failure):
+        return ProjectRegistryCommandResult(
+          error: failure.message, errorCode: Self.wireCode(for: failure))
+      }
+
+    case .finalizeAttachmentUpload(let transferID):
+      switch await remoteAssets.finalize(owner: connectionID, transferID: transferID) {
+      case .success(let attachment): response = .attachmentStaged(attachment)
+      case .failure(let failure):
+        return ProjectRegistryCommandResult(
+          error: failure.message, errorCode: Self.wireCode(for: failure))
+      }
+
+    case .cancelAttachmentUpload(let transferID):
+      switch await remoteAssets.cancel(owner: connectionID, transferID: transferID) {
+      case .success: break
+      case .failure(let failure):
+        return ProjectRegistryCommandResult(
+          error: failure.message, errorCode: Self.wireCode(for: failure))
+      }
+
+    case .discardStagedAttachments(let path, let nodeID):
+      guard
+        case .project(let canonicalPath) = routing(
+          for: path, isSidebar: sidebarConnections.contains(connectionID)),
+        connectionProjectPaths[connectionID]?.contains(canonicalPath) == true,
+        let store = stores[canonicalPath]
+      else {
+        return ProjectRegistryCommandResult(
+          error: RemoteAssetError.unauthorized.message, errorCode: .remoteAssetUnauthorized)
+      }
+      let graph = await store.graph
+      guard graph.nodesAtAnyDepth.allSatisfy({ $0.id != nodeID }),
+        let metadata = graph.project.metadata
+      else {
+        return ProjectRegistryCommandResult(
+          error: RemoteAssetError.unauthorized.message, errorCode: .remoteAssetUnauthorized)
+      }
+      await remoteAssets.discard(
+        owner: connectionID, projectPath: canonicalPath, metadata: metadata, nodeID: nodeID)
 
     case .prepareProjectRelocation(
       let operationID, let sourcePath, let destinationPath, let options):
@@ -1439,7 +1648,9 @@ public actor ProjectRegistry {
         return nil
       }
       return .graphChanged(await store.graph)
-    case .announce, .mailbox, .transcript, .nodeResource, .prepareProjectRelocation,
+    case .announce, .mailbox, .transcript, .nodeResource, .listTemplates, .readTemplate,
+      .beginAttachmentUpload, .uploadAttachmentChunk, .finalizeAttachmentUpload,
+      .cancelAttachmentUpload, .discardStagedAttachments, .prepareProjectRelocation,
       .relocateProject:
       return nil
     }
@@ -1659,6 +1870,25 @@ public actor ProjectRegistry {
     case .invalidCursor: return .nodeResourceInvalidCursor
     case .unsupportedResource: return .nodeResourceUnsupportedResource
     case .transportFailure: return .nodeResourceTransportFailure
+    }
+  }
+
+  private static func wireCode(for error: RemoteAssetError) -> DaemonWireErrorCode {
+    switch error {
+    case .unauthorized: return .remoteAssetUnauthorized
+    case .unsupported: return .remoteAssetUnsupported
+    case .invalidBounds: return .remoteAssetInvalidBounds
+    case .invalidDeclaration: return .remoteAssetInvalidDeclaration
+    case .tooManyAttachments: return .remoteAssetTooManyAttachments
+    case .unknownTransfer: return .remoteAssetUnknownTransfer
+    case .expiredTransfer: return .remoteAssetExpiredTransfer
+    case .invalidOffset: return .remoteAssetInvalidOffset
+    case .oversized: return .remoteAssetOversized
+    case .hashMismatch: return .remoteAssetHashMismatch
+    case .invalidReference: return .remoteAssetInvalidReference
+    case .missing: return .remoteAssetMissing
+    case .unsafeFile: return .remoteAssetUnsafeFile
+    case .transportFailure: return .remoteAssetTransportFailure
     }
   }
 
