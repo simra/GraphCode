@@ -144,6 +144,7 @@ public actor RemoteAssetStore {
 
   private struct Transfer: Sendable {
     var owner: UUID
+    var connectionID: UUID
     var projectPath: String
     var metadata: ProjectMetadata
     var nodeID: UUID
@@ -302,6 +303,7 @@ public actor RemoteAssetStore {
 
   public func beginUpload(
     owner: UUID,
+    connectionID: UUID? = nil,
     projectPath: String,
     metadata: ProjectMetadata,
     nodeID: UUID,
@@ -328,7 +330,8 @@ public actor RemoteAssetStore {
       let id = UUID()
       let expiresAt = now().addingTimeInterval(Self.transferLifetime)
       transfers[id] = Transfer(
-        owner: owner, projectPath: projectPath, metadata: metadata, nodeID: nodeID,
+        owner: owner, connectionID: connectionID ?? owner, projectPath: projectPath,
+        metadata: metadata, nodeID: nodeID,
         declaration: declaration, bytes: Data(), expiresAt: expiresAt)
       return .success(
         AttachmentUploadTicket(
@@ -341,23 +344,27 @@ public actor RemoteAssetStore {
   }
 
   public func context(
-    owner: UUID, transferID: UUID
+    owner: UUID, connectionID: UUID? = nil, transferID: UUID
   ) -> Result<AttachmentTransferContext, RemoteAssetError> {
     expireTransfers()
     let transfer =
       transfers[transferID] ?? finalizations[transferID]?.transfer
       ?? pendingDeliveries[transferID]?.transfer
-    guard let transfer, transfer.owner == owner else { return .failure(.unknownTransfer) }
+    guard let transfer, transfer.owner == owner,
+      connectionID.map({ $0 == transfer.connectionID }) ?? true
+    else { return .failure(.unknownTransfer) }
     return .success(
       AttachmentTransferContext(
         projectPath: transfer.projectPath, metadata: transfer.metadata, nodeID: transfer.nodeID))
   }
 
   public func append(
-    owner: UUID, transferID: UUID, offset: Int, data: Data
+    owner: UUID, connectionID: UUID? = nil, transferID: UUID, offset: Int, data: Data
   ) -> Result<AttachmentUploadProgress, RemoteAssetError> {
     expireTransfers()
-    guard var transfer = transfers[transferID], transfer.owner == owner else {
+    guard var transfer = transfers[transferID], transfer.owner == owner,
+      connectionID.map({ $0 == transfer.connectionID }) ?? true
+    else {
       return .failure(.unknownTransfer)
     }
     let next = transfer.bytes.count.addingReportingOverflow(data.count)
@@ -378,10 +385,12 @@ public actor RemoteAssetStore {
   }
 
   public func finalize(
-    owner: UUID, transferID: UUID
+    owner: UUID, connectionID: UUID? = nil, transferID: UUID
   ) async -> Result<PromptAttachment, RemoteAssetError> {
     expireTransfers()
-    guard let transfer = transfers[transferID], transfer.owner == owner else {
+    guard let transfer = transfers[transferID], transfer.owner == owner,
+      connectionID.map({ $0 == transfer.connectionID }) ?? true
+    else {
       return .failure(.unknownTransfer)
     }
     transfers.removeValue(forKey: transferID)
@@ -437,9 +446,10 @@ public actor RemoteAssetStore {
   }
 
   public func completeDelivery(
-    owner: UUID, deliveryID: UUID, delivered: Bool
+    owner: UUID, connectionID: UUID? = nil, deliveryID: UUID, delivered: Bool
   ) async -> Result<Void, RemoteAssetError> {
-    guard let pending = pendingDeliveries[deliveryID], pending.transfer.owner == owner
+    guard let pending = pendingDeliveries[deliveryID], pending.transfer.owner == owner,
+      connectionID.map({ $0 == pending.transfer.connectionID }) ?? true
     else { return .failure(.unknownTransfer) }
     pendingDeliveries.removeValue(forKey: deliveryID)
     if delivered {
@@ -462,13 +472,19 @@ public actor RemoteAssetStore {
     return .success(())
   }
 
-  public func cancel(owner: UUID, transferID: UUID) async -> Result<Void, RemoteAssetError> {
-    if let transfer = transfers[transferID], transfer.owner == owner {
+  public func cancel(
+    owner: UUID, connectionID: UUID? = nil, transferID: UUID
+  ) async -> Result<Void, RemoteAssetError> {
+    if let transfer = transfers[transferID], transfer.owner == owner,
+      connectionID.map({ $0 == transfer.connectionID }) ?? true
+    {
       transfers.removeValue(forKey: transferID)
       release(transfer)
       return .success(())
     }
-    if var finalization = finalizations[transferID], finalization.transfer.owner == owner {
+    if var finalization = finalizations[transferID], finalization.transfer.owner == owner,
+      connectionID.map({ $0 == finalization.transfer.connectionID }) ?? true
+    {
       finalization.cancelled = true
       finalizations[transferID] = finalization
       finalization.task.cancel()
@@ -485,7 +501,9 @@ public actor RemoteAssetStore {
       cancellationOutcomes.removeValue(forKey: transferID)
       return .success(())
     }
-    if let pending = pendingDeliveries[transferID], pending.transfer.owner == owner {
+    if let pending = pendingDeliveries[transferID], pending.transfer.owner == owner,
+      connectionID.map({ $0 == pending.transfer.connectionID }) ?? true
+    {
       pendingDeliveries.removeValue(forKey: transferID)
       guard await removePublished(pending.transfer) else {
         cleanupPending[transferID] = pending.transfer
@@ -493,7 +511,9 @@ public actor RemoteAssetStore {
       }
       return .success(())
     }
-    if let transfer = cleanupPending[transferID], transfer.owner == owner {
+    if let transfer = cleanupPending[transferID], transfer.owner == owner,
+      connectionID.map({ $0 == transfer.connectionID }) ?? true
+    {
       guard await removePublished(transfer) else { return .failure(.transportFailure) }
       cleanupPending.removeValue(forKey: transferID)
       cancellationOutcomes.removeValue(forKey: transferID)
@@ -502,16 +522,19 @@ public actor RemoteAssetStore {
     return .failure(.unknownTransfer)
   }
 
-  public func disconnected(owner: UUID) async {
+  public func disconnected(connectionID: UUID, owner: UUID, ownerStillConnected: Bool) async {
     let ids = Set(
-      transfers.filter { $0.value.owner == owner }.map(\.key)
-        + finalizations.filter { $0.value.transfer.owner == owner }.map(\.key)
-        + pendingDeliveries.filter { $0.value.transfer.owner == owner }.map(\.key)
-        + cleanupPending.filter { $0.value.owner == owner }.map(\.key))
-    for id in ids { _ = await cancel(owner: owner, transferID: id) }
-    for id in cleanupPending.filter({ $0.value.owner == owner }).map(\.key) {
-      _ = await cancel(owner: owner, transferID: id)
+      transfers.filter { $0.value.connectionID == connectionID }.map(\.key)
+        + finalizations.filter { $0.value.transfer.connectionID == connectionID }.map(\.key)
+        + pendingDeliveries.filter { $0.value.transfer.connectionID == connectionID }.map(\.key)
+        + cleanupPending.filter { $0.value.connectionID == connectionID }.map(\.key))
+    for id in ids {
+      _ = await cancel(owner: owner, connectionID: connectionID, transferID: id)
     }
+    for id in cleanupPending.filter({ $0.value.connectionID == connectionID }).map(\.key) {
+      _ = await cancel(owner: owner, connectionID: connectionID, transferID: id)
+    }
+    guard !ownerStillConnected else { return }
     let draftKeys = drafts.filter { $0.value.owner == owner }.map(\.key)
     for key in draftKeys {
       guard let draft = drafts.removeValue(forKey: key),
@@ -521,6 +544,10 @@ public actor RemoteAssetStore {
       await transport.discardAttachments(
         context.projectPath, context.metadata, context.nodeID)
     }
+  }
+
+  public func disconnected(owner: UUID) async {
+    await disconnected(connectionID: owner, owner: owner, ownerStillConnected: false)
   }
 
   public func validateForCreate(

@@ -76,6 +76,7 @@ struct OrchestratorClientTests {
     #expect(announce == completeCapabilityAnnouncement)
     let command = try #require(await daemon.nextCommand())
     #expect(command == .listRecentProjects)
+    #expect(daemon.identifiedClientID() == GraphcodeClientIdentity.id)
 
     let project = ProjectRef(path: "/tmp/stub-project", name: "stub-project")
     try daemon.reply(.recentProjectsListed([project]))
@@ -145,6 +146,7 @@ struct OrchestratorClientTests {
 
     let reannounce = try #require(await daemon.nextCommand(onConnection: 1))
     #expect(reannounce == completeCapabilityAnnouncement)
+    #expect(daemon.identifiedClientID(onConnection: 1) == daemon.identifiedClientID())
     let rejoin = try #require(await daemon.nextCommand(onConnection: 1))
     #expect(rejoin == .restoreOpenProjects)
     let joinGlobal = try #require(await daemon.nextCommand(onConnection: 1))
@@ -269,7 +271,7 @@ struct OrchestratorClientTests {
     .announce(capabilities: [
       ClientCapability.nodesChanged.rawValue,
       ClientCapability.settingsChanged.rawValue,
-    ])
+    ], clientID: GraphcodeClientIdentity.id)
   }
 }
 
@@ -287,6 +289,7 @@ private final class StubDaemon: @unchecked Sendable {
   private let listenerDescriptor: Int32
   private let lock = NSLock()
   private var acceptedDescriptors: [Int32] = []
+  private var identifiedClients: [Int: UUID] = [:]
   private var stopped = false
 
   static func temporarySocketPath() -> URL {
@@ -363,16 +366,27 @@ private final class StubDaemon: @unchecked Sendable {
   func nextCommand(onConnection index: Int = 0) async -> DaemonCommand? {
     await withCheckedContinuation { continuation in
       DispatchQueue.global().async { [self] in
-        guard let descriptor = waitForConnection(at: index),
-          let data = try? FramedMessageIO.readFrame(from: descriptor),
-          let command = try? JSONDecoder().decode(DaemonCommand.self, from: data)
-        else {
-          continuation.resume(returning: nil)
+        guard let descriptor = waitForConnection(at: index) else {
+          return continuation.resume(returning: nil)
+        }
+        while true {
+          guard let data = try? FramedMessageIO.readFrame(from: descriptor),
+            let command = try? JSONDecoder().decode(DaemonCommand.self, from: data)
+          else {
+            return continuation.resume(returning: nil)
+          }
+          if case .announce(_, let clientID?) = command {
+            lock.withLock { identifiedClients[index] = clientID }
+          }
+          continuation.resume(returning: command)
           return
         }
-        continuation.resume(returning: command)
       }
     }
+  }
+
+  func identifiedClientID(onConnection index: Int = 0) -> UUID? {
+    lock.withLock { identifiedClients[index] }
   }
 
   /// Writes an event back the way `graphcoded` does — on the accepted connection.

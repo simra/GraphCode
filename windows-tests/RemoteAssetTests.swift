@@ -25,6 +25,11 @@ private actor RemoteStageGate {
 private final class RemoteAssetTestConnection: @unchecked Sendable, DaemonConnection {
   let id = UUID()
   let endpoint: DaemonEndpoint = .namedPipe("\\\\.\\pipe\\graphcode-remote-assets-test")
+  let authenticatedPeerProcessID: UInt64?
+
+  init(peerProcessID: UInt64 = UInt64.random(in: 1...UInt64.max)) {
+    authenticatedPeerProcessID = peerProcessID
+  }
 
   func receiveFrame() async throws -> Data { Data() }
   func sendFrame(_ data: Data) async throws {}
@@ -163,6 +168,37 @@ final class RemoteAssetTests: XCTestCase {
     AttachmentUploadDeclaration(
       name: name, contentType: "image/png", size: data.count,
       sha256: GraphcodeSHA256.digest(data).map { String(format: "%02x", $0) }.joined())
+  }
+
+  private func uploadThroughRegistry(
+    _ registry: ProjectRegistry,
+    connectionID: UUID,
+    projectPath: String,
+    nodeID: UUID,
+    name: String = "image-1.png",
+    data: Data
+  ) async throws -> PromptAttachment {
+    let began = await registry.apply(
+      .beginAttachmentUpload(
+        projectPath: projectPath, nodeID: nodeID,
+        declaration: declaration(name: name, data: data)),
+      connectionID: connectionID)
+    guard case .attachmentUploadBegan(let ticket) = began?.response else {
+      throw XCTSkip("attachment upload did not begin: \(began?.error ?? "no response")")
+    }
+    let appended = await registry.apply(
+      .uploadAttachmentChunk(transferID: ticket.transferID, offset: 0, data: data),
+      connectionID: connectionID)
+    XCTAssertNil(appended?.error)
+    let finalized = await registry.apply(
+      .finalizeAttachmentUpload(transferID: ticket.transferID),
+      connectionID: connectionID)
+    guard case .attachmentStaged(let attachment) = finalized?.response else {
+      throw XCTSkip("attachment upload did not finalize: \(finalized?.error ?? "no response")")
+    }
+    await registry.completeRemoteAssetDelivery(
+      ticket.transferID, connectionID: connectionID, delivered: true)
+    return attachment
   }
 
   private func gatedStore(fixture: Fixture, gate: RemoteStageGate) -> RemoteAssetStore {
@@ -423,6 +459,7 @@ final class RemoteAssetTests: XCTestCase {
     let transferID = UUID()
     let nodeID = UUID()
     let commands: [DaemonCommand] = [
+      .announce(capabilities: [], clientID: UUID()),
       .listTemplates(projectPath: "C:\\fixture", query: RemoteTemplateListQuery()),
       .readTemplate(
         projectPath: "C:\\fixture", query: RemoteTemplateReadQuery(templateID: UUID())),
@@ -441,6 +478,14 @@ final class RemoteAssetTests: XCTestCase {
           DaemonCommand.self, from: JSONEncoder().encode(command)),
         command)
     }
+  }
+
+  func testLogicalClientAnnouncementRemainsDecodableByLegacyDaemon() throws {
+    let encoded = try JSONEncoder().encode(
+      DaemonCommand.announce(capabilities: ["nodesChanged"], clientID: UUID()))
+    XCTAssertEqual(
+      try JSONDecoder().decode(LegacyAnnouncement.self, from: encoded),
+      .announce(capabilities: ["nodesChanged"]))
   }
 
   func testGraphAndReplayContainReferenceButNeverAttachmentBytes() async throws {
@@ -470,6 +515,10 @@ final class RemoteAssetTests: XCTestCase {
     XCTAssertFalse(encodedGraph.contains("attachment-secret-body"))
     XCTAssertFalse(encodedReplay.contains("attachment-secret-body"))
     XCTAssertTrue(encodedGraph.contains("graphcode-attachment:v1:"))
+  }
+
+  private enum LegacyAnnouncement: Codable, Equatable {
+    case announce(capabilities: [String])
   }
 
   func testLauncherResolutionUsesExactOpaqueReferencePath() async throws {
@@ -1263,5 +1312,242 @@ final class RemoteAssetTests: XCTestCase {
     XCTAssertEqual(
       existingAfterUpload,
       data)
+  }
+
+  func testLogicalClientOwnsDraftAcrossUploadAndGraphConnections() async throws {
+    let root = FileManager.default.temporaryDirectory
+      .appendingPathComponent("asset-logical-owner-\(UUID())", isDirectory: true)
+    let project = root.appendingPathComponent("project", isDirectory: true)
+    try FileManager.default.createDirectory(at: project, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let fixture = Fixture()
+    let assets = store(fixture: fixture)
+    let registry = ProjectRegistry(
+      persistenceDirectory: root.appendingPathComponent("state"),
+      remoteAssets: assets,
+      ensureSession: nil,
+      terminateSession: nil,
+      restartSession: nil,
+      persistsSynchronously: true,
+      classifyProject: { _ in .local })
+    let peerProcessID: UInt64 = 4_242
+    let logicalClientID = UUID()
+    let upload = RemoteAssetTestConnection(peerProcessID: peerProcessID)
+    let graph = RemoteAssetTestConnection(peerProcessID: peerProcessID)
+    let other = RemoteAssetTestConnection(peerProcessID: peerProcessID)
+    await registry.addConnection(
+      id: upload.id,
+      channel: DaemonConnectionChannel(
+        connection: upload, mode: .v2(version: 2), clientID: logicalClientID))
+    await registry.addConnection(
+      id: graph.id, channel: DaemonConnectionChannel(connection: graph, mode: .v1))
+    await registry.addConnection(
+      id: other.id, channel: DaemonConnectionChannel(connection: other, mode: .v1))
+    let graphIdentity = await registry.apply(
+      .announce(capabilities: [], clientID: logicalClientID), connectionID: graph.id)
+    XCTAssertNil(graphIdentity?.error)
+    let otherIdentity = await registry.apply(
+      .announce(capabilities: [], clientID: UUID()), connectionID: other.id)
+    XCTAssertNil(otherIdentity?.error)
+    for connectionID in [upload.id, graph.id, other.id] {
+      _ = await registry.apply(.openProject(path: project.path), connectionID: connectionID)
+    }
+
+    let nodeID = UUID()
+    let data = Data("logical owner".utf8)
+    let attachment = try await uploadThroughRegistry(
+      registry, connectionID: upload.id, projectPath: project.path, nodeID: nodeID, data: data)
+    let refused = await registry.apply(
+      .graphCommand(
+        projectPath: project.path,
+        command: .createNode(
+          NodeDraft(
+            id: nodeID, title: "Wrong owner", loopType: .turnBased,
+            firstInstruction: "work", attachments: [attachment]))),
+      connectionID: other.id)
+    XCTAssertEqual(refused?.errorCode, .remoteAssetUnauthorized)
+
+    await registry.removeConnection(upload.id)
+    let persisted = await fixture.stagedData(
+      path: project.path, nodeID: nodeID, name: "image-1.png")
+    XCTAssertEqual(persisted, data)
+    let created = await registry.apply(
+      .graphCommand(
+        projectPath: project.path,
+        command: .createNode(
+          NodeDraft(
+            id: nodeID, title: "Shared owner", loopType: .turnBased,
+            firstInstruction: "work", attachments: [attachment]))),
+      connectionID: graph.id)
+    XCTAssertNil(created?.error)
+
+    let secondUpload = RemoteAssetTestConnection(peerProcessID: peerProcessID)
+    await registry.addConnection(
+      id: secondUpload.id,
+      channel: DaemonConnectionChannel(
+        connection: secondUpload, mode: .v2(version: 2), clientID: logicalClientID))
+    _ = await registry.apply(.openProject(path: project.path), connectionID: secondUpload.id)
+    let abandonedID = UUID()
+    let abandonedData = Data("abandoned".utf8)
+    _ = try await uploadThroughRegistry(
+      registry, connectionID: secondUpload.id, projectPath: project.path, nodeID: abandonedID,
+      data: abandonedData)
+    await registry.removeConnection(secondUpload.id)
+    let abandonedStaged = await fixture.stagedData(
+      path: project.path, nodeID: abandonedID, name: "image-1.png")
+    XCTAssertEqual(abandonedStaged, abandonedData)
+    await registry.removeConnection(graph.id)
+    let cleaned = await fixture.stagedData(
+      path: project.path, nodeID: abandonedID, name: "image-1.png")
+    XCTAssertNil(cleaned)
+  }
+
+  func testNestedCreateAppliesAttachmentTransactionAtArbitraryDepth() async throws {
+    let root = FileManager.default.temporaryDirectory
+      .appendingPathComponent("asset-nested-create-\(UUID())", isDirectory: true)
+    let project = root.appendingPathComponent("project", isDirectory: true)
+    let staging = root.appendingPathComponent("staging", isDirectory: true)
+    try FileManager.default.createDirectory(at: project, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let fixture = Fixture()
+    let assets = store(
+      fixture: fixture,
+      attachmentsDirectory: { _, nodeID in
+        staging.appendingPathComponent(nodeID.uuidString, isDirectory: true)
+      })
+    let state = root.appendingPathComponent("state")
+    let outerID = UUID()
+    let innerID = UUID()
+    let nestedProject = ProjectRef(path: project.path, name: "Nested", metadata: .local)
+    let innerGraph = LoopGraph(project: nestedProject)
+    let outerGraph = LoopGraph(
+      project: nestedProject,
+      nodes: [LoopNode(id: innerID, title: "Inner", loopType: .composite, subGraph: innerGraph)])
+    ProjectPersistence(baseDirectory: state).saveGraph(
+      LoopGraph(
+        project: ProjectRef(path: project.path, name: "Project", metadata: .local),
+        nodes: [
+          LoopNode(id: outerID, title: "Outer", loopType: .composite, subGraph: outerGraph)
+        ]))
+    let registry = ProjectRegistry(
+      persistenceDirectory: state,
+      remoteAssets: assets,
+      ensureSession: nil,
+      terminateSession: nil,
+      restartSession: nil,
+      persistsSynchronously: true,
+      classifyProject: { _ in .local })
+    let peerProcessID: UInt64 = 7_777
+    let logicalClientID = UUID()
+    let upload = RemoteAssetTestConnection(peerProcessID: peerProcessID)
+    let graph = RemoteAssetTestConnection(peerProcessID: peerProcessID)
+    await registry.addConnection(
+      id: upload.id,
+      channel: DaemonConnectionChannel(
+        connection: upload, mode: .v2(version: 2), clientID: logicalClientID))
+    await registry.addConnection(
+      id: graph.id, channel: DaemonConnectionChannel(connection: graph, mode: .v1))
+    _ = await registry.apply(
+      .announce(capabilities: [], clientID: logicalClientID), connectionID: graph.id)
+    _ = await registry.apply(.openProject(path: project.path), connectionID: upload.id)
+    _ = await registry.apply(.openProject(path: project.path), connectionID: graph.id)
+
+    let childID = UUID()
+    let childData = Data("nested opaque".utf8)
+    let attachment = try await uploadThroughRegistry(
+      registry, connectionID: upload.id, projectPath: project.path, nodeID: childID,
+      data: childData)
+    await registry.removeConnection(upload.id)
+    let nestedCreate = GraphCommand.subGraphCommand(
+      nodeID: outerID,
+      command: .subGraphCommand(
+        nodeID: innerID,
+        command: .createNode(
+          NodeDraft(
+            id: childID, title: "Nested child", loopType: .turnBased,
+            firstInstruction: "work", attachments: [attachment]))))
+    let created = await registry.apply(
+      .graphCommand(projectPath: project.path, command: nestedCreate),
+      connectionID: graph.id)
+    XCTAssertNil(created?.error)
+    guard case .graphChanged(let graphSnapshot) = created?.response else {
+      return XCTFail("expected nested graph snapshot")
+    }
+    XCTAssertEqual(
+      graphSnapshot.nodes[id: outerID]?.subGraph?.nodes[id: innerID]?.subGraph?.nodes[id: childID]?
+        .attachments,
+      [attachment])
+
+    let privateID = UUID()
+    let privatePath = root.appendingPathComponent("private.png")
+    try Data("private".utf8).write(to: privatePath)
+    let invalid = await registry.apply(
+      .graphCommand(
+        projectPath: project.path,
+        command: .subGraphCommand(
+          nodeID: innerID,
+          command: .createNode(
+            NodeDraft(
+              id: privateID, title: "Private", loopType: .turnBased,
+              firstInstruction: "work",
+              attachments: [PromptAttachment(path: privatePath.path, name: "private.png")])))),
+      connectionID: graph.id)
+    XCTAssertEqual(invalid?.errorCode, .remoteAssetInvalidReference)
+
+    let legacyID = UUID()
+    let legacyDirectory = staging.appendingPathComponent(legacyID.uuidString, isDirectory: true)
+    try FileManager.default.createDirectory(at: legacyDirectory, withIntermediateDirectories: true)
+    let legacyFile = legacyDirectory.appendingPathComponent("legacy.png")
+    try Data("legacy".utf8).write(to: legacyFile)
+    let legacy = await registry.apply(
+      .graphCommand(
+        projectPath: project.path,
+        command: .subGraphCommand(
+          nodeID: innerID,
+          command: .createNode(
+            NodeDraft(
+              id: legacyID, title: "Legacy", loopType: .turnBased,
+              firstInstruction: "work",
+              attachments: [PromptAttachment(path: legacyFile.path, name: "legacy.png")])))),
+      connectionID: graph.id)
+    XCTAssertNil(legacy?.error)
+
+    let duplicate = await registry.apply(
+      .graphCommand(
+        projectPath: project.path,
+        command: .subGraphCommand(
+          nodeID: innerID,
+          command: .createNode(
+            NodeDraft(
+              id: childID, title: "Duplicate", loopType: .turnBased,
+              firstInstruction: "work")))),
+      connectionID: graph.id)
+    XCTAssertNotNil(duplicate?.error)
+
+    let rejectedID = UUID()
+    let rejectedData = Data("reject me".utf8)
+    let replacementUpload = RemoteAssetTestConnection(peerProcessID: peerProcessID)
+    await registry.addConnection(
+      id: replacementUpload.id,
+      channel: DaemonConnectionChannel(
+        connection: replacementUpload, mode: .v2(version: 2), clientID: logicalClientID))
+    _ = await registry.apply(.openProject(path: project.path), connectionID: replacementUpload.id)
+    _ = try await uploadThroughRegistry(
+      registry, connectionID: replacementUpload.id, projectPath: project.path,
+      nodeID: rejectedID, data: rejectedData)
+    let rejected = await registry.apply(
+      .graphCommand(
+        projectPath: project.path,
+        command: .subGraphCommand(
+          nodeID: UUID(),
+          command: .createNode(
+            NodeDraft(
+              id: rejectedID, title: "Rejected", loopType: .turnBased,
+              firstInstruction: "work")))),
+      connectionID: graph.id)
+    XCTAssertNotNil(rejected?.error)
+    let rejectedStaged = await fixture.stagedData(
+      path: project.path, nodeID: rejectedID, name: "image-1.png")
+    XCTAssertNil(rejectedStaged)
   }
 }

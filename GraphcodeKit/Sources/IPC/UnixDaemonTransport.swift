@@ -196,6 +196,7 @@ import Foundation
   public final class UnixSocketConnection: @unchecked Sendable, DaemonConnection {
     public let id: UUID
     public let endpoint: DaemonEndpoint
+    public let authenticatedPeerProcessID: UInt64?
     private let stream: UnixSocketByteStream
     private let acceptsWrites: Bool
     private let buffersWrites: Bool
@@ -214,6 +215,8 @@ import Foundation
     ) {
       self.id = id
       self.endpoint = endpoint
+      self.authenticatedPeerProcessID =
+        fileDescriptor >= 0 ? SocketPeer.pid(of: fileDescriptor).map(UInt64.init) : nil
       // Compatibility callers use -1 as an intentionally inert descriptor in tests.
       self.acceptsWrites = fileDescriptor >= 0
       self.buffersWrites = bufferedWrites && fileDescriptor >= 0

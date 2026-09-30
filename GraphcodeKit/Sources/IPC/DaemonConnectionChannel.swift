@@ -575,6 +575,17 @@ public actor DaemonConnectionChannel {
       clientID: clientID, connectionID: connection.id, projectPath: projectPath)
   }
 
+  public nonisolated func authenticatedRemoteAssetOwner(clientID: UUID) -> UUID? {
+    guard let peer = connection.authenticatedPeerProcessID else { return nil }
+    if clientID == connection.id { return connection.id }
+    let digest = GraphcodeSHA256.digest(Data("remote-assets:\(peer):\(clientID.uuidString)".utf8))
+    let hex = digest.prefix(16).map { String(format: "%02x", $0) }.joined()
+    return UUID(
+      uuidString:
+        "\(hex.prefix(8))-\(hex.dropFirst(8).prefix(4))-\(hex.dropFirst(12).prefix(4))-\(hex.dropFirst(16).prefix(4))-\(hex.dropFirst(20).prefix(12))"
+    )
+  }
+
   public func sendHelloResponse(selectedVersion: Int) async throws {
     try await sendJSON(DaemonWireEnvelope.helloResponse(selectedVersion: selectedVersion))
   }

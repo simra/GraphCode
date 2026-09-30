@@ -98,7 +98,7 @@ public enum DaemonCommand: Codable, Sendable, Equatable {
   /// redial, every fifteen seconds, for ever. Unknown names are ignored, so a newer
   /// client against this daemon is simply treated as what it is: a client of the
   /// capabilities this daemon knows. Never answered.
-  case announce(capabilities: [String])
+  case announce(capabilities: [String], clientID: UUID? = nil)
 }
 
 /// The names a client announces (`DaemonCommand.announce`) — strings on the wire so a

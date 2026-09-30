@@ -1006,6 +1006,7 @@ import Foundation
   public final class WindowsNamedPipeConnection: @unchecked Sendable, DaemonConnection {
     public let id: Foundation.UUID
     public let endpoint: DaemonEndpoint
+    public let authenticatedPeerProcessID: UInt64?
     private let stream: WindowsNamedPipeByteStream
     private let writes = DispatchQueue(label: "com.graphcode.windows-pipe-writes")
     private let stateLock = NSLock()
@@ -1016,11 +1017,13 @@ import Foundation
       id: Foundation.UUID = Foundation.UUID(),
       handle: HANDLE,
       pipeName: String,
+      authenticatedPeerProcessID: UInt64? = nil,
       readTimeout: TimeInterval? = nil,
       writeTimeout: TimeInterval = 5
     ) {
       self.id = id
       endpoint = .namedPipe(pipeName)
+      self.authenticatedPeerProcessID = authenticatedPeerProcessID
       self.writeTimeout = max(0.001, writeTimeout)
       stream = WindowsNamedPipeByteStream(handle: handle, writeTimeout: writeTimeout)
       _ = readTimeout
@@ -1296,12 +1299,13 @@ import Foundation
                 try self.ensureOpen()
                 try self.connect(handle)
                 try self.ensureOpen()
-                try self.verifyClient(handle)
+                let processID = try self.verifyClient(handle)
                 try self.beginTransfer(handle)
                 self.beforeConnectionReturn?()
                 let connection = WindowsNamedPipeConnection(
                   handle: handle,
                   pipeName: self.name,
+                  authenticatedPeerProcessID: UInt64(processID),
                   writeTimeout: self.writeTimeout)
                 try self.finishTransfer(handle)
                 continuation.resume(returning: connection)
@@ -1447,7 +1451,7 @@ import Foundation
       }
     }
 
-    private func verifyClient(_ handle: HANDLE) throws {
+    private func verifyClient(_ handle: HANDLE) throws -> ULONG {
       var processID: ULONG = 0
       guard GetNamedPipeClientProcessId(handle, &processID) else {
         throw WindowsPipeError.win32(
@@ -1491,6 +1495,7 @@ import Foundation
       guard actual.caseInsensitiveCompare(sid) == .orderedSame else {
         throw WindowsPipeError.serverIdentityRejected
       }
+      return processID
     }
   }
 

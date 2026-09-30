@@ -20,6 +20,13 @@ identity all have to agree. The authenticated project identity hashes both the
 authoritative location kind and canonical path, so identical-looking local, SSH, and
 Codespace paths remain distinct.
 
+Attachment draft ownership combines the app's shared logical client ID with the
+operating-system-authenticated peer process identity. The macOS orchestrator announces
+the same logical ID used by its short-lived v2 asset sessions; copying a UUID from another
+process does not claim its drafts. Closing an upload socket cancels that socket's active
+transfers but preserves delivered drafts while another authenticated connection for the
+logical client remains live. Closing the last connection cleans its uncommitted drafts.
+
 ## Template list and read
 
 ```mermaid
@@ -72,8 +79,8 @@ sequenceDiagram
   D->>D: hold provisional publication until response delivery
   D-->>C: PromptAttachment(opaque authenticated owner-bound reference, safe name)
   D->>D: commit publication only after response frame succeeds
-  C->>D: createNode(NodeDraft.attachments = opaque references)
-  D->>D: reject duplicate node ID, then validate references without deleting files
+  C->>D: createNode or nested subGraphCommand(...createNode)
+  D->>D: resolve target graph; reject duplicate ID; validate references
   D->>D: create node, then retain selected draft files
   C->>D: attended start / unattended ensure / restart / liveness recovery
   D->>D: authorize client or trusted daemon authority
@@ -120,12 +127,18 @@ Create rejects an existing node ID before any file operation. Reference validati
 non-destructive, and unselected draft files are removed only after successful node
 creation. Failure cleanup is owner-bound to draft files and cannot delete an existing
 node directory. Created-node files remain until normal node-memory cleanup removes them.
+The registry iteratively unwraps any depth of `subGraphCommand`, resolves each addressed
+composite against the authoritative graph, and applies the same transaction to the exact
+enclosed `createNode`. A missing or non-composite address rejects before dispatch and
+cleans only that logical client's draft for the enclosed node ID.
 
 ## Compatibility
 
 The contract is additive v2 and advertised by the `remoteAssets` server capability.
 Unknown command/event fields retain normal Codable forward-compatibility behavior. V2
 clients must use opaque attachment references and authenticated template asset IDs. The
+shared logical client ID is an optional field on the existing capability announcement;
+older daemons ignore it, while current daemons bind it to the authenticated peer process.
 narrow v1 local compatibility form accepts only a regular, single-link, non-reparse file
 whose exact safe filename is already inside the authoritative project/node attachment
 directory; containment and file type are checked again at launch. Arbitrary daemon-host

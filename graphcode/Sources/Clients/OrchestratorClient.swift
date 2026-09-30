@@ -443,7 +443,7 @@ private actor AppDaemonConnection {
             DaemonCommand.announce(capabilities: [
               ClientCapability.nodesChanged.rawValue,
               ClientCapability.settingsChanged.rawValue,
-            ]))
+            ], clientID: GraphcodeClientIdentity.id))
           try await connection.sendFrame(announce)
           return connection
         } catch {

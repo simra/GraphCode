@@ -13,10 +13,14 @@ public protocol DaemonByteStream: Sendable {
 public protocol DaemonConnection: Sendable {
   var id: UUID { get }
   var endpoint: DaemonEndpoint { get }
+  var authenticatedPeerProcessID: UInt64? { get }
 
   func receiveFrame() async throws -> Data
   func sendFrame(_ data: Data) async throws
   func close() async throws
+}
+extension DaemonConnection {
+  public var authenticatedPeerProcessID: UInt64? { nil }
 }
 public protocol DaemonListener: Sendable {
   var endpoint: DaemonEndpoint { get }

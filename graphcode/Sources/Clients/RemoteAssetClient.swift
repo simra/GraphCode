@@ -15,7 +15,7 @@ extension RemoteAssetClient: DependencyKey {
     templates: { projectPath in
       try await Task.detached {
         let client = try DaemonSocketClient()
-        let session = try client.v2Session()
+        let session = try client.v2Session(clientID: GraphcodeClientIdentity.id)
         defer { session.close() }
         _ = try session.request(.openProject(path: projectPath))
         guard
@@ -37,7 +37,7 @@ extension RemoteAssetClient: DependencyKey {
     upload: { projectPath, nodeID, name, contentType, data in
       let task = Task.detached {
         let client = try DaemonSocketClient()
-        let session = try client.v2Session()
+        let session = try client.v2Session(clientID: GraphcodeClientIdentity.id)
         defer { session.close() }
         var transferID: UUID?
         var finalized = false
@@ -91,7 +91,7 @@ extension RemoteAssetClient: DependencyKey {
     discard: { projectPath, nodeID in
       await Task.detached {
         guard let client = try? DaemonSocketClient(),
-          let session = try? client.v2Session()
+          let session = try? client.v2Session(clientID: GraphcodeClientIdentity.id)
         else { return }
         defer { session.close() }
         _ = try? session.request(.openProject(path: projectPath))

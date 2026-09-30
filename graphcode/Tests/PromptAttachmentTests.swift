@@ -205,6 +205,11 @@ struct DraftImageImportTests {
 /// in the field the human is filling in, and the draft carries the opaque reference.
 @Suite
 struct DraftAttachmentReducerTests {
+  private actor SentCommands {
+    var values: [DaemonCommand] = []
+    func append(_ command: DaemonCommand) { values.append(command) }
+  }
+
   private static let project = ProjectRef(
     path: "/tmp/graphcode-attachment-test", name: "t", metadata: .local)
 
@@ -245,6 +250,47 @@ struct DraftAttachmentReducerTests {
     #expect(store.state.draftSketchNote == "match this [image #1]")
     // The draft is what crosses the wire, and the node's prompt is composed from it.
     #expect(store.state.draft.attachments.map(\.path) == [reference])
+  }
+
+  @Test
+  @MainActor
+  func nestedFormSendsOpaqueAttachmentInsideSubGraphCommand() async throws {
+    let composite = LoopNode(
+      title: "Composite", loopType: .composite,
+      subGraph: LoopGraph(project: Self.project))
+    var state = ProjectFeature.State(
+      graph: LoopGraph(project: Self.project, nodes: [composite]))
+    state.openCompositeID = composite.id
+    state.draftLoopType = .sketch
+    state.draftSketchNote = "inspect this"
+    let sent = SentCommands()
+    let store = TestStore(initialState: state) {
+      ProjectFeature()
+    } withDependencies: {
+      $0.remoteAssets = .testValue
+      $0.gitClient.listWorktrees = { _ in [] }
+      $0.orchestratorClient.send = { await sent.append($0) }
+    }
+    store.exhaustivity = .off
+
+    await store.send(.draftAttachment(.imageArrived(Self.payload)))
+    await store.receive(\.draftAttachment.uploadFinished)
+    let reference = try #require(store.state.draftAttachments.items.first?.path)
+    await store.send(.createNodeConfirmed)
+    await store.finish()
+
+    let commands = await sent.values
+    guard
+      case .graphCommand(
+        projectPath: Self.project.path,
+        command: .subGraphCommand(
+          nodeID: composite.id,
+          command: .createNode(let draft))) = commands.first
+    else {
+      return #expect(Bool(false), "expected nested createNode command")
+    }
+    #expect(draft.attachments.map(\.path) == [reference])
+    #expect(reference.hasPrefix(PromptAttachment.opaqueReferencePrefix))
   }
 
   @Test
