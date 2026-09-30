@@ -6,22 +6,31 @@ import Testing
   @Suite
   struct ProjectRelocationPlatformTests {
     @Test
-    func nonWindowsEntryPointsReturnUnsupportedWithoutFilesystemAccess() {
+    func nonWindowsEntryPointsReturnUnsupportedWithoutFilesystemAccess() throws {
       let hello = DaemonWireEnvelope.helloResponse(selectedVersion: 2)
       #expect(
         hello.capabilities?.contains(ServerCapability.projectRelocation.rawValue) != true)
 
-      let fixture = FileManager.default.temporaryDirectory.appendingPathComponent(
+      let testRoot = FileManager.default.temporaryDirectory.appendingPathComponent(
         "graphcode-relocation-platform-\(UUID().uuidString)", isDirectory: true)
-      let coordinator = ProjectRelocationCoordinator(supportDirectory: fixture)
+      let persistenceSetup = testRoot.appendingPathComponent(
+        "persistence-setup", isDirectory: true)
+      let coordinatorSupport = testRoot.appendingPathComponent(
+        "nonexistent-coordinator-support", isDirectory: true)
+      try FileManager.default.createDirectory(
+        at: persistenceSetup, withIntermediateDirectories: true)
+      defer { try? FileManager.default.removeItem(at: testRoot) }
+      #expect(!FileManager.default.fileExists(atPath: coordinatorSupport.path))
+
+      let coordinator = ProjectRelocationCoordinator(supportDirectory: coordinatorSupport)
       let operationID = UUID()
       let request = ProjectRelocationRequest(
         operationID: operationID,
-        sourcePath: fixture.appendingPathComponent("source").path,
-        destinationPath: fixture.appendingPathComponent("destination").path,
+        sourcePath: coordinatorSupport.appendingPathComponent("source").path,
+        destinationPath: coordinatorSupport.appendingPathComponent("destination").path,
         expectedSourceIdentity: "unsupported",
         expectedGraphRevision: 0)
-      let persistence = ProjectPersistence(baseDirectory: fixture)
+      let persistence = ProjectPersistence(baseDirectory: persistenceSetup)
       let graph = LoopGraph(
         project: ProjectRef(path: request.sourcePath, name: "unsupported"))
 
@@ -32,21 +41,24 @@ import Testing
           destinationPath: request.destinationPath,
           graphRevision: 0)
       }
+      #expect(!FileManager.default.fileExists(atPath: coordinatorSupport.path))
       #expect(throws: ProjectRelocationError.unsupported) {
         _ = try coordinator.relocate(
           request,
           graph: graph,
           persistence: persistence)
       }
+      #expect(!FileManager.default.fileExists(atPath: coordinatorSupport.path))
       #expect(throws: ProjectRelocationError.unsupported) {
         _ = try coordinator.replayResult(
           for: request,
           authorizedClientID: UUID())
       }
+      #expect(!FileManager.default.fileExists(atPath: coordinatorSupport.path))
       let recovery = coordinator.recoverPending(persistence: persistence)
       #expect(recovery.count == 1)
       #expect(recovery.first?.disposition == .unsupported)
-      #expect(!FileManager.default.fileExists(atPath: fixture.path))
+      #expect(!FileManager.default.fileExists(atPath: coordinatorSupport.path))
     }
   }
 #endif
