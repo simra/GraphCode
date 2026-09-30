@@ -176,22 +176,43 @@ struct NodeResourceCursor: Codable, Equatable, Sendable {
   var nextEnd: UInt64
   var snapshotHash: String
 
-  func encoded() throws -> String {
-    try JSONEncoder().encode(self).base64EncodedString()
-      .replacingOccurrences(of: "+", with: "-")
-      .replacingOccurrences(of: "/", with: "_")
-      .replacingOccurrences(of: "=", with: "")
+  func encoded(authenticationKey: Data) throws -> String {
+    let payload = try JSONEncoder().encode(self)
+    let signature = NodeResourceCursorAuthentication.hmacSHA256(
+      key: authenticationKey, message: payload)
+    let value =
+      NodeResourceCursorAuthentication.base64URL(payload) + "."
+      + NodeResourceCursorAuthentication.base64URL(signature)
+    guard value.utf8.count <= NodeResourceReader.maximumEncodedCursorBytes else {
+      throw NodeResourceReadError.oversized
+    }
+    return value
   }
 
-  static func decode(_ value: String) throws -> Self {
-    var base64 = value.replacingOccurrences(of: "-", with: "+")
-      .replacingOccurrences(of: "_", with: "/")
-    base64 += String(repeating: "=", count: (4 - base64.count % 4) % 4)
-    guard let data = Data(base64Encoded: base64),
-      data.count <= NodeResourceReader.maximumCursorBytes,
-      let cursor = try? JSONDecoder().decode(Self.self, from: data),
+  static func decode(_ value: String, authenticationKey: Data) throws -> Self {
+    guard value.utf8.count <= NodeResourceReader.maximumEncodedCursorBytes else {
+      throw NodeResourceReadError.invalidCursor
+    }
+    let parts = value.split(separator: ".", omittingEmptySubsequences: false)
+    guard parts.count == 2,
+      let payload = NodeResourceCursorAuthentication.decodeBase64URL(String(parts[0])),
+      payload.count <= NodeResourceReader.maximumCursorPayloadBytes,
+      let suppliedSignature = NodeResourceCursorAuthentication.decodeBase64URL(String(parts[1])),
+      suppliedSignature.count == NodeResourceCursorAuthentication.signatureBytes
+    else {
+      throw NodeResourceReadError.invalidCursor
+    }
+    let expectedSignature = NodeResourceCursorAuthentication.hmacSHA256(
+      key: authenticationKey, message: payload)
+    guard
+      NodeResourceCursorAuthentication.constantTimeEqual(
+        suppliedSignature, expectedSignature
+      ),
+      let cursor = try? JSONDecoder().decode(Self.self, from: payload),
       cursor.version == 1,
       cursor.snapshotHash.count == 64,
+      cursor.sourceIdentity.count == 64,
+      cursor.projectIdentity.count == 64,
       cursor.nextEnd <= cursor.snapshotExtent,
       cursor.snapshotExtent <= UInt64(NodeResourceReader.maximumReadableExtentBytes)
     else {
@@ -200,17 +221,117 @@ struct NodeResourceCursor: Codable, Equatable, Sendable {
     return cursor
   }
 }
+
+enum NodeResourceCursorAuthentication {
+  static let signatureBytes = 32
+
+  static func hmacSHA256(key: Data, message: Data) -> Data {
+    let blockSize = 64
+    let sourceKey = Array(
+      key.count > blockSize ? GraphcodeSHA256.digest(key) : key)
+    var outer = [UInt8](repeating: 0x5c, count: blockSize)
+    var inner = [UInt8](repeating: 0x36, count: blockSize)
+    for index in sourceKey.indices {
+      outer[index] ^= sourceKey[index]
+      inner[index] ^= sourceKey[index]
+    }
+    let innerDigest = GraphcodeSHA256.digest(Data(inner + Array(message)))
+    return GraphcodeSHA256.digest(Data(outer + Array(innerDigest)))
+  }
+
+  static func constantTimeEqual(_ lhs: Data, _ rhs: Data) -> Bool {
+    guard lhs.count == rhs.count else { return false }
+    var difference: UInt8 = 0
+    for index in lhs.indices {
+      difference |= lhs[index] ^ rhs[index]
+    }
+    return difference == 0
+  }
+
+  static func base64URL(_ data: Data) -> String {
+    data.base64EncodedString()
+      .replacingOccurrences(of: "+", with: "-")
+      .replacingOccurrences(of: "/", with: "_")
+      .replacingOccurrences(of: "=", with: "")
+  }
+
+  static func decodeBase64URL(_ value: String) -> Data? {
+    guard !value.isEmpty,
+      value.utf8.count % 4 != 1,
+      value.utf8.allSatisfy({
+        (0x30...0x39).contains($0)
+          || (0x41...0x5a).contains($0)
+          || (0x61...0x7a).contains($0)
+          || $0 == 0x2d
+          || $0 == 0x5f
+      })
+    else {
+      return nil
+    }
+    var base64 = value.replacingOccurrences(of: "-", with: "+")
+      .replacingOccurrences(of: "_", with: "/")
+    base64 += String(repeating: "=", count: (4 - base64.count % 4) % 4)
+    guard let decoded = Data(base64Encoded: base64),
+      base64URL(decoded) == value
+    else {
+      return nil
+    }
+    return decoded
+  }
+}
+
+struct NodeResourceFileAccess {
+  var attributes: (URL) throws -> [FileAttributeKey: Any]
+  var open: (URL) throws -> FileHandle
+  var read: (FileHandle, Int) throws -> Data
+  var close: (FileHandle) -> Void
+  var contentsOfDirectory: (URL) throws -> [URL]
+
+  static let live = NodeResourceFileAccess(
+    attributes: { try FileManager.default.attributesOfItem(atPath: $0.path) },
+    open: { try FileHandle(forReadingFrom: $0) },
+    read: { try $0.read(upToCount: $1) ?? Data() },
+    close: { try? $0.close() },
+    contentsOfDirectory: {
+      try FileManager.default.contentsOfDirectory(
+        at: $0, includingPropertiesForKeys: nil)
+    })
+}
+
 public enum NodeResourceReader {
+  private static let posixNoSuchFile = 2
   static let maximumReadableExtentBytes = 512 * 1024
   static let maximumSourceWorkBytes = maximumReadableExtentBytes * 2
   static let maximumEntryBytes = 64 * 1024
-  static let maximumCursorBytes = 4 * 1024
+  static let maximumCursorPayloadBytes = 4 * 1024
+  static let maximumEncodedCursorBytes = 6 * 1024
+  private static let processCursorAuthenticationKey: Data = {
+    var generator = SystemRandomNumberGenerator()
+    return Data((0..<32).map { _ in UInt8.random(in: .min ... .max, using: &generator) })
+  }()
 
   public static func read(
     node: LoopNode,
     projectPath: String,
     query: NodeResourceQuery,
     baseURL: URL = SupportDirectory.url
+  ) -> Result<NodeResourcePage, NodeResourceReadError> {
+    read(
+      node: node,
+      projectPath: projectPath,
+      query: query,
+      baseURL: baseURL,
+      fileAccess: .live,
+      cursorAuthenticationKey: processCursorAuthenticationKey)
+  }
+
+  static func read(
+    node: LoopNode,
+    projectPath: String,
+    query: NodeResourceQuery,
+    baseURL: URL,
+    fileAccess: NodeResourceFileAccess,
+    cursorAuthenticationKey: Data
   ) -> Result<NodeResourcePage, NodeResourceReadError> {
     do {
       return .success(
@@ -226,10 +347,16 @@ public enum NodeResourceReader {
               url: NodeMemory.logURL(
                 forProjectPath: projectPath, nodeID: node.id, baseURL: baseURL),
               query: query,
+              fileAccess: fileAccess,
+              cursorAuthenticationKey: cursorAuthenticationKey,
               decode: decodeMemoryEntry)
           case .playbookCurrent:
             return try readCurrentPlaybook(
-              nodeID: node.id, projectPath: projectPath, query: query, baseURL: baseURL)
+              nodeID: node.id,
+              projectPath: projectPath,
+              query: query,
+              baseURL: baseURL,
+              fileAccess: fileAccess)
           case .playbookHistory:
             return try readEntries(
               nodeID: node.id,
@@ -239,6 +366,8 @@ public enum NodeResourceReader {
                 forProjectPath: projectPath, nodeID: node.id, baseURL: baseURL),
               query: query,
               missingIsEmpty: true,
+              fileAccess: fileAccess,
+              cursorAuthenticationKey: cursorAuthenticationKey,
               decode: decodeHistoryEntry)
           case .unsupported:
             throw NodeResourceReadError.unsupportedResource
@@ -255,20 +384,28 @@ public enum NodeResourceReader {
     nodeID: UUID,
     projectPath: String,
     query: NodeResourceQuery,
-    baseURL: URL
+    baseURL: URL,
+    fileAccess: NodeResourceFileAccess
   ) throws -> NodeResourcePage {
     let url = NodeMemory.playbookURL(
       forProjectPath: projectPath, nodeID: nodeID, baseURL: baseURL)
-    let snapshots = try NodeMemory.playbookSnapshotURLs(
-      forProjectPath: projectPath, nodeID: nodeID, baseURL: baseURL)
-    guard FileManager.default.fileExists(atPath: url.path) else {
-      return NodeResourcePage(
+    let rollbackAvailable = try hasPlaybookSnapshot(
+      beside: url, fileAccess: fileAccess)
+    let data: Data
+    do {
+      data = try boundedData(
+        at: url,
+        maximumBytes: NodeMemory.maxPlaybookBytes,
+        fileAccess: fileAccess)
+    } catch NodeResourceReadError.missing {
+      let page = NodeResourcePage(
         nodeID: nodeID,
         resource: query.resource,
         currentPlaybook: CurrentPlaybookState(
-          content: nil, rollbackAvailable: !snapshots.isEmpty))
+          content: nil, rollbackAvailable: rollbackAvailable))
+      try validateCurrentPlaybookPage(page, maximumBytes: query.maxBytes)
+      return page
     }
-    let data = try boundedData(at: url, maximumBytes: NodeMemory.maxPlaybookBytes + 1)
     guard data.count <= NodeMemory.maxPlaybookBytes,
       let text = String(data: data, encoding: .utf8)
     else {
@@ -276,16 +413,15 @@ public enum NodeResourceReader {
         ? NodeResourceReadError.oversized : NodeResourceReadError.corrupt
     }
     let normalized = normalize(text)
-    guard normalized.text.utf8.count <= query.maxBytes else {
-      throw NodeResourceReadError.oversized
-    }
-    return NodeResourcePage(
+    let page = NodeResourcePage(
       nodeID: nodeID,
       resource: query.resource,
       currentPlaybook: CurrentPlaybookState(
         content: normalized.text.isEmpty ? nil : normalized.text,
         redactions: normalized.redactions,
-        rollbackAvailable: !snapshots.isEmpty))
+        rollbackAvailable: rollbackAvailable))
+    try validateCurrentPlaybookPage(page, maximumBytes: query.maxBytes)
+    return page
   }
 
   private static func readEntries(
@@ -295,10 +431,15 @@ public enum NodeResourceReader {
     url: URL,
     query: NodeResourceQuery,
     missingIsEmpty: Bool = false,
+    fileAccess: NodeResourceFileAccess,
+    cursorAuthenticationKey: Data,
     decode: (Data, UInt64) throws -> NodeResourceEntry
   ) throws -> NodeResourcePage {
     let projectIdentity = GraphcodeSHA256.hex(Data(projectPath.utf8))
-    let cursor = try query.cursor.map(NodeResourceCursor.decode)
+    let cursor = try query.cursor.map {
+      try NodeResourceCursor.decode(
+        $0, authenticationKey: cursorAuthenticationKey)
+    }
     if let cursor {
       guard cursor.projectIdentity == projectIdentity,
         cursor.nodeID == nodeID,
@@ -310,7 +451,10 @@ public enum NodeResourceReader {
 
     let snapshot: ResourceSnapshot
     do {
-      snapshot = try resourceSnapshot(at: url, frozenExtent: cursor?.snapshotExtent)
+      snapshot = try resourceSnapshot(
+        at: url,
+        frozenExtent: cursor?.snapshotExtent,
+        fileAccess: fileAccess)
     } catch NodeResourceReadError.missing where missingIsEmpty && cursor == nil {
       return NodeResourcePage(nodeID: nodeID, resource: resource)
     }
@@ -333,25 +477,32 @@ public enum NodeResourceReader {
     var stoppedForBound = false
 
     for range in ranges.reversed() {
+      if entries.count == query.maxEntries {
+        stoppedForBound = true
+        break
+      }
       let line = Data(snapshot.data[range])
       let entry = try decode(line, UInt64(range.lowerBound))
       let encodedEntryBytes = try JSONEncoder().encode(entry).count
-      guard encodedEntryBytes <= maximumEntryBytes, encodedEntryBytes <= query.maxBytes else {
+      guard encodedEntryBytes <= maximumEntryBytes else {
         throw NodeResourceReadError.oversized
       }
       let separatorBytes = entries.isEmpty ? 0 : 1
-      if entries.count == query.maxEntries
-        || encodedEntriesBytes + separatorBytes + encodedEntryBytes > query.maxBytes
-      {
+      let candidateBytes = encodedEntriesBytes + separatorBytes + encodedEntryBytes
+      if candidateBytes > query.maxBytes {
+        guard !entries.isEmpty else { throw NodeResourceReadError.oversized }
         stoppedForBound = true
         break
       }
       entries.append(entry)
-      encodedEntriesBytes += separatorBytes + encodedEntryBytes
+      encodedEntriesBytes = candidateBytes
       next = UInt64(range.lowerBound)
     }
 
     let hasMore = stoppedForBound || next > 0
+    if hasMore {
+      guard next < nextEnd else { throw NodeResourceReadError.oversized }
+    }
     let nextCursor =
       hasMore
       ? try NodeResourceCursor(
@@ -363,7 +514,7 @@ public enum NodeResourceReader {
         snapshotExtent: snapshotExtent,
         nextEnd: next,
         snapshotHash: GraphcodeSHA256.hex(snapshot.data)
-      ).encoded()
+      ).encoded(authenticationKey: cursorAuthenticationKey)
       : nil
     return NodeResourcePage(
       nodeID: nodeID,
@@ -380,16 +531,18 @@ public enum NodeResourceReader {
 
   private static func resourceSnapshot(
     at url: URL,
-    frozenExtent: UInt64?
+    frozenExtent: UInt64?,
+    fileAccess: NodeResourceFileAccess
   ) throws -> ResourceSnapshot {
     let attributes: [FileAttributeKey: Any]
     do {
-      attributes = try FileManager.default.attributesOfItem(atPath: url.path)
+      attributes = try fileAccess.attributes(url)
     } catch {
-      throw NodeResourceReadError.missing
+      let classified = classifyFileError(error)
+      throw frozenExtent != nil && classified == .missing ? .invalidCursor : classified
     }
     guard let size = (attributes[.size] as? NSNumber)?.uint64Value else {
-      throw NodeResourceReadError.corrupt
+      throw NodeResourceReadError.transportFailure
     }
     let requestedExtent = frozenExtent ?? size
     guard requestedExtent <= UInt64(maximumReadableExtentBytes) else {
@@ -398,19 +551,24 @@ public enum NodeResourceReader {
     guard size >= requestedExtent else { throw NodeResourceReadError.invalidCursor }
     let handle: FileHandle
     do {
-      handle = try FileHandle(forReadingFrom: url)
+      handle = try fileAccess.open(url)
     } catch {
-      throw NodeResourceReadError.missing
+      let classified = classifyFileError(error)
+      throw frozenExtent != nil && classified == .missing ? .invalidCursor : classified
     }
-    defer { try? handle.close() }
+    defer { fileAccess.close(handle) }
     let raw: Data
     do {
-      raw = try handle.read(upToCount: Int(requestedExtent)) ?? Data()
+      raw = try readUpToLimit(
+        handle: handle,
+        limit: Int(requestedExtent),
+        fileAccess: fileAccess)
     } catch {
       throw NodeResourceReadError.transportFailure
     }
     guard raw.count == Int(requestedExtent) else {
-      throw NodeResourceReadError.invalidCursor
+      throw frozenExtent == nil
+        ? NodeResourceReadError.transportFailure : NodeResourceReadError.invalidCursor
     }
     let completeExtent: Int
     if frozenExtent != nil {
@@ -434,13 +592,26 @@ public enum NodeResourceReader {
     ]
     let identity = GraphcodeSHA256.hex(Data(identityParts.joined(separator: "|").utf8))
 
-    let verification = try boundedPrefix(at: url, count: data.count)
-    let finalAttributes = try FileManager.default.attributesOfItem(atPath: url.path)
-    guard let finalSize = (finalAttributes[.size] as? NSNumber)?.uint64Value,
-      finalSize >= UInt64(data.count),
-      verification == data
-    else {
+    let verification: Data
+    do {
+      verification = try boundedPrefix(
+        at: url, count: data.count, fileAccess: fileAccess)
+    } catch NodeResourceReadError.missing where frozenExtent != nil {
       throw NodeResourceReadError.invalidCursor
+    }
+    let finalAttributes: [FileAttributeKey: Any]
+    do {
+      finalAttributes = try fileAccess.attributes(url)
+    } catch {
+      let classified = classifyFileError(error)
+      throw frozenExtent != nil && classified == .missing ? .invalidCursor : classified
+    }
+    guard let finalSize = (finalAttributes[.size] as? NSNumber)?.uint64Value else {
+      throw NodeResourceReadError.transportFailure
+    }
+    guard finalSize >= UInt64(data.count), verification == data else {
+      throw frozenExtent == nil
+        ? NodeResourceReadError.transportFailure : NodeResourceReadError.invalidCursor
     }
     let finalIdentityParts = [
       url.standardizedFileURL.path,
@@ -452,7 +623,8 @@ public enum NodeResourceReader {
       identity
         == GraphcodeSHA256.hex(Data(finalIdentityParts.joined(separator: "|").utf8))
     else {
-      throw NodeResourceReadError.invalidCursor
+      throw frozenExtent == nil
+        ? NodeResourceReadError.transportFailure : NodeResourceReadError.invalidCursor
     }
     guard raw.count + verification.count <= maximumSourceWorkBytes else {
       throw NodeResourceReadError.oversized
@@ -460,25 +632,128 @@ public enum NodeResourceReader {
     return ResourceSnapshot(identity: identity, data: data)
   }
 
-  private static func boundedPrefix(at url: URL, count: Int) throws -> Data {
-    let handle = try FileHandle(forReadingFrom: url)
-    defer { try? handle.close() }
-    return try handle.read(upToCount: count) ?? Data()
-  }
-
-  private static func boundedData(at url: URL, maximumBytes: Int) throws -> Data {
+  private static func boundedPrefix(
+    at url: URL,
+    count: Int,
+    fileAccess: NodeResourceFileAccess
+  ) throws -> Data {
     let handle: FileHandle
     do {
-      handle = try FileHandle(forReadingFrom: url)
+      handle = try fileAccess.open(url)
     } catch {
-      throw NodeResourceReadError.missing
+      throw classifyFileError(error)
     }
-    defer { try? handle.close() }
+    defer { fileAccess.close(handle) }
     do {
-      return try handle.read(upToCount: maximumBytes + 1) ?? Data()
+      return try readUpToLimit(
+        handle: handle,
+        limit: count,
+        fileAccess: fileAccess)
     } catch {
       throw NodeResourceReadError.transportFailure
     }
+  }
+
+  private static func boundedData(
+    at url: URL,
+    maximumBytes: Int,
+    fileAccess: NodeResourceFileAccess
+  ) throws -> Data {
+    let attributes: [FileAttributeKey: Any]
+    do {
+      attributes = try fileAccess.attributes(url)
+    } catch {
+      throw classifyFileError(error)
+    }
+    guard let size = (attributes[.size] as? NSNumber)?.uint64Value else {
+      throw NodeResourceReadError.transportFailure
+    }
+    guard size <= UInt64(maximumBytes) else {
+      throw NodeResourceReadError.oversized
+    }
+    let handle: FileHandle
+    do {
+      handle = try fileAccess.open(url)
+    } catch {
+      throw classifyFileError(error)
+    }
+    defer { fileAccess.close(handle) }
+    do {
+      let data = try readUpToLimit(
+        handle: handle,
+        limit: Int(size),
+        fileAccess: fileAccess)
+      guard data.count == Int(size) else {
+        throw NodeResourceReadError.transportFailure
+      }
+      return data
+    } catch {
+      if let error = error as? NodeResourceReadError {
+        throw error
+      }
+      throw NodeResourceReadError.transportFailure
+    }
+  }
+
+  private static func readUpToLimit(
+    handle: FileHandle,
+    limit: Int,
+    fileAccess: NodeResourceFileAccess
+  ) throws -> Data {
+    var data = Data()
+    while data.count < limit {
+      let remaining = limit - data.count
+      let chunk = try fileAccess.read(handle, remaining)
+      guard chunk.count <= remaining else {
+        throw NodeResourceReadError.transportFailure
+      }
+      guard !chunk.isEmpty else { break }
+      data.append(chunk)
+    }
+    return data
+  }
+
+  private static func validateCurrentPlaybookPage(
+    _ page: NodeResourcePage,
+    maximumBytes: Int
+  ) throws {
+    guard let state = page.currentPlaybook,
+      try JSONEncoder().encode(state).count <= maximumBytes
+    else {
+      throw NodeResourceReadError.oversized
+    }
+  }
+
+  private static func hasPlaybookSnapshot(
+    beside playbookURL: URL,
+    fileAccess: NodeResourceFileAccess
+  ) throws -> Bool {
+    do {
+      return try fileAccess.contentsOfDirectory(playbookURL.deletingLastPathComponent())
+        .contains { url in
+          let name = url.lastPathComponent
+          guard name.hasPrefix("PLAYBOOK."), name.hasSuffix(".md") else { return false }
+          return Int(name.dropFirst("PLAYBOOK.".count).dropLast(".md".count)) != nil
+        }
+    } catch {
+      if classifyFileError(error) == .missing {
+        return false
+      }
+      throw NodeResourceReadError.transportFailure
+    }
+  }
+
+  private static func classifyFileError(_ error: Error) -> NodeResourceReadError {
+    let value = error as NSError
+    if value.domain == NSCocoaErrorDomain
+      && (value.code == NSFileNoSuchFileError || value.code == NSFileReadNoSuchFileError)
+    {
+      return .missing
+    }
+    if value.domain == NSPOSIXErrorDomain && value.code == posixNoSuchFile {
+      return .missing
+    }
+    return .transportFailure
   }
 
   private static func completeLineRanges(

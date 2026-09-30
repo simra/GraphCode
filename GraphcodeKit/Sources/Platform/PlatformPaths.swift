@@ -289,7 +289,15 @@ internal enum GraphcodeSHA256 {
   ]
 
   static func hex(_ data: Data) -> String {
-    var message = Array(data)
+    digest(data).map { String(format: "%02x", $0) }.joined()
+  }
+
+  static func digest(_ data: Data) -> Data {
+    digest(Array(data))
+  }
+
+  private static func digest(_ bytes: [UInt8]) -> Data {
+    var message = bytes
     let bitLength = UInt64(message.count) * 8
     message.append(0x80)
     while message.count % 64 != 56 {
@@ -311,7 +319,15 @@ internal enum GraphcodeSHA256 {
       compress(Array(message[chunkStart..<(chunkStart + 64)]), into: &hash)
     }
 
-    return hex(hash)
+    return Data(
+      hash.flatMap { word in
+        [
+          UInt8(truncatingIfNeeded: word >> 24),
+          UInt8(truncatingIfNeeded: word >> 16),
+          UInt8(truncatingIfNeeded: word >> 8),
+          UInt8(truncatingIfNeeded: word),
+        ]
+      })
   }
 
   static func hex(reading handle: FileHandle, through byteCount: UInt64) throws -> String {

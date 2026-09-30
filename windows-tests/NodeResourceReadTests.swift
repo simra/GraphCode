@@ -1,10 +1,11 @@
 import Foundation
-
 import XCTest
 
 @testable import GraphcodeKit
 
 final class NodeResourceReadTests: XCTestCase {
+  private let cursorAuthenticationKey = Data(repeating: 0x5a, count: 32)
+
   private func temporaryBase() throws -> URL {
     let url = FileManager.default.temporaryDirectory
       .appendingPathComponent("node-resource-\(UUID())", isDirectory: true)
@@ -23,7 +24,8 @@ final class NodeResourceReadTests: XCTestCase {
     baseURL: URL,
     cursor: String? = nil,
     maxEntries: Int = NodeResourceQuery.defaultEntryLimit,
-    maxBytes: Int = NodeResourceQuery.defaultByteLimit
+    maxBytes: Int = NodeResourceQuery.defaultByteLimit,
+    fileAccess: NodeResourceFileAccess = .live
   ) throws -> NodeResourcePage {
     switch NodeResourceReader.read(
       node: node,
@@ -34,10 +36,74 @@ final class NodeResourceReadTests: XCTestCase {
         cursor: cursor,
         maxEntries: maxEntries,
         maxBytes: maxBytes),
-      baseURL: baseURL)
+      baseURL: baseURL,
+      fileAccess: fileAccess,
+      cursorAuthenticationKey: cursorAuthenticationKey)
     {
     case .success(let page): return page
     case .failure(let error): throw error
+    }
+  }
+
+  private func tamperingCursor(
+    _ cursor: String,
+    field: String,
+    value: Any
+  ) throws -> String {
+    let parts = cursor.split(separator: ".", omittingEmptySubsequences: false)
+    XCTAssertEqual(parts.count, 2)
+    let payload = try XCTUnwrap(
+      NodeResourceCursorAuthentication.decodeBase64URL(String(parts[0])))
+    var object = try XCTUnwrap(
+      JSONSerialization.jsonObject(with: payload) as? [String: Any])
+    object[field] = value
+    let tamperedPayload = try JSONSerialization.data(withJSONObject: object)
+    return NodeResourceCursorAuthentication.base64URL(tamperedPayload) + "."
+      + String(parts[1])
+  }
+
+  private func data(hex: String) throws -> Data {
+    guard hex.count.isMultiple(of: 2) else {
+      throw NodeResourceReadError.corrupt
+    }
+    return try Data(
+      stride(from: 0, to: hex.count, by: 2).map { offset in
+        let start = hex.index(hex.startIndex, offsetBy: offset)
+        let end = hex.index(start, offsetBy: 2)
+        return try XCTUnwrap(UInt8(hex[start..<end], radix: 16))
+      })
+  }
+
+  private func noncanonicalBase64URL(_ value: String) throws -> String {
+    let alphabet = Array(
+      "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_")
+    let character = try XCTUnwrap(value.last)
+    let index = try XCTUnwrap(alphabet.firstIndex(of: character))
+    let replacementIndex = (index & ~3) | ((index + 1) & 3)
+    XCTAssertNotEqual(index, replacementIndex)
+    return String(value.dropLast()) + String(alphabet[replacementIndex])
+  }
+
+  private func assertInvalidCursor(
+    _ cursor: String,
+    node: LoopNode,
+    projectPath: String,
+    baseURL: URL,
+    file: StaticString = #filePath,
+    line: UInt = #line
+  ) {
+    XCTAssertThrowsError(
+      try page(
+        node: node,
+        projectPath: projectPath,
+        resource: .memory,
+        baseURL: baseURL,
+        cursor: cursor),
+      file: file,
+      line: line
+    ) {
+      XCTAssertEqual(
+        $0 as? NodeResourceReadError, .invalidCursor, file: file, line: line)
     }
   }
 
@@ -134,6 +200,258 @@ final class NodeResourceReadTests: XCTestCase {
         baseURL: base,
         cursor: cursor)
     ) { XCTAssertEqual($0 as? NodeResourceReadError, .invalidCursor) }
+  }
+
+  func testCursorAuthenticationRejectsEveryFieldAndSignatureTampering() throws {
+    XCTAssertEqual(
+      NodeResourceCursorAuthentication.hmacSHA256(
+        key: Data(repeating: 0x0b, count: 20),
+        message: Data("Hi There".utf8)),
+      try data(
+        hex: "b0344c61d8db38535ca8afceaf0bf12b"
+          + "881dc200c9833da726e9376c2e32cff7"))
+    XCTAssertEqual(
+      GraphcodeSHA256.hex(Data(repeating: 0x61, count: 100)),
+      "2816597888e4a0d3a36b82b83316ab32"
+        + "680eb8f00f8cd3b904d681246d285a0e")
+
+    let base = try temporaryBase()
+    defer { try? FileManager.default.removeItem(at: base) }
+    let project = "/synthetic/cursor-authentication"
+    let node = node()
+    for value in 1...3 {
+      NodeMemory.append(
+        "entry-\(value)", projectPath: project, nodeID: node.id, baseURL: base)
+    }
+    let first = try page(
+      node: node,
+      projectPath: project,
+      resource: .memory,
+      baseURL: base,
+      maxEntries: 1)
+    let cursor = try XCTUnwrap(first.nextCursor)
+    let decoded = try NodeResourceCursor.decode(
+      cursor, authenticationKey: cursorAuthenticationKey)
+
+    let tamperedFields: [(String, Any)] = [
+      ("version", 2),
+      ("projectIdentity", String(repeating: "0", count: 64)),
+      ("nodeID", UUID().uuidString),
+      ("resource", "playbookHistory"),
+      ("sourceIdentity", String(repeating: "1", count: 64)),
+      ("snapshotExtent", decoded.snapshotExtent - 1),
+      ("snapshotHash", String(repeating: "2", count: 64)),
+    ]
+    for (field, value) in tamperedFields {
+      assertInvalidCursor(
+        try tamperingCursor(cursor, field: field, value: value),
+        node: node,
+        projectPath: project,
+        baseURL: base)
+    }
+    assertInvalidCursor(
+      try tamperingCursor(cursor, field: "nextEnd", value: decoded.snapshotExtent),
+      node: node,
+      projectPath: project,
+      baseURL: base)
+    assertInvalidCursor(
+      try tamperingCursor(cursor, field: "nextEnd", value: 0),
+      node: node,
+      projectPath: project,
+      baseURL: base)
+
+    let originalParts =
+      cursor.split(separator: ".", omittingEmptySubsequences: false).map(String.init)
+    var parts = originalParts
+    var signature = try XCTUnwrap(
+      NodeResourceCursorAuthentication.decodeBase64URL(parts[1]))
+    signature[signature.startIndex] ^= 1
+    parts[1] = NodeResourceCursorAuthentication.base64URL(signature)
+    assertInvalidCursor(
+      parts.joined(separator: "."),
+      node: node,
+      projectPath: project,
+      baseURL: base)
+    parts = originalParts
+    parts[1] = try noncanonicalBase64URL(parts[1])
+    assertInvalidCursor(
+      parts.joined(separator: "."),
+      node: node,
+      projectPath: project,
+      baseURL: base)
+
+    var payload = try XCTUnwrap(
+      NodeResourceCursorAuthentication.decodeBase64URL(originalParts[0]))
+    payload[payload.startIndex] ^= 1
+    assertInvalidCursor(
+      NodeResourceCursorAuthentication.base64URL(payload) + "." + originalParts[1],
+      node: node,
+      projectPath: project,
+      baseURL: base)
+
+    XCTAssertThrowsError(
+      try NodeResourceCursor.decode(
+        cursor, authenticationKey: Data(repeating: 0xa5, count: 32))
+    ) { XCTAssertEqual($0 as? NodeResourceReadError, .invalidCursor) }
+    XCTAssertLessThanOrEqual(
+      cursor.utf8.count, NodeResourceReader.maximumEncodedCursorBytes)
+  }
+
+  func testEntryByteBoundsIncludeArrayOverheadAndAlwaysAdvanceCursor() throws {
+    let base = try temporaryBase()
+    defer { try? FileManager.default.removeItem(at: base) }
+    let project = "/synthetic/page-byte-boundary"
+    let node = node()
+    NodeMemory.append(
+      #"older "quoted" \ escaped 🧪漢字"#,
+      projectPath: project,
+      nodeID: node.id,
+      baseURL: base)
+    NodeMemory.append(
+      #"newer "quoted" \ escaped 🧪漢字"#,
+      projectPath: project,
+      nodeID: node.id,
+      baseURL: base)
+
+    let complete = try page(
+      node: node,
+      projectPath: project,
+      resource: .memory,
+      baseURL: base)
+    XCTAssertEqual(complete.entries.count, 2)
+    let newestOnlyBytes = try JSONEncoder().encode([complete.entries[0]]).count
+    let bothBytes = try JSONEncoder().encode(complete.entries).count
+    XCTAssertGreaterThan(bothBytes, newestOnlyBytes)
+
+    let bounded = try page(
+      node: node,
+      projectPath: project,
+      resource: .memory,
+      baseURL: base,
+      maxBytes: newestOnlyBytes)
+    XCTAssertEqual(bounded.entries, [complete.entries[0]])
+    XCTAssertTrue(bounded.hasMore)
+    let cursor = try XCTUnwrap(bounded.nextCursor)
+    let cursorState = try NodeResourceCursor.decode(
+      cursor, authenticationKey: cursorAuthenticationKey)
+    XCTAssertLessThan(cursorState.nextEnd, cursorState.snapshotExtent)
+
+    let older = try page(
+      node: node,
+      projectPath: project,
+      resource: .memory,
+      baseURL: base,
+      cursor: cursor,
+      maxBytes: newestOnlyBytes)
+    XCTAssertEqual(older.entries, [complete.entries[1]])
+    XCTAssertFalse(older.hasMore)
+
+    let exactComplete = try page(
+      node: node,
+      projectPath: project,
+      resource: .memory,
+      baseURL: base,
+      maxBytes: bothBytes)
+    XCTAssertEqual(exactComplete.entries, complete.entries)
+    XCTAssertFalse(exactComplete.hasMore)
+
+    let oneByteTransition = try page(
+      node: node,
+      projectPath: project,
+      resource: .memory,
+      baseURL: base,
+      maxBytes: bothBytes - 1)
+    XCTAssertEqual(oneByteTransition.entries, [complete.entries[0]])
+    XCTAssertTrue(oneByteTransition.hasMore)
+
+    XCTAssertThrowsError(
+      try page(
+        node: node,
+        projectPath: project,
+        resource: .memory,
+        baseURL: base,
+        maxBytes: newestOnlyBytes - 1)
+    ) { XCTAssertEqual($0 as? NodeResourceReadError, .oversized) }
+  }
+
+  func testEntryCountBoundaryDoesNotDecodeTheNextPage() throws {
+    let base = try temporaryBase()
+    defer { try? FileManager.default.removeItem(at: base) }
+    let project = "/synthetic/count-boundary"
+    let node = node()
+    let log = NodeMemory.logURL(
+      forProjectPath: project, nodeID: node.id, baseURL: base)
+    try FileManager.default.createDirectory(
+      at: log.deletingLastPathComponent(), withIntermediateDirectories: true)
+    let valid = "2026-09-30T16:00:00Z  newest\n"
+    try Data(("not-a-memory-entry\n" + valid).utf8).write(to: log)
+
+    let first = try page(
+      node: node,
+      projectPath: project,
+      resource: .memory,
+      baseURL: base,
+      maxEntries: 1)
+    XCTAssertEqual(first.entries.map(\.content), ["newest"])
+    XCTAssertTrue(first.hasMore)
+    XCTAssertThrowsError(
+      try page(
+        node: node,
+        projectPath: project,
+        resource: .memory,
+        baseURL: base,
+        cursor: try XCTUnwrap(first.nextCursor),
+        maxEntries: 1)
+    ) { XCTAssertEqual($0 as? NodeResourceReadError, .corrupt) }
+  }
+
+  func testCurrentPlaybookBoundsUseEncodedStateAtOneByteBoundary() throws {
+    let base = try temporaryBase()
+    defer { try? FileManager.default.removeItem(at: base) }
+    let project = "/synthetic/current-playbook-boundary"
+    let node = node()
+    let content = """
+      Keep "quotes", \\slashes,	tabs, and 🧪漢字.
+      token=ghp_abcdefghijklmnopqrstuvwxyz123456 /Users/synthetic/private
+      """
+    XCTAssertTrue(
+      NodeMemory.refinePlaybook(
+        "Earlier", projectPath: project, nodeID: node.id, baseURL: base))
+    XCTAssertTrue(
+      NodeMemory.refinePlaybook(
+        content, projectPath: project, nodeID: node.id, baseURL: base))
+
+    let complete = try page(
+      node: node,
+      projectPath: project,
+      resource: .playbookCurrent,
+      baseURL: base)
+    let state = try XCTUnwrap(complete.currentPlaybook)
+    XCTAssertTrue(state.rollbackAvailable)
+    XCTAssertFalse(state.redactions.isEmpty)
+    let encodedStateBytes = try JSONEncoder().encode(state).count
+
+    let exact = try page(
+      node: node,
+      projectPath: project,
+      resource: .playbookCurrent,
+      baseURL: base,
+      maxBytes: encodedStateBytes)
+    XCTAssertEqual(exact.currentPlaybook, state)
+    XCTAssertThrowsError(
+      try page(
+        node: node,
+        projectPath: project,
+        resource: .playbookCurrent,
+        baseURL: base,
+        maxBytes: encodedStateBytes - 1)
+    ) { XCTAssertEqual($0 as? NodeResourceReadError, .oversized) }
+    XCTAssertLessThanOrEqual(
+      try JSONEncoder().encode(
+        DaemonWireEnvelope.response(
+          id: UUID(), event: .nodeResourcePage(exact))
+      ).count,
+      FramedMessageIO.v2MaxPayloadBytes)
   }
 
   func testCurrentPlaybookAndRefinementRollbackHistoryAreDistinct() throws {
@@ -293,6 +611,112 @@ final class NodeResourceReadTests: XCTestCase {
         resource: .unsupported("future"),
         baseURL: base)
     ) { XCTAssertEqual($0 as? NodeResourceReadError, .unsupportedResource) }
+  }
+
+  func testFileFailuresDistinguishConfirmedMissingFromTransportErrors() throws {
+    enum SyntheticIOError: Error {
+      case denied
+      case sharingViolation
+      case timeout
+    }
+
+    let base = try temporaryBase()
+    defer { try? FileManager.default.removeItem(at: base) }
+    let project = "/synthetic/io-errors"
+    let node = node()
+    NodeMemory.append(
+      "fixture", projectPath: project, nodeID: node.id, baseURL: base)
+
+    var missingStat = NodeResourceFileAccess.live
+    missingStat.attributes = { _ in throw CocoaError(.fileNoSuchFile) }
+    XCTAssertThrowsError(
+      try page(
+        node: node,
+        projectPath: project,
+        resource: .memory,
+        baseURL: base,
+        fileAccess: missingStat)
+    ) { XCTAssertEqual($0 as? NodeResourceReadError, .missing) }
+
+    var deniedStat = NodeResourceFileAccess.live
+    deniedStat.attributes = { _ in throw SyntheticIOError.denied }
+    XCTAssertThrowsError(
+      try page(
+        node: node,
+        projectPath: project,
+        resource: .memory,
+        baseURL: base,
+        fileAccess: deniedStat)
+    ) { XCTAssertEqual($0 as? NodeResourceReadError, .transportFailure) }
+
+    var missingMetadata = NodeResourceFileAccess.live
+    missingMetadata.attributes = { _ in [:] }
+    XCTAssertThrowsError(
+      try page(
+        node: node,
+        projectPath: project,
+        resource: .memory,
+        baseURL: base,
+        fileAccess: missingMetadata)
+    ) { XCTAssertEqual($0 as? NodeResourceReadError, .transportFailure) }
+
+    var deniedOpen = NodeResourceFileAccess.live
+    deniedOpen.open = { _ in throw SyntheticIOError.sharingViolation }
+    XCTAssertThrowsError(
+      try page(
+        node: node,
+        projectPath: project,
+        resource: .memory,
+        baseURL: base,
+        fileAccess: deniedOpen)
+    ) { XCTAssertEqual($0 as? NodeResourceReadError, .transportFailure) }
+
+    var failedRead = NodeResourceFileAccess.live
+    failedRead.read = { _, _ in throw SyntheticIOError.timeout }
+    XCTAssertThrowsError(
+      try page(
+        node: node,
+        projectPath: project,
+        resource: .memory,
+        baseURL: base,
+        fileAccess: failedRead)
+    ) { XCTAssertEqual($0 as? NodeResourceReadError, .transportFailure) }
+
+    var shortRead = NodeResourceFileAccess.live
+    shortRead.read = { _, _ in Data() }
+    XCTAssertThrowsError(
+      try page(
+        node: node,
+        projectPath: project,
+        resource: .memory,
+        baseURL: base,
+        fileAccess: shortRead)
+    ) { XCTAssertEqual($0 as? NodeResourceReadError, .transportFailure) }
+
+    var chunkedRead = NodeResourceFileAccess.live
+    chunkedRead.read = { handle, count in
+      try NodeResourceFileAccess.live.read(handle, min(count, 3))
+    }
+    XCTAssertEqual(
+      try page(
+        node: node,
+        projectPath: project,
+        resource: .memory,
+        baseURL: base,
+        fileAccess: chunkedRead
+      ).entries.map(\.content),
+      ["fixture"])
+
+    var failedSnapshotListing = NodeResourceFileAccess.live
+    failedSnapshotListing.contentsOfDirectory = { _ in throw SyntheticIOError.denied }
+    XCTAssertThrowsError(
+      try page(
+        node: node,
+        projectPath: project,
+        resource: .playbookCurrent,
+        baseURL: base,
+        fileAccess: failedSnapshotListing)
+    ) { XCTAssertEqual($0 as? NodeResourceReadError, .transportFailure) }
   }
 
   func testProjectTextCannotEscapeStorageAndLocationDoesNotChangeSemantics() throws {
@@ -571,6 +995,56 @@ final class NodeResourceReadTests: XCTestCase {
       connectionID: connection.id)
     XCTAssertEqual(denied?.errorCode, .nodeResourceUnauthorized)
     XCTAssertEqual(calls.value, 0)
+  }
+
+  func testRemoteClassificationUsesTheSameTransportFailureMapping() async throws {
+    let root = try temporaryBase()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let project = root.appendingPathComponent("remote-fixture", isDirectory: true)
+    try FileManager.default.createDirectory(at: project, withIntermediateDirectories: true)
+    let registry = ProjectRegistry(
+      persistenceDirectory: root.appendingPathComponent("support"),
+      ensureSession: nil,
+      terminateSession: nil,
+      restartSession: nil,
+      evaluatePredicate: nil,
+      checkPredicate: nil,
+      deliverMessage: nil,
+      captureScript: nil,
+      readUsage: nil,
+      readGoalVerdict: nil,
+      readActivity: nil,
+      readSummary: nil,
+      readPresence: nil,
+      sessionAlive: nil,
+      composeBoard: nil,
+      readNodeResource: { _, _, _ in .failure(.transportFailure) },
+      persistsSynchronously: true,
+      classifyProject: { _ in .ssh })
+    let connection = NodeResourceRecordingConnection()
+    await registry.addConnection(
+      id: connection.id,
+      channel: DaemonConnectionChannel(
+        connection: connection, mode: .v2(version: 2), clientID: UUID()))
+    _ = await registry.apply(.openProject(path: project.path), connectionID: connection.id)
+    let nodeID = UUID()
+    _ = await registry.apply(
+      .graphCommand(
+        projectPath: project.path,
+        command: .createNode(
+          NodeDraft(
+            id: nodeID,
+            title: "Remote synthetic",
+            loopType: .turnBased,
+            firstInstruction: "test"))),
+      connectionID: connection.id)
+
+    let failure = await registry.apply(
+      .nodeResource(
+        projectPath: project.path,
+        query: NodeResourceQuery(nodeID: nodeID, resource: .memory)),
+      connectionID: connection.id)
+    XCTAssertEqual(failure?.errorCode, .nodeResourceTransportFailure)
   }
 }
 private final class LockedValue<Value>: @unchecked Sendable {

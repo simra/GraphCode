@@ -77,7 +77,9 @@ Because all product writers hold the same storage lock and append a complete new
 terminated record, a trailing partial record indicates external truncation/corruption
 and is rejected. Older requests walk backward within only that frozen source.
 
-The URL-safe base64 cursor is opaque to clients and binds:
+The canonical unpadded URL-safe base64 cursor is opaque to clients. Non-canonical
+encodings are rejected even when a permissive decoder could recover the same bytes.
+Its versioned JSON payload binds:
 
 - cursor contract version;
 - SHA-256 project identity, node UUID, and resource;
@@ -86,12 +88,24 @@ The URL-safe base64 cursor is opaque to clients and binds:
 - next older byte boundary;
 - SHA-256 of the complete frozen prefix.
 
+The daemon authenticates the exact payload bytes with HMAC-SHA-256 and compares the
+32-byte signature in constant time. The 256-bit authentication key is generated from the
+process random-number generator, remains only in daemon memory, and is never persisted,
+logged, returned separately, or included in protocol state. Reconnects to the same daemon
+process keep working. A daemon restart creates a new key, so pre-restart cursors return
+`nodeResourceInvalidCursor`; clients restart pagination with a cursor-less request.
+Changing any payload field, payload bit, or signature bit also returns
+`nodeResourceInvalidCursor`.
+
 Every page re-reads and verifies the bounded frozen prefix before returning. Appends
 beyond the frozen extent are accepted but cannot reorder, duplicate, or enter that
 pagination session. A fresh cursor-less request sees them. Replacement, truncation below
 the frozen extent, truncate/regrow with changed content, prefix rewrite, project/node
 change, resource change, malformed cursor, or changed source identity returns
 `nodeResourceInvalidCursor`; the daemon never silently restarts pagination.
+Every successful page with `hasMore: true` includes at least one entry and moves
+`nextEnd` strictly toward zero. If the first remaining encoded entry cannot fit, the
+request returns `nodeResourceOversized` rather than an empty non-progressing page.
 
 Each request examines at most two 512 KiB buffers regardless of cursor depth. Paths are
 derived solely from the authoritative project identity and node UUID through
@@ -109,18 +123,22 @@ claimed by a possibly colliding project.
 
 ## Bounds and frame proof
 
-- default page: 16 entries / 64 KiB encoded entry JSON;
-- maximum page: 32 entries / 128 KiB encoded entry JSON;
+- default page: 16 entries / 64 KiB encoded entry-array JSON;
+- maximum page: 32 entries / 128 KiB encoded entry-array JSON;
 - maximum single encoded entry: 64 KiB;
 - maximum readable memory/history extent: 512 KiB;
 - maximum current playbook source: the existing 8 KiB write bound;
-- maximum cursor JSON before base64: 4 KiB.
+- maximum cursor payload before base64: 4 KiB;
+- maximum complete encoded cursor: 6 KiB.
 
-The 128 KiB entry budget leaves more than 800 KiB beneath the existing 1 MiB v2 frame
-limit for enum wrappers, field names, UUIDs, timestamps, cursor base64, JSON escaping,
-and envelope/request correlation. The daemon separately encodes and preflights the
-complete response envelope before delivery. UTF-8 content is counted after JSON encoding,
-so multibyte text and escaping cannot bypass the page ceiling. Oversized sources, entries,
+The entry budget includes the JSON array brackets and commas. Current-playbook
+`maxBytes` applies to the encoded `CurrentPlaybookState`, including content escaping,
+redaction metadata, and rollback availability, rather than raw UTF-8 content. The 128 KiB
+entry budget leaves more than 800 KiB beneath the existing 1 MiB v2 frame limit for enum
+wrappers, field names, UUIDs, timestamps, authenticated cursor base64, JSON escaping, and
+envelope/request correlation. The daemon separately encodes and preflights the complete
+response envelope before delivery. UTF-8 content is counted after JSON encoding, so
+multibyte text and escaping cannot bypass the page ceiling. Oversized sources, entries,
 current playbooks, or complete envelopes fail explicitly rather than truncating.
 
 ## Errors and compatibility
@@ -139,6 +157,13 @@ Correlated error codes are:
 Unknown resource strings decode as an unsupported resource so they receive the explicit
 code rather than a generic malformed-envelope error. The storage is provider-independent,
 so there is no provider error.
+
+`nodeResourceMissing` means a confirmed no-such-file result only. Permission denial,
+sharing violations, metadata/stat failures, open/read failures, timeouts, and other I/O
+errors, including a short read before the statted extent, return
+`nodeResourceTransportFailure`; parse or content-shape failures return
+`nodeResourceCorrupt`. SSH and Codespace projects use this same local daemon-owned reader,
+so they have the same mapping and do not introduce a remote shell exit-code translation.
 
 The command/event and `memoryReads` capability are additive. Protocol-v1 commands retain
 their existing encoding and behavior. Older v2 clients ignore the unknown response event
