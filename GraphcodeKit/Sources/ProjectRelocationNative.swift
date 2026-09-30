@@ -2,11 +2,15 @@ import Foundation
 
 #if os(Windows)
   import WinSDK
-#elseif canImport(Darwin)
-  import Darwin
-#elseif canImport(Glibc)
-  import Glibc
 #endif
+
+enum ProjectRelocationPlatform {
+  #if os(Windows)
+    static let isSupported = true
+  #else
+    static let isSupported = false
+  #endif
+}
 
 final class StableProjectDirectory {
   let identityToken: String
@@ -177,66 +181,20 @@ final class StableProjectDirectory {
       }
     }
   #else
-    private let descriptor: Int32
-    private let sourcePath: String
-
-    init(path: String) throws {
-      let opened = open(path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW)
-      guard opened >= 0 else { throw ProjectRelocationError.unsafePath }
-      descriptor = opened
-      sourcePath = path
-      do {
-        identityToken = try Self.identityToken(descriptor: opened)
-      } catch {
-        close(opened)
-        throw error
-      }
+    init(path _: String) throws {
+      throw ProjectRelocationError.unsupported
     }
 
-    deinit {
-      close(descriptor)
+    func verify(path _: String) throws {
+      throw ProjectRelocationError.unsupported
     }
 
-    func verify(path: String) throws {
-      let current = try StableProjectDirectory(path: path)
-      guard current.identityToken == identityToken else {
-        throw ProjectRelocationError.sourceIdentityChanged
-      }
+    func rename(to _: String) throws {
+      throw ProjectRelocationError.unsupported
     }
 
-    func rename(to destinationPath: String) throws {
-      try verify(path: sourcePath)
-      #if canImport(Darwin)
-        guard
-          renameatx_np(AT_FDCWD, sourcePath, AT_FDCWD, destinationPath, UInt32(RENAME_EXCL)) == 0
-        else {
-          if errno == EEXIST { throw ProjectRelocationError.destinationCollision }
-          if errno == EXDEV { throw ProjectRelocationError.crossVolume }
-          if errno == EACCES || errno == EPERM { throw ProjectRelocationError.permissionDenied }
-          throw ProjectRelocationError.preflightFailed
-        }
-      #else
-        guard !FileManager.default.fileExists(atPath: destinationPath) else {
-          throw ProjectRelocationError.destinationCollision
-        }
-        try FileManager.default.moveItem(
-          at: URL(fileURLWithPath: sourcePath),
-          to: URL(fileURLWithPath: destinationPath))
-      #endif
-    }
-
-    static func inspectDestinationParent(_ path: String) throws {
-      let opened = open(path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW)
-      guard opened >= 0 else { throw ProjectRelocationError.unsafePath }
-      close(opened)
-    }
-
-    private static func identityToken(descriptor: Int32) throws -> String {
-      var info = stat()
-      guard fstat(descriptor, &info) == 0 else {
-        throw ProjectRelocationError.preflightFailed
-      }
-      return GraphcodeSHA256.hex(Data("\(info.st_dev):\(info.st_ino)".utf8))
+    static func inspectDestinationParent(_: String) throws {
+      throw ProjectRelocationError.unsupported
     }
   #endif
 }

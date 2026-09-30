@@ -419,6 +419,13 @@ struct ProjectRelocationTests {
     #expect(activeResult?.errorCode == .projectRelocationActiveSessions)
     #expect(FileManager.default.fileExists(atPath: activeSource.path))
     #expect(!FileManager.default.fileExists(atPath: activeDestination.path))
+    let mutationAfterFailure = await activeRegistry.apply(
+      .graphCommand(
+        projectPath: activeSource.path,
+        command: .createNode(
+          NodeDraft(title: "Lease released", loopType: .turnBased, firstInstruction: "Work"))),
+      connectionID: activeConnection.id)
+    #expect(mutationAfterFailure?.error == nil)
   }
 
   @Test
@@ -747,6 +754,253 @@ struct ProjectRelocationTests {
   }
 
   @Test
+  func prepareWaitsForSuspendedAttendedLaunchAndRefusesTheNewSession() async throws {
+    let fixture = try fixture()
+    defer { try? FileManager.default.removeItem(at: fixture.root) }
+    let gate = SuspendedSessionLaunch()
+    let registry = ProjectRegistry(
+      persistenceDirectory: fixture.support,
+      platformPaths: WindowsPlatformPaths(homeDirectory: fixture.root),
+      ensureSession: nil,
+      terminateSession: nil,
+      startNodeSession: { _, _ in
+        gate.entered.signal()
+        gate.release.wait()
+        gate.markLive()
+        return .success(.started)
+      },
+      nodeSessionExists: { _, _ in gate.isLive })
+    let connection = RelocationTestConnection()
+    await joinRelocationConnection(
+      connection, registry: registry, projectPath: fixture.source.path)
+    let created = await registry.apply(
+      .graphCommand(
+        projectPath: fixture.source.path,
+        command: .createNode(
+          NodeDraft(title: "Attended", loopType: .turnBased, firstInstruction: "Work"))),
+      connectionID: connection.id)
+    guard case .graphChanged(let graph) = created?.response, let nodeID = graph.nodes.first?.id
+    else {
+      Issue.record("expected attended test loop")
+      return
+    }
+
+    let launch = Task {
+      await registry.apply(
+        .openNodeSession(projectPath: fixture.source.path, nodeID: nodeID),
+        connectionID: connection.id)
+    }
+    #expect(gate.entered.wait(timeout: .now() + 2) == .success)
+    let completion = CompletionFlag()
+    let prepare = Task {
+      let result = await registry.apply(
+        .prepareProjectRelocation(
+          operationID: UUID(),
+          sourcePath: fixture.source.path,
+          destinationPath: fixture.destination.path,
+          options: ProjectRelocationOptions()),
+        connectionID: connection.id)
+      completion.mark()
+      return result
+    }
+    try await Task.sleep(for: .milliseconds(100))
+    #expect(!completion.value)
+    gate.release.signal()
+
+    _ = await launch.value
+    let result = await prepare.value
+    #expect(result?.errorCode == .projectRelocationActiveSessions)
+    #expect(FileManager.default.fileExists(atPath: fixture.source.path))
+    #expect(!FileManager.default.fileExists(atPath: fixture.destination.path))
+  }
+
+  @Test
+  func prepareWaitsForSuspendedUnattendedEnsureAndNeverCommitsPastIt() async throws {
+    let fixture = try fixture()
+    defer { try? FileManager.default.removeItem(at: fixture.root) }
+    let gate = SuspendedSessionLaunch()
+    let registry = ProjectRegistry(
+      persistenceDirectory: fixture.support,
+      platformPaths: WindowsPlatformPaths(homeDirectory: fixture.root),
+      ensureSession: { _, _ in
+        gate.entered.signal()
+        gate.release.wait()
+        gate.markLive()
+      },
+      terminateSession: nil,
+      nodeSessionExists: { _, _ in gate.isLive })
+    let connection = RelocationTestConnection()
+    await joinRelocationConnection(
+      connection, registry: registry, projectPath: fixture.source.path)
+    let created = await registry.apply(
+      .graphCommand(
+        projectPath: fixture.source.path,
+        command: .createNode(
+          NodeDraft(
+            title: "Unattended",
+            loopType: .timeBased,
+            triggerPrompt: "/loop 1h Work"))),
+      connectionID: connection.id)
+    #expect(created?.error == nil)
+    #expect(gate.entered.wait(timeout: .now() + 2) == .success)
+
+    let completion = CompletionFlag()
+    let prepare = Task {
+      let result = await registry.apply(
+        .prepareProjectRelocation(
+          operationID: UUID(),
+          sourcePath: fixture.source.path,
+          destinationPath: fixture.destination.path,
+          options: ProjectRelocationOptions()),
+        connectionID: connection.id)
+      completion.mark()
+      return result
+    }
+    try await Task.sleep(for: .milliseconds(100))
+    #expect(!completion.value)
+    gate.release.signal()
+
+    let result = await prepare.value
+    #expect(result?.errorCode == .projectRelocationActiveSessions)
+    #expect(FileManager.default.fileExists(atPath: fixture.source.path))
+    #expect(!FileManager.default.fileExists(atPath: fixture.destination.path))
+  }
+
+  @Test
+  func disconnectDuringCommitRechecksRetainsLeaseUntilTerminalResult() async throws {
+    for suspendedCall in [2, 3] {
+      let fixture = try fixture()
+      defer { try? FileManager.default.removeItem(at: fixture.root) }
+      let probe = SuspendedSessionProbe(suspendedCall: suspendedCall)
+      let registry = ProjectRegistry(
+        persistenceDirectory: fixture.support,
+        platformPaths: WindowsPlatformPaths(homeDirectory: fixture.root),
+        ensureSession: nil,
+        terminateSession: nil,
+        nodeSessionExists: { _, _ in await probe.check() })
+      let connection = RelocationTestConnection()
+      await joinRelocationConnection(
+        connection, registry: registry, projectPath: fixture.source.path)
+      let created = await registry.apply(
+        .graphCommand(
+          projectPath: fixture.source.path,
+          command: .createNode(
+            NodeDraft(title: "Loop", loopType: .turnBased, firstInstruction: "Work"))),
+        connectionID: connection.id)
+      #expect(created?.error == nil)
+      let operationID = UUID()
+      let prepared = await registry.apply(
+        .prepareProjectRelocation(
+          operationID: operationID,
+          sourcePath: fixture.source.path,
+          destinationPath: fixture.destination.path,
+          options: ProjectRelocationOptions()),
+        connectionID: connection.id)
+      guard case .projectRelocationPrepared(let plan) = prepared?.response else {
+        Issue.record("expected relocation plan")
+        return
+      }
+      let commit = Task {
+        await registry.apply(
+          .relocateProject(
+            ProjectRelocationRequest(
+              operationID: operationID,
+              sourcePath: plan.sourcePath,
+              destinationPath: plan.destinationPath,
+              expectedSourceIdentity: plan.sourceIdentity,
+              expectedGraphRevision: plan.graphRevision)),
+          connectionID: connection.id)
+      }
+      #expect(probe.entered.wait(timeout: .now() + 2) == .success)
+      if suspendedCall == 2 {
+        let duplicate = await registry.apply(
+          .relocateProject(
+            ProjectRelocationRequest(
+              operationID: operationID,
+              sourcePath: plan.sourcePath,
+              destinationPath: plan.destinationPath,
+              expectedSourceIdentity: plan.sourceIdentity,
+              expectedGraphRevision: plan.graphRevision)),
+          connectionID: connection.id)
+        #expect(duplicate?.errorCode == .projectRelocationUnauthorized)
+      }
+      await registry.removeConnection(connection.id)
+      probe.release.signal()
+
+      let result = await commit.value
+      guard case .projectRelocated = result?.response else {
+        Issue.record("expected committed relocation after disconnect")
+        return
+      }
+      #expect(!FileManager.default.fileExists(atPath: fixture.source.path))
+      #expect(FileManager.default.fileExists(atPath: fixture.destination.path))
+    }
+  }
+
+  @Test
+  func duplicateOperationAcrossProjectsDoesNotLeaseTheSecondProject() async throws {
+    let fixture = try fixture()
+    defer { try? FileManager.default.removeItem(at: fixture.root) }
+    let secondSource = fixture.root.appendingPathComponent("second-source", isDirectory: true)
+    let secondDestination = fixture.root.appendingPathComponent(
+      "second-destination", isDirectory: true)
+    try FileManager.default.createDirectory(
+      at: secondSource, withIntermediateDirectories: true)
+    let registry = ProjectRegistry(
+      persistenceDirectory: fixture.support,
+      platformPaths: WindowsPlatformPaths(homeDirectory: fixture.root),
+      ensureSession: nil,
+      terminateSession: nil,
+      nodeSessionExists: { _, _ in false })
+    let connection = RelocationTestConnection()
+    await joinRelocationConnection(
+      connection, registry: registry, projectPath: fixture.source.path)
+    _ = await registry.apply(
+      .openProject(path: secondSource.path), connectionID: connection.id)
+
+    let operationID = UUID()
+    let first = await registry.apply(
+      .prepareProjectRelocation(
+        operationID: operationID,
+        sourcePath: fixture.source.path,
+        destinationPath: fixture.destination.path,
+        options: ProjectRelocationOptions()),
+      connectionID: connection.id)
+    guard case .projectRelocationPrepared(let plan) = first?.response else {
+      Issue.record("expected first project plan")
+      return
+    }
+    let duplicate = await registry.apply(
+      .prepareProjectRelocation(
+        operationID: operationID,
+        sourcePath: secondSource.path,
+        destinationPath: secondDestination.path,
+        options: ProjectRelocationOptions()),
+      connectionID: connection.id)
+    #expect(duplicate?.errorCode == .projectRelocationConflict)
+    let secondMutation = await registry.apply(
+      .graphCommand(
+        projectPath: secondSource.path,
+        command: .createNode(
+          NodeDraft(title: "Still writable", loopType: .turnBased, firstInstruction: "Work"))),
+      connectionID: connection.id)
+    #expect(secondMutation?.error == nil)
+
+    let committed = await registry.apply(
+      .relocateProject(
+        ProjectRelocationRequest(
+          operationID: operationID,
+          sourcePath: plan.sourcePath,
+          destinationPath: plan.destinationPath,
+          expectedSourceIdentity: plan.sourceIdentity,
+          expectedGraphRevision: plan.graphRevision)),
+      connectionID: connection.id)
+    #expect(committed?.error == nil)
+    #expect(FileManager.default.fileExists(atPath: secondSource.path))
+    #expect(!FileManager.default.fileExists(atPath: secondDestination.path))
+  }
+
+  @Test
   func leaseBlocksSessionStartsAndFinalSessionRecheckAbortsCommit() async throws {
     let fixture = try fixture()
     defer { try? FileManager.default.removeItem(at: fixture.root) }
@@ -1058,4 +1312,59 @@ struct ProjectRelocationTests {
   }
 
   private struct SyntheticFault: Error {}
+
+  private final class CompletionFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var completed = false
+    var value: Bool { lock.withLock { completed } }
+    func mark() { lock.withLock { completed = true } }
+  }
+
+  private final class SuspendedSessionLaunch: @unchecked Sendable {
+    let entered = DispatchSemaphore(value: 0)
+    let release = DispatchSemaphore(value: 0)
+    private let lock = NSLock()
+    private var live = false
+    var isLive: Bool { lock.withLock { live } }
+    func markLive() { lock.withLock { live = true } }
+  }
+
+  private final class SuspendedSessionProbe: @unchecked Sendable {
+    let entered = DispatchSemaphore(value: 0)
+    let release = DispatchSemaphore(value: 0)
+    private let lock = NSLock()
+    private var calls = 0
+    private let suspendedCall: Int
+
+    init(suspendedCall: Int) {
+      self.suspendedCall = suspendedCall
+    }
+
+    func check() async -> Bool {
+      let shouldSuspend = lock.withLock {
+        calls += 1
+        return calls == suspendedCall
+      }
+      if shouldSuspend {
+        entered.signal()
+        release.wait()
+      }
+      return false
+    }
+  }
+
+  private func joinRelocationConnection(
+    _ connection: RelocationTestConnection,
+    registry: ProjectRegistry,
+    projectPath: String
+  ) async {
+    await registry.addConnection(
+      id: connection.id,
+      channel: DaemonConnectionChannel(connection: connection, mode: .v2(version: 2)))
+    _ = await registry.apply(
+      .announce(capabilities: [ClientCapability.projectRelocation.rawValue]),
+      connectionID: connection.id)
+    _ = await registry.apply(
+      .openProject(path: projectPath), connectionID: connection.id)
+  }
 }

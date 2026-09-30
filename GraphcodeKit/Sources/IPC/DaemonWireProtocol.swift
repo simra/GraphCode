@@ -83,7 +83,7 @@ public struct DaemonWireEnvelope: Codable, Equatable, Sendable {
     resumeFrom: UInt64? = nil,
     subscription: DaemonWireSubscription? = nil
   ) -> Self {
-    Self(
+    return Self(
       version: DaemonWireProtocol.currentVersion,
       kind: .hello,
       supportedVersions: supportedVersions,
@@ -93,12 +93,16 @@ public struct DaemonWireEnvelope: Codable, Equatable, Sendable {
   }
 
   public static func helloResponse(selectedVersion: Int) -> Self {
-    Self(
+    let capabilities =
+      ProjectRelocationPlatform.isSupported
+      ? [ServerCapability.projectRelocation.rawValue]
+      : []
+    return Self(
       version: DaemonWireProtocol.currentVersion,
       kind: .hello,
       supportedVersions: DaemonWireProtocol.supportedVersions,
       selectedVersion: selectedVersion,
-      capabilities: [ServerCapability.projectRelocation.rawValue])
+      capabilities: capabilities)
   }
 
   public static func request(id: UUID, command: DaemonCommand) -> Self {

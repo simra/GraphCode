@@ -471,6 +471,9 @@ public final class ProjectRelocationCoordinator: @unchecked Sendable {
     graphRevision: Int,
     persistence: ProjectPersistence
   ) throws -> ProjectRelocationPlan {
+    guard ProjectRelocationPlatform.isSupported else {
+      throw ProjectRelocationError.unsupported
+    }
     let canonicalSource: String
     let canonicalDestination: String
     do {
@@ -551,7 +554,12 @@ public final class ProjectRelocationCoordinator: @unchecked Sendable {
       for file in try fileManager.contentsOfDirectory(
         at: journalDirectory, includingPropertiesForKeys: nil)
       where file.pathExtension == "json" {
-        let journal = try JSONDecoder().decode(Journal.self, from: Data(contentsOf: file))
+        let journal: Journal
+        do {
+          journal = try JSONDecoder().decode(Journal.self, from: Data(contentsOf: file))
+        } catch {
+          throw ProjectRelocationError.destinationCollision
+        }
         guard journal.request.operationID != operationID else { continue }
         if pathEquals(journal.plan.sourcePath, destinationPath)
           || pathEquals(journal.plan.destinationPath, destinationPath)
@@ -564,7 +572,12 @@ public final class ProjectRelocationCoordinator: @unchecked Sendable {
       for file in try fileManager.contentsOfDirectory(
         at: receiptDirectory, includingPropertiesForKeys: nil)
       where file.pathExtension == "json" {
-        let receipt = try JSONDecoder().decode(Receipt.self, from: Data(contentsOf: file))
+        let receipt: Receipt
+        do {
+          receipt = try JSONDecoder().decode(Receipt.self, from: Data(contentsOf: file))
+        } catch {
+          throw ProjectRelocationError.destinationCollision
+        }
         guard receipt.request.operationID != operationID else { continue }
         if pathEquals(receipt.result.sourcePath, destinationPath)
           || pathEquals(receipt.result.destinationPath, destinationPath)

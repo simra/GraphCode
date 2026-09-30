@@ -279,12 +279,10 @@ extension CLISessionBackend {
 
   // MARK: - The hooks `GraphStore` is wired with
 
-  /// Fire-and-forget, matching `GraphStore.onEnsureSession`'s synchronous shape — the
-  /// caller is an actor applying a graph command and shouldn't block on process
-  /// spawning. Routing through `backend(for:)` is what makes a node's chosen backend
-  /// mean something at runtime rather than only in the picker.
-  public static let ensureSession: @Sendable (LoopNode, String?) -> Void = { node, path in
-    Task.detached { await backend(for: node).launch(node, path) }
+  /// The registry wraps this awaited launch in its per-project launch barrier before
+  /// handing a synchronous fire-and-forget hook to `GraphStore`.
+  public static let ensureSession: @Sendable (LoopNode, String?) async -> Void = { node, path in
+    await backend(for: node).launch(node, path)
   }
 
   public static let terminateSession: @Sendable (LoopNode, String?) -> Void = { node, path in

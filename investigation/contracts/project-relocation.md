@@ -8,17 +8,24 @@ explicit options.
 
 ## Supported scope
 
-- Only projects authoritatively classified as `local` with the
+- Only Windows projects authoritatively classified as `local` with the
   `projectRelocation` capability are eligible.
+- Darwin and Glibc builds do not advertise the server capability and return
+  `projectRelocationUnsupported` before path or filesystem mutation. Their pathname-based
+  rename APIs do not currently prove that the verified source object is the object renamed.
 - SSH and Codespace projects return `projectRelocationUnsupported`.
 - Relocation is an atomic rename on one filesystem volume. Cross-volume copy/delete is
   unsupported because GraphCode does not yet have a copy/fsync/verify/delete journal.
 - A project with a live session, a node bound to a worktree, a linked-worktree Git file,
   registered Git worktrees, or submodules is rejected before filesystem mutation.
-- Preparation acquires a project-wide relocation lease before the first awaited session
-  enumeration. Graph mutations, project open/close/delete/forget, and session launch or
-  ensure operations fail explicitly while the lease is held. Session and repository
-  topology are enumerated again at the final commit boundary.
+- Preparation first installs a canonical-project session-launch barrier. New attended
+  starts and unattended ensures are refused, existing tracked attempts are invalidated
+  and drained, and only then may the GraphStore relocation lease be acquired. Launch
+  tokens are checked around every awaited provider/session operation. Graph mutations,
+  project open/close/delete/forget, and session launch or ensure operations fail
+  explicitly while the lease is held. Session and repository topology are enumerated
+  again at the final commit boundary, so a launch that became live while draining forces
+  `activeSessions` rather than surviving a move under the old path.
 - Connected daemon clients are allowed. Clients that announced `projectRelocation` receive
   the correlated result and convergence event; older joined clients are disconnected so
   reconnect/restore observes only the canonical destination.
@@ -30,6 +37,11 @@ path. Preparation binds the operation UUID, originating logical client UUID, can
 source and destination, source identity, graph revision, options, leased store, and graph
 snapshot. Only that client may commit the prepared operation, and every immutable field
 must exactly match the prepared request.
+
+An operation UUID is reserved globally in memory before any project lease or launch
+barrier is acquired. Reusing it for another project is therefore a conflict that cannot
+disturb either project's lease. Source-project reservations likewise include operations
+still waiting for launches to drain.
 
 Receipts retain the same originating-client and request binding. A lost-response retry can
 therefore return the recorded result after the old source and joined store have
@@ -47,11 +59,11 @@ across the rename. On Windows, every existing component through the destination 
 opened without following reparse points and any reparse component is rejected. Preparation
 returns the opaque source token and current graph revision.
 
-Commit retains an open source directory handle/descriptor from before final preflight.
+Commit retains an open source directory handle from before final preflight.
 Windows uses that handle with no-replacement `SetFileInformationByHandle(FileRenameInfo)`;
-Darwin uses retained descriptor identity and `renameatx_np(RENAME_EXCL)`. The source
-identity, destination ancestry, destination absence, support collisions, sessions,
-worktrees, and submodules are rechecked immediately before this rename.
+non-Windows relocation is disabled. The source identity, destination ancestry, destination
+absence, support collisions, sessions, worktrees, and submodules are rechecked immediately
+before this rename.
 
 ## State ownership
 
@@ -73,6 +85,14 @@ serial persistence queue. The path remains blocked through commit so a queued or
 save cannot recreate old support state. A verified precommit failure or successful
 rollback removes the block; successful relocation binds subsequent work to the canonical
 destination.
+
+Prepared operations have explicit `prepared`, `committing`, and terminal ownership.
+Commit changes to a unique, non-revocable committing generation before its first await,
+and validates that generation after every suspension. Disconnect may cancel a preparing
+or prepared operation, but it cannot release the store lease, launch barrier, or writer
+block of a committing operation. The committing path owns all three until success,
+rollback, or recovery-required completion, when one terminal cleanup releases them.
+Concurrent duplicate commit attempts cannot revoke that ownership.
 
 ## Journal, commit, rollback, and recovery
 
@@ -115,8 +135,7 @@ failure.
 
 ## Platform limitation
 
-The Windows and Darwin commit paths provide retained-identity, no-replacement native
-rename semantics. The Glibc fallback retains and reverifies a source descriptor but still
-uses Foundation's move after checking destination absence; until it uses
-`renameat2(RENAME_NOREPLACE)`, Linux has a narrower destination-creation race and is not
-the acceptance-grade native path.
+Only Windows currently has an acceptance-grade retained-identity, no-replacement commit
+primitive. Darwin remains disabled until relocation can rename the verified object without
+resolving an unprotected source pathname. Glibc remains disabled until a descriptor-safe
+design using `renameat2(RENAME_NOREPLACE)` and protected parent topology is implemented.
