@@ -312,7 +312,19 @@ import GraphcodeKit
                 try await channel.sendError(
                   requestID: requestID, code: result.errorCode ?? .requestFailed, message: error)
               } else if let response = result.response {
-                try await channel.sendResponse(requestID: requestID, event: response)
+                do {
+                  try await channel.sendResponse(requestID: requestID, event: response)
+                  if let deliveryID = result.remoteAssetDeliveryID {
+                    await registry.completeRemoteAssetDelivery(
+                      deliveryID, connectionID: connectionID, delivered: true)
+                  }
+                } catch {
+                  if let deliveryID = result.remoteAssetDeliveryID {
+                    await registry.completeRemoteAssetDelivery(
+                      deliveryID, connectionID: connectionID, delivered: false)
+                  }
+                  throw error
+                }
               } else if result.succeeded {
                 try await channel.sendSuccess(requestID: requestID)
               } else {
@@ -730,7 +742,19 @@ import GraphcodeKit
                 try await channel.sendError(
                   requestID: requestID, code: result.errorCode ?? .requestFailed, message: error)
               } else if let response = result.response {
-                try await channel.sendResponse(requestID: requestID, event: response)
+                do {
+                  try await channel.sendResponse(requestID: requestID, event: response)
+                  if let deliveryID = result.remoteAssetDeliveryID {
+                    await registry.completeRemoteAssetDelivery(
+                      deliveryID, connectionID: connectionID, delivered: true)
+                  }
+                } catch {
+                  if let deliveryID = result.remoteAssetDeliveryID {
+                    await registry.completeRemoteAssetDelivery(
+                      deliveryID, connectionID: connectionID, delivered: false)
+                  }
+                  throw error
+                }
               } else if result.succeeded {
                 try await channel.sendSuccess(requestID: requestID)
               } else {

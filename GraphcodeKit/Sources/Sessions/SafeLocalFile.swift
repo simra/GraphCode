@@ -10,6 +10,52 @@ import Foundation
   import WinSDK
 #endif
 enum SafeLocalFile {
+  static func validateDirectory(_ url: URL) throws {
+    #if os(Windows)
+      var path = Array(url.path.utf16)
+      path.append(0)
+      let handle = path.withUnsafeBufferPointer {
+        CreateFileW(
+          $0.baseAddress,
+          DWORD(GENERIC_READ),
+          DWORD(FILE_SHARE_READ) | DWORD(FILE_SHARE_WRITE) | DWORD(FILE_SHARE_DELETE),
+          nil,
+          DWORD(OPEN_EXISTING),
+          DWORD(FILE_FLAG_BACKUP_SEMANTICS) | DWORD(FILE_FLAG_OPEN_REPARSE_POINT),
+          nil)
+      }
+      guard let handle, handle != INVALID_HANDLE_VALUE else {
+        throw RemoteAssetError.unsafeFile
+      }
+      defer { _ = CloseHandle(handle) }
+      var info = BY_HANDLE_FILE_INFORMATION()
+      guard GetFileInformationByHandle(handle, &info),
+        info.dwFileAttributes & DWORD(FILE_ATTRIBUTE_REPARSE_POINT) == 0,
+        info.dwFileAttributes & DWORD(FILE_ATTRIBUTE_DIRECTORY) != 0
+      else { throw RemoteAssetError.unsafeFile }
+    #else
+      let descriptor = url.path.withCString { path in
+        #if canImport(Darwin)
+          Darwin.open(path, O_RDONLY | O_NOFOLLOW | O_DIRECTORY)
+        #else
+          Glibc.open(path, O_RDONLY | O_NOFOLLOW | O_DIRECTORY)
+        #endif
+      }
+      guard descriptor >= 0 else { throw RemoteAssetError.unsafeFile }
+      defer {
+        #if canImport(Darwin)
+          _ = Darwin.close(descriptor)
+        #else
+          _ = Glibc.close(descriptor)
+        #endif
+      }
+      var info = stat()
+      guard fstat(descriptor, &info) == 0,
+        info.st_mode & mode_t(S_IFMT) == mode_t(S_IFDIR)
+      else { throw RemoteAssetError.unsafeFile }
+    #endif
+  }
+
   static func read(_ url: URL, maximumBytes: Int) throws -> Data {
     #if os(Windows)
       var path = Array(url.path.utf16)

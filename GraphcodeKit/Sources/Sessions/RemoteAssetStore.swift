@@ -17,6 +17,10 @@ public struct RemoteAssetHostTransport: Sendable {
     ) async throws -> String
   public var discardAttachments:
     @Sendable (_ projectPath: String, _ metadata: ProjectMetadata, _ nodeID: UUID) async -> Void
+  public var removeAttachment:
+    @Sendable (
+      _ projectPath: String, _ metadata: ProjectMetadata, _ nodeID: UUID, _ name: String
+    ) async throws -> Void
   public var resolveAttachment:
     @Sendable (
       _ projectPath: String, _ metadata: ProjectMetadata, _ nodeID: UUID, _ name: String,
@@ -40,6 +44,10 @@ public struct RemoteAssetHostTransport: Sendable {
     discardAttachments:
       @escaping @Sendable (_ projectPath: String, _ metadata: ProjectMetadata, _ nodeID: UUID) async
       -> Void,
+    removeAttachment:
+      @escaping @Sendable (
+        _ projectPath: String, _ metadata: ProjectMetadata, _ nodeID: UUID, _ name: String
+      ) async throws -> Void = { _, _, _, _ in throw RemoteAssetError.transportFailure },
     resolveAttachment:
       @escaping @Sendable (
         _ projectPath: String, _ metadata: ProjectMetadata, _ nodeID: UUID, _ name: String,
@@ -53,6 +61,7 @@ public struct RemoteAssetHostTransport: Sendable {
     self.templateDocuments = templateDocuments
     self.stageAttachment = stageAttachment
     self.discardAttachments = discardAttachments
+    self.removeAttachment = removeAttachment
     self.resolveAttachment = resolveAttachment
     self.retainAttachments = retainAttachments
   }
@@ -88,6 +97,16 @@ public struct RemoteAssetHostTransport: Sendable {
           projectPath: projectPath, locationKind: metadata.location, nodeID: nodeID)
       }
     },
+    removeAttachment: { projectPath, metadata, nodeID, name in
+      switch metadata.location {
+      case .local:
+        try LocalRemoteAssetHost.removeAttachment(
+          projectPath: projectPath, nodeID: nodeID, name: name)
+      case .ssh, .codespace:
+        try await SSHRemoteAssetHost.removeAttachment(
+          projectPath: projectPath, locationKind: metadata.location, nodeID: nodeID, name: name)
+      }
+    },
     resolveAttachment: { projectPath, metadata, nodeID, name, size, sha256 in
       switch metadata.location {
       case .local:
@@ -113,6 +132,15 @@ public struct RemoteAssetHostTransport: Sendable {
 public actor RemoteAssetStore {
   public static let maximumChunkBytes = 256 * 1024
   public static let transferLifetime: TimeInterval = 5 * 60
+  public static let maximumActiveTransfersPerOwner = 32
+  public static let maximumActiveTransfersPerProject = 128
+  public static let maximumActiveTransfersGlobal = 256
+  public static let maximumDeclaredBytesPerOwner = 64 * 1024 * 1024
+  public static let maximumDeclaredBytesPerProject = 256 * 1024 * 1024
+  public static let maximumDeclaredBytesGlobal = 512 * 1024 * 1024
+  public static let maximumBufferedBytesPerOwner = 32 * 1024 * 1024
+  public static let maximumBufferedBytesPerProject = 128 * 1024 * 1024
+  public static let maximumBufferedBytesGlobal = 256 * 1024 * 1024
 
   private struct Transfer: Sendable {
     var owner: UUID
@@ -124,6 +152,28 @@ public actor RemoteAssetStore {
     var expiresAt: Date
   }
 
+  private struct Usage: Sendable {
+    var count = 0
+    var declaredBytes = 0
+    var bufferedBytes = 0
+  }
+
+  private struct Finalization: Sendable {
+    var transfer: Transfer
+    var task: Task<String, Error>
+    var cancelled: Bool
+  }
+
+  private struct PendingDelivery: Sendable {
+    var transfer: Transfer
+    var attachment: PromptAttachment
+  }
+
+  private struct DraftState: Sendable {
+    var owner: UUID
+    var names: Set<String>
+  }
+
   private struct ReferencePayload: Codable, Equatable, Sendable {
     var version: Int
     var projectIdentity: String
@@ -131,22 +181,51 @@ public actor RemoteAssetStore {
     var name: String
     var size: Int
     var sha256: String
+    var draftOwner: UUID?
+  }
+
+  private struct TemplatePayload: Codable, Equatable, Sendable {
+    var version: Int
+    var projectIdentity: String
+    var templateID: UUID
+    var origin: String
+    var fileName: String
+    var sha256: String
+  }
+
+  private struct TemplateCandidate: Sendable {
+    var template: PromptTemplate
+    var fileName: String
+    var originKey: String
+    var sha256: String
   }
 
   private let transport: RemoteAssetHostTransport
   private let authenticationKey: Data?
   private let now: @Sendable () -> Date
+  private let attachmentsDirectory: @Sendable (String, UUID) -> URL
   private var transfers: [UUID: Transfer] = [:]
-  private var stagedCounts: [String: Int] = [:]
+  private var finalizations: [UUID: Finalization] = [:]
+  private var pendingDeliveries: [UUID: PendingDelivery] = [:]
+  private var cancellationOutcomes: [UUID: Bool] = [:]
+  private var cleanupPending: [UUID: Transfer] = [:]
+  private var drafts: [String: DraftState] = [:]
+  private var ownerUsage: [UUID: Usage] = [:]
+  private var projectUsage: [String: Usage] = [:]
+  private var globalUsage = Usage()
 
   public init(
     transport: RemoteAssetHostTransport = .live,
     authenticationKey: Data? = nil,
-    now: @escaping @Sendable () -> Date = { Date() }
+    now: @escaping @Sendable () -> Date = { Date() },
+    attachmentsDirectory: @escaping @Sendable (String, UUID) -> URL = {
+      NodeMemory.attachmentsDirectory(forProjectPath: $0, nodeID: $1)
+    }
   ) {
     self.transport = transport
     self.authenticationKey = authenticationKey ?? Self.loadAuthenticationKey()
     self.now = now
+    self.attachmentsDirectory = attachmentsDirectory
   }
 
   public func listTemplates(
@@ -159,23 +238,26 @@ public actor RemoteAssetStore {
     guard metadata.capabilities.templates else { return .failure(.unsupported) }
     do {
       let query = try query.validated()
-      let documents = try await transport.templateDocuments(projectPath, metadata, query.maxBytes)
+      let candidates = try await templateCandidates(
+        projectPath: projectPath, metadata: metadata, maximumBytes: query.maxBytes)
+      let duplicateIDs = Dictionary(grouping: candidates, by: \.template.id)
+        .contains { $0.value.count > 1 }
+      guard !duplicateIDs else { return .failure(.ambiguousTemplate) }
       var templates: [RemoteTemplateMetadata] = []
       var encodedBytes = 0
-      for document in documents {
-        guard AttachmentUploadDeclaration.isSafeName(document.fileName),
-          document.fileName.hasSuffix(".md"),
-          document.content.utf8.count <= RemoteTemplateReadQuery.maximumBytes,
-          let template = TemplateFileCodec.decode(document.content, origin: document.origin)
-        else { continue }
-        var normalized = template
-        normalized.fileName = document.fileName
-        let metadata = RemoteTemplateMetadata(
-          id: normalized.id, name: normalized.name, fileName: normalized.fileName,
-          origin: normalized.origin)
-        encodedBytes += (try? JSONEncoder().encode(metadata).count) ?? query.maxBytes + 1
-        guard templates.count < query.maxCount, encodedBytes <= query.maxBytes else { break }
-        templates.append(metadata)
+      for candidate in candidates {
+        let assetID = try makeTemplateAssetID(
+          projectPath: projectPath, metadata: metadata, candidate: candidate)
+        let value = RemoteTemplateMetadata(
+          id: candidate.template.id, name: candidate.template.name,
+          fileName: candidate.fileName, origin: candidate.template.origin, assetID: assetID)
+        let size = try JSONEncoder().encode(value).count
+        guard templates.count < query.maxCount,
+          !encodedBytes.addingReportingOverflow(size).overflow,
+          encodedBytes + size <= query.maxBytes
+        else { break }
+        encodedBytes += size
+        templates.append(value)
       }
       return .success(RemoteTemplateList(projectPath: projectPath, templates: templates))
     } catch let error as RemoteAssetError {
@@ -195,18 +277,22 @@ public actor RemoteAssetStore {
     guard metadata.capabilities.templates else { return .failure(.unsupported) }
     do {
       let query = try query.validated()
-      let documents = try await transport.templateDocuments(projectPath, metadata, query.maxBytes)
-      for document in documents {
-        guard document.content.utf8.count <= query.maxBytes,
-          AttachmentUploadDeclaration.isSafeName(document.fileName),
-          let template = TemplateFileCodec.decode(document.content, origin: document.origin),
-          template.id == query.templateID
-        else { continue }
-        var normalized = template
-        normalized.fileName = document.fileName
-        return .success(RemoteTemplateContent(projectPath: projectPath, template: normalized))
-      }
-      return .failure(.missing)
+      let candidates = try await templateCandidates(
+        projectPath: projectPath, metadata: metadata, maximumBytes: query.maxBytes)
+      let matches = candidates.filter { $0.template.id == query.templateID }
+      guard let assetID = query.assetID else { return .failure(.invalidReference) }
+      let payload = try decodeTemplateAssetID(assetID)
+      guard payload.projectIdentity == RemoteAssetIdentity.project(projectPath, metadata),
+        payload.templateID == query.templateID
+      else { return .failure(.invalidReference) }
+      guard
+        let selected = matches.first(where: {
+          $0.originKey == payload.origin && $0.fileName == payload.fileName
+            && $0.sha256 == payload.sha256
+        })
+      else { return .failure(.invalidReference) }
+      return .success(
+        RemoteTemplateContent(projectPath: projectPath, template: selected.template))
     } catch let error as RemoteAssetError {
       return .failure(error)
     } catch {
@@ -224,18 +310,21 @@ public actor RemoteAssetStore {
   ) -> Result<AttachmentUploadTicket, RemoteAssetError> {
     expireTransfers()
     guard metadata.capabilities.attachments else { return .failure(.unsupported) }
-    let key = nodeKey(projectPath: projectPath, metadata: metadata, nodeID: nodeID)
-    let activeCount = transfers.values.filter {
-      $0.projectPath == projectPath && $0.nodeID == nodeID
-    }.count
-    guard
-      existingCount + activeCount + (stagedCounts[key] ?? 0)
-        < AttachmentUploadDeclaration.maximumFilesPerNode
-    else {
-      return .failure(.tooManyAttachments)
-    }
     do {
       let declaration = try declaration.validated()
+      let key = nodeKey(projectPath: projectPath, metadata: metadata, nodeID: nodeID)
+      if let draft = drafts[key], draft.owner != owner { return .failure(.unauthorized) }
+      let activeCount = allTransfers.filter {
+        $0.projectPath == projectPath && $0.metadata.location == metadata.location
+          && $0.nodeID == nodeID
+      }.count
+      guard
+        existingCount + activeCount + (drafts[key]?.names.count ?? 0)
+          < AttachmentUploadDeclaration.maximumFilesPerNode
+      else { return .failure(.tooManyAttachments) }
+      guard
+        reserve(owner: owner, project: projectKey(projectPath, metadata), size: declaration.size)
+      else { return .failure(.resourceExhausted) }
       let id = UUID()
       let expiresAt = now().addingTimeInterval(Self.transferLifetime)
       transfers[id] = Transfer(
@@ -251,6 +340,19 @@ public actor RemoteAssetStore {
     }
   }
 
+  public func context(
+    owner: UUID, transferID: UUID
+  ) -> Result<AttachmentTransferContext, RemoteAssetError> {
+    expireTransfers()
+    let transfer =
+      transfers[transferID] ?? finalizations[transferID]?.transfer
+      ?? pendingDeliveries[transferID]?.transfer
+    guard let transfer, transfer.owner == owner else { return .failure(.unknownTransfer) }
+    return .success(
+      AttachmentTransferContext(
+        projectPath: transfer.projectPath, metadata: transfer.metadata, nodeID: transfer.nodeID))
+  }
+
   public func append(
     owner: UUID, transferID: UUID, offset: Int, data: Data
   ) -> Result<AttachmentUploadProgress, RemoteAssetError> {
@@ -258,12 +360,17 @@ public actor RemoteAssetStore {
     guard var transfer = transfers[transferID], transfer.owner == owner else {
       return .failure(.unknownTransfer)
     }
-    guard data.count <= Self.maximumChunkBytes,
-      offset == transfer.bytes.count,
-      transfer.bytes.count + data.count <= transfer.declaration.size
+    let next = transfer.bytes.count.addingReportingOverflow(data.count)
+    guard data.count <= Self.maximumChunkBytes, offset == transfer.bytes.count,
+      !next.overflow, next.partialValue <= transfer.declaration.size
     else {
       return .failure(data.count > Self.maximumChunkBytes ? .oversized : .invalidOffset)
     }
+    guard
+      reserveBuffered(
+        owner: owner, project: projectKey(transfer.projectPath, transfer.metadata),
+        bytes: data.count)
+    else { return .failure(.resourceExhausted) }
     transfer.bytes.append(data)
     transfers[transferID] = transfer
     return .success(
@@ -277,74 +384,173 @@ public actor RemoteAssetStore {
     guard let transfer = transfers[transferID], transfer.owner == owner else {
       return .failure(.unknownTransfer)
     }
+    transfers.removeValue(forKey: transferID)
     guard transfer.bytes.count == transfer.declaration.size else {
+      transfers[transferID] = transfer
       return .failure(.invalidOffset)
     }
     guard Self.sha256Hex(transfer.bytes) == transfer.declaration.sha256.lowercased() else {
-      transfers.removeValue(forKey: transferID)
+      release(transfer)
       return .failure(.hashMismatch)
     }
-    do {
-      _ = try await transport.stageAttachment(
+    let transport = self.transport
+    let task = Task {
+      try Task.checkCancellation()
+      return try await transport.stageAttachment(
         transfer.projectPath, transfer.metadata, transfer.nodeID, transfer.declaration.name,
         transfer.bytes)
-      let reference = try makeReference(
-        projectPath: transfer.projectPath, metadata: transfer.metadata, nodeID: transfer.nodeID,
-        declaration: transfer.declaration)
-      stagedCounts[
-        nodeKey(
-          projectPath: transfer.projectPath, metadata: transfer.metadata, nodeID: transfer.nodeID),
-        default: 0
-      ] += 1
-      transfers.removeValue(forKey: transferID)
-      return .success(
-        PromptAttachment(path: reference, name: transfer.declaration.name))
-    } catch {
-      transfers.removeValue(forKey: transferID)
+    }
+    finalizations[transferID] = Finalization(
+      transfer: transfer, task: task, cancelled: false)
+    let result = await task.result
+    guard let finalization = finalizations.removeValue(forKey: transferID) else {
+      return .failure(.unknownTransfer)
+    }
+    release(finalization.transfer)
+    if finalization.cancelled || Task.isCancelled {
+      var cleaned = true
+      if case .success = result {
+        cleaned = await removePublished(finalization.transfer)
+      }
+      if !cleaned { cleanupPending[transferID] = finalization.transfer }
+      cancellationOutcomes[transferID] = cleaned
+      return .failure(cleaned ? .unknownTransfer : .transportFailure)
+    }
+    switch result {
+    case .failure(let error):
+      if error is CancellationError { return .failure(.unknownTransfer) }
       return .failure(.transportFailure)
+    case .success:
+      do {
+        let reference = try makeReference(
+          owner: owner, projectPath: transfer.projectPath, metadata: transfer.metadata,
+          nodeID: transfer.nodeID, declaration: transfer.declaration)
+        let attachment = PromptAttachment(path: reference, name: transfer.declaration.name)
+        pendingDeliveries[transferID] = PendingDelivery(
+          transfer: transfer, attachment: attachment)
+        return .success(attachment)
+      } catch {
+        _ = await removePublished(transfer)
+        return .failure(.transportFailure)
+      }
     }
   }
 
-  public func cancel(owner: UUID, transferID: UUID) -> Result<Void, RemoteAssetError> {
-    guard let transfer = transfers[transferID], transfer.owner == owner else {
-      return .failure(.unknownTransfer)
+  public func completeDelivery(
+    owner: UUID, deliveryID: UUID, delivered: Bool
+  ) async -> Result<Void, RemoteAssetError> {
+    guard let pending = pendingDeliveries[deliveryID], pending.transfer.owner == owner
+    else { return .failure(.unknownTransfer) }
+    pendingDeliveries.removeValue(forKey: deliveryID)
+    if delivered {
+      let key = nodeKey(
+        projectPath: pending.transfer.projectPath, metadata: pending.transfer.metadata,
+        nodeID: pending.transfer.nodeID)
+      var draft = drafts[key] ?? DraftState(owner: owner, names: [])
+      guard draft.owner == owner else {
+        _ = await removePublished(pending.transfer)
+        return .failure(.unauthorized)
+      }
+      draft.names.insert(pending.transfer.declaration.name)
+      drafts[key] = draft
+    } else {
+      guard await removePublished(pending.transfer) else {
+        cleanupPending[deliveryID] = pending.transfer
+        return .failure(.transportFailure)
+      }
     }
-    transfers.removeValue(forKey: transferID)
     return .success(())
   }
 
-  public func disconnected(owner: UUID) {
-    transfers = transfers.filter { $0.value.owner != owner }
-  }
-
-  public func consumed(projectPath: String, metadata: ProjectMetadata, nodeID: UUID) {
-    stagedCounts.removeValue(
-      forKey: nodeKey(projectPath: projectPath, metadata: metadata, nodeID: nodeID))
-  }
-
-  public func discard(
-    owner: UUID, projectPath: String, metadata: ProjectMetadata, nodeID: UUID
-  ) async {
-    transfers = transfers.filter {
-      !($0.value.owner == owner && $0.value.projectPath == projectPath && $0.value.nodeID == nodeID)
+  public func cancel(owner: UUID, transferID: UUID) async -> Result<Void, RemoteAssetError> {
+    if let transfer = transfers[transferID], transfer.owner == owner {
+      transfers.removeValue(forKey: transferID)
+      release(transfer)
+      return .success(())
     }
-    stagedCounts.removeValue(
-      forKey: nodeKey(projectPath: projectPath, metadata: metadata, nodeID: nodeID))
-    await transport.discardAttachments(projectPath, metadata, nodeID)
+    if var finalization = finalizations[transferID], finalization.transfer.owner == owner {
+      finalization.cancelled = true
+      finalizations[transferID] = finalization
+      finalization.task.cancel()
+      _ = await finalization.task.result
+      if let remaining = finalizations.removeValue(forKey: transferID) {
+        release(remaining.transfer)
+        guard await removePublished(remaining.transfer) else {
+          cleanupPending[transferID] = remaining.transfer
+          return .failure(.transportFailure)
+        }
+      } else if cancellationOutcomes.removeValue(forKey: transferID) == false {
+        return .failure(.transportFailure)
+      }
+      cancellationOutcomes.removeValue(forKey: transferID)
+      return .success(())
+    }
+    if let pending = pendingDeliveries[transferID], pending.transfer.owner == owner {
+      pendingDeliveries.removeValue(forKey: transferID)
+      guard await removePublished(pending.transfer) else {
+        cleanupPending[transferID] = pending.transfer
+        return .failure(.transportFailure)
+      }
+      return .success(())
+    }
+    if let transfer = cleanupPending[transferID], transfer.owner == owner {
+      guard await removePublished(transfer) else { return .failure(.transportFailure) }
+      cleanupPending.removeValue(forKey: transferID)
+      cancellationOutcomes.removeValue(forKey: transferID)
+      return .success(())
+    }
+    return .failure(.unknownTransfer)
   }
 
-  public func validate(
-    _ attachments: [PromptAttachment], projectPath: String, metadata: ProjectMetadata, nodeID: UUID
+  public func disconnected(owner: UUID) async {
+    let ids = Set(
+      transfers.filter { $0.value.owner == owner }.map(\.key)
+        + finalizations.filter { $0.value.transfer.owner == owner }.map(\.key)
+        + pendingDeliveries.filter { $0.value.transfer.owner == owner }.map(\.key)
+        + cleanupPending.filter { $0.value.owner == owner }.map(\.key))
+    for id in ids { _ = await cancel(owner: owner, transferID: id) }
+    for id in cleanupPending.filter({ $0.value.owner == owner }).map(\.key) {
+      _ = await cancel(owner: owner, transferID: id)
+    }
+    let draftKeys = drafts.filter { $0.value.owner == owner }.map(\.key)
+    for key in draftKeys {
+      guard let draft = drafts.removeValue(forKey: key),
+        let context = parseDraftKey(key)
+      else { continue }
+      _ = draft
+      await transport.discardAttachments(
+        context.projectPath, context.metadata, context.nodeID)
+    }
+  }
+
+  public func validateForCreate(
+    _ attachments: [PromptAttachment], owner: UUID, projectPath: String,
+    metadata: ProjectMetadata, nodeID: UUID, allowsLegacyLocalPaths: Bool
   ) -> Result<Void, RemoteAssetError> {
     guard attachments.count <= AttachmentUploadDeclaration.maximumFilesPerNode else {
       return .failure(.tooManyAttachments)
     }
+    let key = nodeKey(projectPath: projectPath, metadata: metadata, nodeID: nodeID)
+    guard
+      !allTransfers.contains(where: {
+        $0.projectPath == projectPath && $0.metadata.location == metadata.location
+          && $0.nodeID == nodeID
+      })
+    else { return .failure(.invalidReference) }
+    if let draft = drafts[key], draft.owner != owner { return .failure(.unauthorized) }
     for attachment in attachments {
-      guard let payload = try? decodeReference(attachment.path),
-        payload.projectIdentity == RemoteAssetIdentity.project(projectPath, metadata),
-        payload.nodeID == nodeID,
-        payload.name == attachment.fileName
-      else { return .failure(.invalidReference) }
+      if attachment.isOpaqueReference {
+        guard let payload = try? decodeReference(attachment.path),
+          payload.projectIdentity == RemoteAssetIdentity.project(projectPath, metadata),
+          payload.nodeID == nodeID, payload.name == attachment.fileName,
+          payload.draftOwner == owner
+        else { return .failure(.invalidReference) }
+      } else {
+        guard allowsLegacyLocalPaths,
+          validateLegacyPath(
+            attachment, projectPath: projectPath, metadata: metadata, nodeID: nodeID)
+        else { return .failure(.invalidReference) }
+      }
     }
     return .success(())
   }
@@ -353,10 +559,16 @@ public actor RemoteAssetStore {
     for attachment: PromptAttachment, projectPath: String, nodeID: UUID,
     metadata: ProjectMetadata
   ) async -> Result<String, RemoteAssetError> {
+    if !attachment.isOpaqueReference {
+      guard
+        validateLegacyPath(
+          attachment, projectPath: projectPath, metadata: metadata, nodeID: nodeID)
+      else { return .failure(.invalidReference) }
+      return .success(URL(fileURLWithPath: attachment.path).standardizedFileURL.path)
+    }
     guard let payload = try? decodeReference(attachment.path),
       payload.projectIdentity == RemoteAssetIdentity.project(projectPath, metadata),
-      payload.nodeID == nodeID,
-      payload.name == attachment.fileName
+      payload.nodeID == nodeID, payload.name == attachment.fileName
     else { return .failure(.invalidReference) }
     do {
       return .success(
@@ -369,28 +581,16 @@ public actor RemoteAssetStore {
     }
   }
 
-  public func retainOnly(
-    _ attachments: [PromptAttachment], projectPath: String, metadata: ProjectMetadata,
-    nodeID: UUID
+  public func commitCreate(
+    _ attachments: [PromptAttachment], owner: UUID, projectPath: String,
+    metadata: ProjectMetadata, nodeID: UUID
   ) async -> Result<Void, RemoteAssetError> {
-    var names: Set<String> = []
-    for attachment in attachments {
-      guard
-        let payload = try? decodeReference(attachment.path),
-        payload.projectIdentity == RemoteAssetIdentity.project(projectPath, metadata),
-        payload.nodeID == nodeID,
-        payload.name == attachment.fileName
-      else { return .failure(.invalidReference) }
-      names.insert(payload.name)
-    }
+    let key = nodeKey(projectPath: projectPath, metadata: metadata, nodeID: nodeID)
+    if let draft = drafts[key], draft.owner != owner { return .failure(.unauthorized) }
+    let names = Set(attachments.map(\.fileName))
     do {
       try await transport.retainAttachments(projectPath, metadata, nodeID, names)
-      let key = nodeKey(projectPath: projectPath, metadata: metadata, nodeID: nodeID)
-      if names.isEmpty {
-        stagedCounts.removeValue(forKey: key)
-      } else {
-        stagedCounts[key] = names.count
-      }
+      drafts.removeValue(forKey: key)
       return .success(())
     } catch let error as RemoteAssetError {
       return .failure(error)
@@ -399,54 +599,253 @@ public actor RemoteAssetStore {
     }
   }
 
-  public func discardDraftIfStaged(
-    projectPath: String, metadata: ProjectMetadata, nodeID: UUID
+  public func discardDraft(
+    owner: UUID, projectPath: String, metadata: ProjectMetadata, nodeID: UUID
   ) async -> Result<Void, RemoteAssetError> {
     let key = nodeKey(projectPath: projectPath, metadata: metadata, nodeID: nodeID)
-    guard stagedCounts[key] != nil else { return .success(()) }
+    guard let draft = drafts[key] else { return .success(()) }
+    guard draft.owner == owner else { return .failure(.unauthorized) }
+    drafts.removeValue(forKey: key)
     await transport.discardAttachments(projectPath, metadata, nodeID)
-    stagedCounts.removeValue(forKey: key)
     return .success(())
+  }
+
+  public func discardNode(
+    projectPath: String, metadata: ProjectMetadata, nodeID: UUID
+  ) async {
+    drafts.removeValue(
+      forKey: nodeKey(projectPath: projectPath, metadata: metadata, nodeID: nodeID))
+    await transport.discardAttachments(projectPath, metadata, nodeID)
+  }
+
+  public func resourceUsage() -> RemoteAssetUsageSnapshot {
+    RemoteAssetUsageSnapshot(
+      activeTransfers: globalUsage.count, declaredBytes: globalUsage.declaredBytes,
+      bufferedBytes: globalUsage.bufferedBytes,
+      pendingDeliveries: pendingDeliveries.count + cleanupPending.count)
+  }
+
+  private var allTransfers: [Transfer] {
+    Array(transfers.values) + finalizations.values.map(\.transfer)
+      + pendingDeliveries.values.map(\.transfer)
+  }
+
+  private func templateCandidates(
+    projectPath: String, metadata: ProjectMetadata, maximumBytes: Int
+  ) async throws -> [TemplateCandidate] {
+    let documents = try await transport.templateDocuments(projectPath, metadata, maximumBytes)
+    return documents.compactMap { document in
+      guard AttachmentUploadDeclaration.isSafeName(document.fileName),
+        document.fileName.hasSuffix(".md"), document.content.utf8.count <= maximumBytes,
+        let decoded = TemplateFileCodec.decode(document.content, origin: document.origin)
+      else { return nil }
+      var template = decoded
+      template.fileName = document.fileName
+      let originKey: String
+      switch document.origin {
+      case .home: originKey = "home"
+      case .project: originKey = "project"
+      }
+      return TemplateCandidate(
+        template: template, fileName: document.fileName, originKey: originKey,
+        sha256: Self.sha256Hex(Data(document.content.utf8)))
+    }
   }
 
   private func expireTransfers() {
     let current = now()
-    transfers = transfers.filter { $0.value.expiresAt > current }
+    for (id, transfer) in transfers where transfer.expiresAt <= current {
+      transfers.removeValue(forKey: id)
+      release(transfer)
+    }
+  }
+
+  private func reserve(owner: UUID, project: String, size: Int) -> Bool {
+    let ownerValue = ownerUsage[owner] ?? Usage()
+    let projectValue = projectUsage[project] ?? Usage()
+    guard ownerValue.count < Self.maximumActiveTransfersPerOwner,
+      projectValue.count < Self.maximumActiveTransfersPerProject,
+      globalUsage.count < Self.maximumActiveTransfersGlobal,
+      canAdd(ownerValue.declaredBytes, size, limit: Self.maximumDeclaredBytesPerOwner),
+      canAdd(projectValue.declaredBytes, size, limit: Self.maximumDeclaredBytesPerProject),
+      canAdd(globalUsage.declaredBytes, size, limit: Self.maximumDeclaredBytesGlobal)
+    else { return false }
+    ownerUsage[owner] = adding(ownerValue, count: 1, declared: size, buffered: 0)
+    projectUsage[project] = adding(projectValue, count: 1, declared: size, buffered: 0)
+    globalUsage = adding(globalUsage, count: 1, declared: size, buffered: 0)
+    return true
+  }
+
+  private func reserveBuffered(owner: UUID, project: String, bytes: Int) -> Bool {
+    let ownerValue = ownerUsage[owner] ?? Usage()
+    let projectValue = projectUsage[project] ?? Usage()
+    guard canAdd(ownerValue.bufferedBytes, bytes, limit: Self.maximumBufferedBytesPerOwner),
+      canAdd(projectValue.bufferedBytes, bytes, limit: Self.maximumBufferedBytesPerProject),
+      canAdd(globalUsage.bufferedBytes, bytes, limit: Self.maximumBufferedBytesGlobal)
+    else { return false }
+    ownerUsage[owner] = adding(ownerValue, count: 0, declared: 0, buffered: bytes)
+    projectUsage[project] = adding(projectValue, count: 0, declared: 0, buffered: bytes)
+    globalUsage = adding(globalUsage, count: 0, declared: 0, buffered: bytes)
+    return true
+  }
+
+  private func release(_ transfer: Transfer) {
+    let project = projectKey(transfer.projectPath, transfer.metadata)
+    ownerUsage[transfer.owner] = subtracting(
+      ownerUsage[transfer.owner] ?? Usage(), count: 1, declared: transfer.declaration.size,
+      buffered: transfer.bytes.count)
+    projectUsage[project] = subtracting(
+      projectUsage[project] ?? Usage(), count: 1, declared: transfer.declaration.size,
+      buffered: transfer.bytes.count)
+    globalUsage = subtracting(
+      globalUsage, count: 1, declared: transfer.declaration.size,
+      buffered: transfer.bytes.count)
+    if ownerUsage[transfer.owner] == nil || isEmpty(ownerUsage[transfer.owner]!) {
+      ownerUsage.removeValue(forKey: transfer.owner)
+    }
+    if projectUsage[project] == nil || isEmpty(projectUsage[project]!) {
+      projectUsage.removeValue(forKey: project)
+    }
+  }
+
+  private func adding(_ usage: Usage, count: Int, declared: Int, buffered: Int) -> Usage {
+    Usage(
+      count: usage.count + count, declaredBytes: usage.declaredBytes + declared,
+      bufferedBytes: usage.bufferedBytes + buffered)
+  }
+
+  private func subtracting(_ usage: Usage, count: Int, declared: Int, buffered: Int) -> Usage {
+    Usage(
+      count: max(0, usage.count - count),
+      declaredBytes: max(0, usage.declaredBytes - declared),
+      bufferedBytes: max(0, usage.bufferedBytes - buffered))
+  }
+
+  private func isEmpty(_ usage: Usage) -> Bool {
+    usage.count == 0 && usage.declaredBytes == 0 && usage.bufferedBytes == 0
+  }
+
+  private func canAdd(_ lhs: Int, _ rhs: Int, limit: Int) -> Bool {
+    let value = lhs.addingReportingOverflow(rhs)
+    return !value.overflow && value.partialValue <= limit
+  }
+
+  private func projectKey(_ path: String, _ metadata: ProjectMetadata) -> String {
+    RemoteAssetIdentity.project(path, metadata)
   }
 
   private func nodeKey(projectPath: String, metadata: ProjectMetadata, nodeID: UUID) -> String {
-    "\(RemoteAssetIdentity.project(projectPath, metadata)):\(nodeID.uuidString)"
+    "\(projectPath)\u{0}\(metadata.location.rawValue)\u{0}\(nodeID.uuidString)"
+  }
+
+  private func parseDraftKey(_ key: String) -> AttachmentTransferContext? {
+    let parts = key.split(separator: "\u{0}", omittingEmptySubsequences: false)
+    guard parts.count == 3, let location = ProjectLocationKind(rawValue: String(parts[1])),
+      let nodeID = UUID(uuidString: String(parts[2]))
+    else { return nil }
+    let metadata: ProjectMetadata
+    switch location {
+    case .local: metadata = .local
+    case .ssh: metadata = .ssh
+    case .codespace: metadata = .codespace
+    }
+    return AttachmentTransferContext(
+      projectPath: String(parts[0]), metadata: metadata, nodeID: nodeID)
   }
 
   private func makeReference(
-    projectPath: String, metadata: ProjectMetadata, nodeID: UUID,
+    owner: UUID, projectPath: String, metadata: ProjectMetadata, nodeID: UUID,
     declaration: AttachmentUploadDeclaration
   ) throws -> String {
-    guard let authenticationKey else { throw RemoteAssetError.transportFailure }
     let payload = ReferencePayload(
       version: 1, projectIdentity: RemoteAssetIdentity.project(projectPath, metadata),
-      nodeID: nodeID,
-      name: declaration.name, size: declaration.size, sha256: declaration.sha256.lowercased())
-    let data = try JSONEncoder().encode(payload)
-    let signature = Self.hmacSHA256(key: authenticationKey, message: data)
-    return
-      "\(PromptAttachment.opaqueReferencePrefix)\(Self.base64URL(data)).\(Self.base64URL(signature))"
+      nodeID: nodeID, name: declaration.name, size: declaration.size,
+      sha256: declaration.sha256.lowercased(), draftOwner: owner)
+    return try authenticatedValue(prefix: PromptAttachment.opaqueReferencePrefix, payload: payload)
   }
 
   private func decodeReference(_ value: String) throws -> ReferencePayload {
-    guard let authenticationKey else { throw RemoteAssetError.invalidReference }
-    let prefix = PromptAttachment.opaqueReferencePrefix
-    guard value.hasPrefix(prefix) else { throw RemoteAssetError.invalidReference }
+    let decoded: ReferencePayload = try decodeAuthenticatedValue(
+      value, prefix: PromptAttachment.opaqueReferencePrefix)
+    guard decoded.version == 1, AttachmentUploadDeclaration.isSafeName(decoded.name),
+      decoded.size > 0, decoded.size <= AttachmentUploadDeclaration.maximumFileBytes,
+      decoded.sha256.count == 64, decoded.sha256.allSatisfy(\.isHexDigit)
+    else { throw RemoteAssetError.invalidReference }
+    return decoded
+  }
+
+  private func makeTemplateAssetID(
+    projectPath: String, metadata: ProjectMetadata, candidate: TemplateCandidate
+  ) throws -> String {
+    try authenticatedValue(
+      prefix: "graphcode-template:v1:",
+      payload: TemplatePayload(
+        version: 1, projectIdentity: RemoteAssetIdentity.project(projectPath, metadata),
+        templateID: candidate.template.id, origin: candidate.originKey,
+        fileName: candidate.fileName, sha256: candidate.sha256))
+  }
+
+  private func decodeTemplateAssetID(_ value: String) throws -> TemplatePayload {
+    let decoded: TemplatePayload = try decodeAuthenticatedValue(
+      value, prefix: "graphcode-template:v1:")
+    guard decoded.version == 1, ["home", "project"].contains(decoded.origin),
+      AttachmentUploadDeclaration.isSafeName(decoded.fileName),
+      decoded.sha256.count == 64, decoded.sha256.allSatisfy(\.isHexDigit)
+    else { throw RemoteAssetError.invalidReference }
+    return decoded
+  }
+
+  private func authenticatedValue<T: Encodable>(prefix: String, payload: T) throws -> String {
+    guard let authenticationKey else { throw RemoteAssetError.transportFailure }
+    let data = try JSONEncoder().encode(payload)
+    let signature = Self.hmacSHA256(key: authenticationKey, message: data)
+    return "\(prefix)\(Self.base64URL(data)).\(Self.base64URL(signature))"
+  }
+
+  private func decodeAuthenticatedValue<T: Decodable>(
+    _ value: String, prefix: String
+  ) throws -> T {
+    guard let authenticationKey, value.hasPrefix(prefix) else {
+      throw RemoteAssetError.invalidReference
+    }
     let parts = value.dropFirst(prefix.count).split(
       separator: ".", omittingEmptySubsequences: false)
     guard parts.count == 2, let payload = Self.decodeBase64URL(String(parts[0])),
       let signature = Self.decodeBase64URL(String(parts[1])),
       Self.constantTimeEqual(signature, Self.hmacSHA256(key: authenticationKey, message: payload)),
-      let decoded = try? JSONDecoder().decode(ReferencePayload.self, from: payload),
-      decoded.version == 1, AttachmentUploadDeclaration.isSafeName(decoded.name),
-      decoded.size > 0, decoded.size <= AttachmentUploadDeclaration.maximumFileBytes
+      let decoded = try? JSONDecoder().decode(T.self, from: payload)
     else { throw RemoteAssetError.invalidReference }
     return decoded
+  }
+
+  private func validateLegacyPath(
+    _ attachment: PromptAttachment, projectPath: String, metadata: ProjectMetadata, nodeID: UUID
+  ) -> Bool {
+    guard metadata.location == .local,
+      AttachmentUploadDeclaration.isSafeName(attachment.fileName)
+    else { return false }
+    let directory = attachmentsDirectory(projectPath, nodeID).standardizedFileURL
+    let candidate = URL(fileURLWithPath: attachment.path).standardizedFileURL
+    guard candidate.lastPathComponent == attachment.fileName,
+      candidate.deletingLastPathComponent() == directory,
+      (try? SafeLocalFile.validateDirectory(directory)) != nil,
+      (try? SafeLocalFile.read(
+        candidate, maximumBytes: AttachmentUploadDeclaration.maximumFileBytes)) != nil
+    else { return false }
+    return true
+  }
+
+  private func removePublished(_ transfer: Transfer) async -> Bool {
+    for attempt in 0..<3 {
+      do {
+        try await transport.removeAttachment(
+          transfer.projectPath, transfer.metadata, transfer.nodeID, transfer.declaration.name)
+        return true
+      } catch {
+        if attempt < 2 { await Task.yield() }
+      }
+    }
+    return false
   }
 
   private static func sha256Hex(_ data: Data) -> String {
@@ -563,11 +962,7 @@ enum LocalRemoteAssetHost {
   ) throws -> String {
     let directory = NodeMemory.attachmentsDirectory(forProjectPath: projectPath, nodeID: nodeID)
     try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-    let directoryValues = try directory.resourceValues(
-      forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
-    guard directoryValues.isDirectory == true, directoryValues.isSymbolicLink != true else {
-      throw RemoteAssetError.unsafeFile
-    }
+    try SafeLocalFile.validateDirectory(directory)
     let destination = directory.appendingPathComponent(name)
     if FileManager.default.fileExists(atPath: destination.path) {
       throw RemoteAssetError.unsafeFile
@@ -584,16 +979,24 @@ enum LocalRemoteAssetHost {
       at: NodeMemory.attachmentsDirectory(forProjectPath: projectPath, nodeID: nodeID))
   }
 
+  static func removeAttachment(projectPath: String, nodeID: UUID, name: String) throws {
+    let directory = NodeMemory.attachmentsDirectory(forProjectPath: projectPath, nodeID: nodeID)
+    let destination = directory.appendingPathComponent(name)
+    guard FileManager.default.fileExists(atPath: destination.path) else { return }
+    _ = try SafeLocalFile.read(
+      destination, maximumBytes: AttachmentUploadDeclaration.maximumFileBytes)
+    try FileManager.default.removeItem(at: destination)
+    if (try? FileManager.default.contentsOfDirectory(atPath: directory.path).isEmpty) == true {
+      try? FileManager.default.removeItem(at: directory)
+    }
+  }
+
   static func resolveAttachment(
     projectPath: String, nodeID: UUID, name: String, size: Int, sha256: String
   ) throws -> String {
     let directory = NodeMemory.attachmentsDirectory(forProjectPath: projectPath, nodeID: nodeID)
     let destination = directory.appendingPathComponent(name)
-    let directoryValues = try directory.resourceValues(
-      forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
-    guard directoryValues.isDirectory == true, directoryValues.isSymbolicLink != true else {
-      throw RemoteAssetError.unsafeFile
-    }
+    try SafeLocalFile.validateDirectory(directory)
     let data = try SafeLocalFile.read(destination, maximumBytes: size)
     guard data.count == size, RemoteAssetDigest.sha256Hex(data) == sha256 else {
       throw RemoteAssetError.hashMismatch
@@ -604,10 +1007,7 @@ enum LocalRemoteAssetHost {
   static func retainAttachments(projectPath: String, nodeID: UUID, names: Set<String>) throws {
     let directory = NodeMemory.attachmentsDirectory(forProjectPath: projectPath, nodeID: nodeID)
     guard FileManager.default.fileExists(atPath: directory.path) else { return }
-    let values = try directory.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
-    guard values.isDirectory == true, values.isSymbolicLink != true else {
-      throw RemoteAssetError.unsafeFile
-    }
+    try SafeLocalFile.validateDirectory(directory)
     let entries = try FileManager.default.contentsOfDirectory(
       at: directory,
       includingPropertiesForKeys: [.isRegularFileKey, .isSymbolicLinkKey],
@@ -730,6 +1130,30 @@ private enum SSHRemoteAssetHost {
       input: nil, maximumOutputBytes: 1024)
   }
 
+  static func removeAttachment(
+    projectPath: String, locationKind: ProjectLocationKind, nodeID: UUID, name: String
+  ) async throws {
+    guard let location = RemoteProjectLocation.parse(projectPath: projectPath) else {
+      throw RemoteAssetError.unauthorized
+    }
+    let identity = RemoteAssetIdentity.project(projectPath, locationKind)
+    let script = """
+      import os,stat,sys
+      root=os.path.expanduser(os.path.join("~/.graphcode/staging",sys.argv[1],sys.argv[2]))
+      p=os.path.join(root,sys.argv[3])
+      if os.path.lexists(p):
+       s=os.lstat(p)
+       if not stat.S_ISREG(s.st_mode) or stat.S_ISLNK(s.st_mode) or s.st_nlink != 1: raise SystemExit(2)
+       os.unlink(p)
+      try:
+       if not os.listdir(root): os.rmdir(root)
+      except OSError: pass
+      """
+    _ = try await run(
+      location: location, script: script, arguments: [identity, nodeID.uuidString, name],
+      input: nil, maximumOutputBytes: 1024)
+  }
+
   static func resolveAttachment(
     projectPath: String, locationKind: ProjectLocationKind, nodeID: UUID, name: String, size: Int,
     sha256: String
@@ -819,37 +1243,41 @@ private enum SSHRemoteAssetHost {
       let inputPipe = input.map { _ in Pipe() }
       process.standardInput = inputPipe ?? FileHandle.nullDevice
       try process.run()
-      let timeoutTask = Task {
-        try? await Task.sleep(for: commandTimeout)
-        if process.isRunning { process.terminate() }
-      }
-      defer { timeoutTask.cancel() }
-      let outputTask = Task.detached {
-        try Self.boundedRead(output.fileHandleForReading, maximumBytes: maximumOutputBytes)
-      }
-      let errorTask = Task.detached {
-        try Self.boundedRead(errors.fileHandleForReading, maximumBytes: 64 * 1024)
-      }
-      do {
-        if let input, let inputPipe {
-          try inputPipe.fileHandleForWriting.write(contentsOf: input)
-          try inputPipe.fileHandleForWriting.close()
+      return try await withTaskCancellationHandler {
+        let timeoutTask = Task {
+          try? await Task.sleep(for: commandTimeout)
+          if process.isRunning { process.terminate() }
         }
-        let data = try await outputTask.value
-        _ = try await errorTask.value
-        process.waitUntilExit()
-        guard process.terminationStatus == 0 else {
+        defer { timeoutTask.cancel() }
+        let outputTask = Task.detached {
+          try Self.boundedRead(output.fileHandleForReading, maximumBytes: maximumOutputBytes)
+        }
+        let errorTask = Task.detached {
+          try Self.boundedRead(errors.fileHandleForReading, maximumBytes: 64 * 1024)
+        }
+        do {
+          if let input, let inputPipe {
+            try inputPipe.fileHandleForWriting.write(contentsOf: input)
+            try inputPipe.fileHandleForWriting.close()
+          }
+          let data = try await outputTask.value
+          _ = try await errorTask.value
+          process.waitUntilExit()
+          guard process.terminationStatus == 0 else {
+            throw RemoteAssetError.transportFailure
+          }
+          return data
+        } catch {
+          if process.isRunning { process.terminate() }
+          process.waitUntilExit()
+          outputTask.cancel()
+          errorTask.cancel()
+          _ = try? await outputTask.value
+          _ = try? await errorTask.value
           throw RemoteAssetError.transportFailure
         }
-        return data
-      } catch {
+      } onCancel: {
         if process.isRunning { process.terminate() }
-        process.waitUntilExit()
-        outputTask.cancel()
-        errorTask.cancel()
-        _ = try? await outputTask.value
-        _ = try? await errorTask.value
-        throw RemoteAssetError.transportFailure
       }
     }.value
   }

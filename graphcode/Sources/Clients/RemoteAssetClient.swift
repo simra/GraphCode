@@ -27,7 +27,8 @@ extension RemoteAssetClient: DependencyKey {
             case .templateContent(let content) = try session.request(
               .readTemplate(
                 projectPath: projectPath,
-                query: RemoteTemplateReadQuery(templateID: metadata.id)))
+                query: RemoteTemplateReadQuery(
+                  templateID: metadata.id, assetID: metadata.assetID)))
           else { return nil }
           return content.template
         }

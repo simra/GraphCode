@@ -38,12 +38,14 @@ public enum DaemonWireErrorCode: String, Codable, Sendable {
   case remoteAssetInvalidBounds
   case remoteAssetInvalidDeclaration
   case remoteAssetTooManyAttachments
+  case remoteAssetResourceExhausted
   case remoteAssetUnknownTransfer
   case remoteAssetExpiredTransfer
   case remoteAssetInvalidOffset
   case remoteAssetOversized
   case remoteAssetHashMismatch
   case remoteAssetInvalidReference
+  case remoteAssetAmbiguousTemplate
   case remoteAssetMissing
   case remoteAssetUnsafeFile
   case remoteAssetTransportFailure

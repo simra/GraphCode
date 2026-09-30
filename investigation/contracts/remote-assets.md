@@ -32,10 +32,10 @@ sequenceDiagram
   D->>D: verify joined project + authoritative capability
   D->>H: bounded list/read regular *.md files
   H-->>D: safe names + bounded UTF-8 documents
-  D->>D: decode and normalize template metadata
-  D-->>C: correlated templateList (no host paths)
-  C->>D: readTemplate(project, opaque UUID, maxBytes)
-  D->>H: repeat bounded authoritative read
+  D->>D: reject duplicate UUIDs; sign origin + name + content digest
+  D-->>C: correlated templateList (metadata + authenticated asset ID)
+  C->>D: readTemplate(project, UUID, authenticated asset ID, maxBytes)
+  D->>H: repeat bounded authoritative read and verify the exact identity
   D-->>C: correlated normalized templateContent
 ```
 
@@ -45,6 +45,11 @@ request limits are rejected or omitted. Local and remote files are opened withou
 following links and validated from the opened handle before bounded reads. Remote process
 stdout and stderr are drained concurrently with hard byte ceilings. Template contents are never replayed, broadcast,
 logged, journaled, or copied into graph snapshots.
+
+The daemon-issued template asset ID binds the authoritative project identity, template
+UUID, project/home origin, safe filename, and content digest. Reads without that identity
+fail closed. Duplicate UUIDs are rejected independent of list order, and a file that
+changes or moves between project and home scope after listing cannot satisfy the read.
 
 ## Attachment upload and launch
 
@@ -64,11 +69,15 @@ sequenceDiagram
   D->>D: verify owner, expiry, size, SHA-256
   D->>H: atomic write to daemon-selected project/node staging
   H-->>D: staged
-  D-->>C: PromptAttachment(opaque authenticated reference, safe name)
+  D->>D: hold provisional publication until response delivery
+  D-->>C: PromptAttachment(opaque authenticated owner-bound reference, safe name)
+  D->>D: commit publication only after response frame succeeds
   C->>D: createNode(NodeDraft.attachments = opaque references)
-  D->>D: verify reference project/node/name authentication
-  C->>D: openNodeSession(project,node)
-  D->>D: resolve references for this authoritative classification
+  D->>D: reject duplicate node ID, then validate references without deleting files
+  D->>D: create node, then retain selected draft files
+  C->>D: attended start / unattended ensure / restart / liveness recovery
+  D->>D: authorize client or trusted daemon authority
+  D->>D: resolve references at the common launch-copy boundary
   D->>L: node copy containing host-local paths
 ```
 
@@ -79,21 +88,48 @@ unknown IDs, cross-client transfer use, hash mismatch, expiry, disconnect, cance
 and oversized chunks fail. Finalization uses a temporary regular file followed by
 atomic no-clobber publication. Existing destinations are never followed or overwritten.
 
+Aggregate reservations prevent many-node exhaustion in addition to the per-file and
+per-node limits:
+
+| Scope                 | Active transfers | Declared bytes | Buffered bytes |
+| --------------------- | ---------------- | -------------- | -------------- |
+| Connection/owner      | 32               | 64 MiB         | 32 MiB         |
+| Authoritative project | 128              | 256 MiB        | 128 MiB        |
+| Daemon                | 256              | 512 MiB        | 256 MiB        |
+
+Count and declared-byte reservations are atomic at begin; buffered bytes are reserved
+before each append. Every terminal path releases the same accounting without wrapping
+integer addition.
+
 The graph persists only the authenticated opaque reference and safe display name.
 Attachment bytes never enter graph JSON, event replay, ordinary broadcasts, recents,
-errors, journals, or dial logs. The launcher resolves a copy of the node, so host paths
-are not written back to the graph. Before node creation, the daemon removes staged files
-whose references were removed from the draft; a discard request is refused for an
-existing graph node. Transfer buffers are removed after finalize, cancel,
-expiry, hash failure, transport failure, or disconnect. Finalized files become node-owned:
-cancelled drafts remove the node staging directory; created nodes retain files until normal
-node-memory cleanup removes that directory after node deletion.
+errors, journals, or dial logs. Attended starts, unattended starts, restart recovery, and
+remote liveness ensures all resolve a launch-only node copy at one daemon boundary.
+Persisted references are never replaced with host paths. A requesting connection must
+already be joined to the canonical project before node lookup; internal recovery uses a
+separate trusted daemon authority.
+
+Finalize transitions atomically out of receiving before host staging begins. Cancel and
+disconnect wait for an in-flight host operation, request transport cancellation where
+supported, and remove any destination published before reference delivery. A failed
+response write rolls publication back. Cleanup is retried and remains explicitly pending
+if retries are exhausted; cancellation never reports success while a later finalize can
+publish.
+
+Create rejects an existing node ID before any file operation. Reference validation is
+non-destructive, and unselected draft files are removed only after successful node
+creation. Failure cleanup is owner-bound to draft files and cannot delete an existing
+node directory. Created-node files remain until normal node-memory cleanup removes them.
 
 ## Compatibility
 
 The contract is additive v2 and advertised by the `remoteAssets` server capability.
-Unknown command/event fields retain normal Codable forward-compatibility behavior. Old
-clients keep their existing local-path behavior against new daemons only for local
-projects. Remote projects reject legacy path attachments. New macOS clients fall back to
-the legacy local template implementation when an older daemon does not advertise v2
-remote assets; remote access fails closed rather than reading a client-local URI.
+Unknown command/event fields retain normal Codable forward-compatibility behavior. V2
+clients must use opaque attachment references and authenticated template asset IDs. The
+narrow v1 local compatibility form accepts only a regular, single-link, non-reparse file
+whose exact safe filename is already inside the authoritative project/node attachment
+directory; containment and file type are checked again at launch. Arbitrary daemon-host
+paths, traversal, remote legacy paths, and links are rejected before graph mutation. New
+macOS clients fall back to the legacy local template implementation when an older daemon
+does not advertise v2 remote assets; remote access fails closed rather than reading a
+client-local URI.

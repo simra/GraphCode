@@ -26,10 +26,12 @@ public struct RemoteTemplateReadQuery: Codable, Equatable, Sendable {
   public static let maximumBytes = 256 * 1024
 
   public var templateID: UUID
+  public var assetID: String?
   public var maxBytes: Int
 
-  public init(templateID: UUID, maxBytes: Int = defaultBytes) {
+  public init(templateID: UUID, assetID: String? = nil, maxBytes: Int = defaultBytes) {
     self.templateID = templateID
+    self.assetID = assetID
     self.maxBytes = maxBytes
   }
 
@@ -45,12 +47,16 @@ public struct RemoteTemplateMetadata: Codable, Equatable, Sendable {
   public var name: String
   public var fileName: String
   public var origin: TemplateOrigin
+  public var assetID: String?
 
-  public init(id: UUID, name: String, fileName: String, origin: TemplateOrigin) {
+  public init(
+    id: UUID, name: String, fileName: String, origin: TemplateOrigin, assetID: String? = nil
+  ) {
     self.id = id
     self.name = name
     self.fileName = fileName
     self.origin = origin
+    self.assetID = assetID
   }
 }
 public struct RemoteTemplateList: Codable, Equatable, Sendable {
@@ -132,18 +138,55 @@ public struct AttachmentUploadProgress: Codable, Equatable, Sendable {
     self.nextOffset = nextOffset
   }
 }
+public struct AttachmentFinalization: Equatable, Sendable {
+  public var deliveryID: UUID
+  public var attachment: PromptAttachment
+
+  public init(deliveryID: UUID, attachment: PromptAttachment) {
+    self.deliveryID = deliveryID
+    self.attachment = attachment
+  }
+}
+public struct AttachmentTransferContext: Equatable, Sendable {
+  public var projectPath: String
+  public var metadata: ProjectMetadata
+  public var nodeID: UUID
+
+  public init(projectPath: String, metadata: ProjectMetadata, nodeID: UUID) {
+    self.projectPath = projectPath
+    self.metadata = metadata
+    self.nodeID = nodeID
+  }
+}
+public struct RemoteAssetUsageSnapshot: Equatable, Sendable {
+  public var activeTransfers: Int
+  public var declaredBytes: Int
+  public var bufferedBytes: Int
+  public var pendingDeliveries: Int
+
+  public init(
+    activeTransfers: Int, declaredBytes: Int, bufferedBytes: Int, pendingDeliveries: Int
+  ) {
+    self.activeTransfers = activeTransfers
+    self.declaredBytes = declaredBytes
+    self.bufferedBytes = bufferedBytes
+    self.pendingDeliveries = pendingDeliveries
+  }
+}
 public enum RemoteAssetError: String, Error, Codable, Equatable, Sendable {
   case unauthorized
   case unsupported
   case invalidBounds
   case invalidDeclaration
   case tooManyAttachments
+  case resourceExhausted
   case unknownTransfer
   case expiredTransfer
   case invalidOffset
   case oversized
   case hashMismatch
   case invalidReference
+  case ambiguousTemplate
   case missing
   case unsafeFile
   case transportFailure
@@ -155,12 +198,14 @@ public enum RemoteAssetError: String, Error, Codable, Equatable, Sendable {
     case .invalidBounds: return "remote asset bounds are outside the supported range"
     case .invalidDeclaration: return "attachment declaration is invalid"
     case .tooManyAttachments: return "the node has reached the attachment count limit"
+    case .resourceExhausted: return "remote asset transfer capacity is exhausted"
     case .unknownTransfer: return "attachment transfer is unknown"
     case .expiredTransfer: return "attachment transfer has expired"
     case .invalidOffset: return "attachment chunks must be contiguous and ordered"
     case .oversized: return "remote asset data exceeds the supported bound"
     case .hashMismatch: return "attachment integrity verification failed"
     case .invalidReference: return "attachment reference is invalid"
+    case .ambiguousTemplate: return "the requested template identity is ambiguous"
     case .missing: return "the requested remote asset is missing"
     case .unsafeFile: return "the requested remote asset is not a safe regular file"
     case .transportFailure: return "the authoritative project host could not be reached"
