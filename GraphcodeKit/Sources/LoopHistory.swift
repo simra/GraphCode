@@ -99,6 +99,15 @@ public struct LoopHistory: Codable, Equatable, Sendable {
     step(by: +1, where: isResolvable)
   }
 
+  public mutating func relocateProject(from sourcePath: String, to destinationPath: String) {
+    entries = entries.map { visit in
+      guard case .loop(let projectPath, let nodeID) = visit, projectPath == sourcePath else {
+        return visit
+      }
+      return .loop(projectPath: destinationPath, nodeID: nodeID)
+    }
+  }
+
   private mutating func step(by offset: Int, where isResolvable: (LoopVisit) -> Bool)
     -> LoopVisit?
   {

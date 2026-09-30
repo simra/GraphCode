@@ -321,6 +321,9 @@ import GraphcodeKit
                   code: .requestFailed,
                   message: "request could not be applied")
               }
+              if result.closeConnectionAfterResponse {
+                await registry.removeConnection(connectionID)
+              }
             }
           } catch {
             try await channel.sendError(
@@ -735,6 +738,9 @@ import GraphcodeKit
                   requestID: requestID,
                   code: .requestFailed,
                   message: "request could not be applied")
+              }
+              if result.closeConnectionAfterResponse {
+                await registry.removeConnection(connectionID)
               }
             }
           } catch {

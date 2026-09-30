@@ -34,6 +34,7 @@ public enum GraphStoreCommandResult: Equatable, Sendable {
   case applied(graph: LoopGraph)
   case rejected(message: String, graph: LoopGraph)
 }
+
 public actor GraphStore {
   public private(set) var graph: LoopGraph
   private let authoritativeProject: ProjectRef
@@ -47,6 +48,7 @@ public actor GraphStore {
   private var commandTail: Task<GraphStoreCommandResult, Never>?
   private var commandTailID: UInt64?
   private var nextCommandID: UInt64 = 0
+  private var relocationLease = false
   // Tests observe actual queue admission instead of guessing with sleeps.
   var queuedCommandSequence: UInt64 { nextCommandID }
   private let onGraphChanged: (@Sendable (LoopGraph) -> Void)?
@@ -794,6 +796,23 @@ public actor GraphStore {
     connectionCapabilities[id] = capabilities
   }
 
+  public func relocationSnapshot() -> (graph: LoopGraph, revision: Int) {
+    enforceRootProjectInvariant()
+    return (graph, revision)
+  }
+
+  public func beginRelocation(expectedRevision: Int) async -> LoopGraph? {
+    _ = await commandTail?.value
+    guard !relocationLease, revision == expectedRevision else { return nil }
+    relocationLease = true
+    enforceRootProjectInvariant()
+    return graph
+  }
+
+  public func endRelocation() {
+    relocationLease = false
+  }
+
   // MARK: - Commands
 
   public func handle(
@@ -803,6 +822,9 @@ public actor GraphStore {
     broadcastErrors: Bool = true,
     v2PayloadLimit: Int? = nil
   ) async -> GraphStoreCommandResult {
+    guard !relocationLease else {
+      return .rejected(message: "project relocation is in progress", graph: graph)
+    }
     // A loop inside a composite addresses itself by its own id; route it through the
     // composite that owns it before previewing or applying the command.
     let command = routeIntoSubGraph(command) ?? command

@@ -33,6 +33,46 @@ function originalGraph() {
 }
 
 describe("appReducer", () => {
+  it("rekeys project selection and recents on relocation convergence", () => {
+    const oldPath = "C:\\work\\old";
+    const newPath = "C:\\work\\new";
+    const state: AppState = {
+      ...initialAppState,
+      graphs: {
+        [oldPath]: {
+          id: "graph",
+          project: { path: oldPath, name: "old" },
+          nodes: [],
+          edges: [],
+        },
+      },
+      recentProjects: [{ path: oldPath, name: "old" }],
+      selectedProjectPath: oldPath,
+    };
+    const relocated = appReducer(state, {
+      type: "envelopeReceived",
+      envelope: {
+        version: 2,
+        kind: "event",
+        sequence: 7,
+        event: {
+          type: "projectRelocated",
+          result: {
+            operationID: "11111111-1111-4111-8111-111111111111",
+            sourcePath: oldPath,
+            destinationPath: newPath,
+            sourceIdentity: "identity",
+            graphRevision: 4,
+            recoveryRequired: false,
+          },
+        },
+      },
+    });
+    expect(relocated.graphs[oldPath]).toBeUndefined();
+    expect(relocated.selectedProjectPath).toBe(newPath);
+    expect(relocated.recentProjects).toEqual([{ path: newPath, name: "new" }]);
+  });
+
   it("surfaces reconnect and resync status without using fixture data", () => {
     const reconnecting = appReducer(initialAppState, {
       type: "connectionStatus",

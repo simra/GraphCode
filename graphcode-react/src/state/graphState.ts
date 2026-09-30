@@ -173,7 +173,33 @@ function applyDaemonEvent(state: AppState, event: DaemonEvent): AppState {
     }
     case "transcriptPage":
     case "nodeResourcePage":
+    case "projectRelocationPrepared":
       return state;
+    case "projectRelocated": {
+      const { sourcePath, destinationPath } = event.result;
+      const graphs = { ...state.graphs };
+      delete graphs[sourcePath];
+      const recentProjects = state.recentProjects.map((project) =>
+        project.path === sourcePath
+          ? {
+              ...project,
+              path: destinationPath,
+              name:
+                destinationPath.split(/[\\/]/).filter(Boolean).at(-1) ??
+                project.name,
+            }
+          : project,
+      );
+      return {
+        ...state,
+        graphs,
+        recentProjects,
+        selectedProjectPath:
+          state.selectedProjectPath === sourcePath
+            ? destinationPath
+            : state.selectedProjectPath,
+      };
+    }
     case "quickChatsListed": {
       const selectedQuickChatId = event.chats.some(
         (chat) => chat.id === state.selectedQuickChatId,

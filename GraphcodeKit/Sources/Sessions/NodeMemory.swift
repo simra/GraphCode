@@ -535,4 +535,25 @@ public enum NodeMemory {
         at: directory(forProjectPath: projectPath, nodeID: nodeID, baseURL: baseURL))
     }
   }
+
+  public static func relocateProjectStorage(
+    from sourcePath: String,
+    to destinationPath: String,
+    baseURL: URL = SupportDirectory.url
+  ) throws {
+    try withStorageLock {
+      let root = baseURL.appendingPathComponent("memory", isDirectory: true)
+      let source = root.appendingPathComponent(
+        projectStorageKey(for: sourcePath), isDirectory: true)
+      let destination = root.appendingPathComponent(
+        projectStorageKey(for: destinationPath), isDirectory: true)
+      let fileManager = FileManager.default
+      guard fileManager.fileExists(atPath: source.path) else { return }
+      guard !fileManager.fileExists(atPath: destination.path) else {
+        throw ProjectRelocationError.recoveryFailed
+      }
+      try fileManager.createDirectory(at: root, withIntermediateDirectories: true)
+      try fileManager.moveItem(at: source, to: destination)
+    }
+  }
 }

@@ -7,6 +7,44 @@ import { decodeEnvelope, ProtocolDecodeError } from "./decode";
 import { MAX_RESOLVED_SESSION_GRACE_MINUTES } from "./domain";
 
 describe("decodeEnvelope", () => {
+  it("decodes relocation capability and correlated result", () => {
+    const operationID = "11111111-1111-4111-8111-111111111111";
+    const hello = decodeEnvelope({
+      version: 2,
+      kind: "hello",
+      supportedVersions: [1, 2],
+      selectedVersion: 2,
+      capabilities: ["projectRelocation"],
+    });
+    expect(hello.kind).toBe("hello");
+    if (hello.kind !== "hello") throw new Error("Expected hello");
+    expect(hello.capabilities).toContain("projectRelocation");
+
+    const response = decodeEnvelope({
+      version: 2,
+      kind: "response",
+      requestID: operationID,
+      event: {
+        projectRelocated: {
+          operationID,
+          sourcePath: "C:\\work\\old",
+          destinationPath: "C:\\work\\new",
+          sourceIdentity: "identity",
+          graphRevision: 4,
+          recoveryRequired: false,
+        },
+      },
+    });
+    expect(response.kind).toBe("response");
+    if (
+      response.kind !== "response" ||
+      response.event?.type !== "projectRelocated"
+    ) {
+      throw new Error("Expected projectRelocated response");
+    }
+    expect(response.event.result.destinationPath).toBe("C:\\work\\new");
+  });
+
   it("decodes the frozen graphChanged event shape", () => {
     const envelope = decodeEnvelope({
       version: 2,
@@ -164,6 +202,7 @@ describe("decodeEnvelope", () => {
       interactiveTerminals: false,
       diagnostics: true,
       memoryReads: false,
+      projectRelocation: false,
     });
   });
 

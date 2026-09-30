@@ -28,6 +28,7 @@ const projectMetadataSchema = z.object({
       interactiveTerminals: z.boolean().default(false),
       diagnostics: z.boolean().default(false),
       memoryReads: z.boolean().default(false),
+      projectRelocation: z.boolean().default(false),
     })
     .default({
       revealInFileManager: false,
@@ -36,6 +37,7 @@ const projectMetadataSchema = z.object({
       interactiveTerminals: false,
       diagnostics: false,
       memoryReads: false,
+      projectRelocation: false,
     }),
 });
 
@@ -362,6 +364,7 @@ const rawEnvelopeSchema = z
     subscription: z
       .object({ projectPaths: z.array(z.string().min(1)).optional() })
       .optional(),
+    capabilities: z.array(z.string().min(1)).optional(),
     requestID: z.string().optional(),
     sequence: z.number().int().nonnegative().optional(),
     command: z.record(z.string(), z.unknown()).optional(),
@@ -442,6 +445,18 @@ const nodeResourcePageSchema = z.object({
   hasMore: z.boolean(),
 });
 
+const projectRelocationPlanSchema = z.object({
+  sourcePath: z.string().min(1),
+  destinationPath: z.string().min(1),
+  sourceIdentity: z.string().min(1),
+  graphRevision: z.number().int().nonnegative(),
+});
+
+const projectRelocationResultSchema = projectRelocationPlanSchema.extend({
+  operationID: uuidLike,
+  recoveryRequired: z.boolean(),
+});
+
 function decodeEvent(raw: Record<string, unknown>): DaemonEvent {
   const entries = Object.entries(raw);
   if (entries.length !== 1) {
@@ -515,6 +530,18 @@ function decodeEvent(raw: Record<string, unknown>): DaemonEvent {
         type: name,
         page: nodeResourcePageSchema.parse(singleAssociatedValue(payload)),
       };
+    case "projectRelocationPrepared":
+      return {
+        type: name,
+        plan: projectRelocationPlanSchema.parse(singleAssociatedValue(payload)),
+      };
+    case "projectRelocated":
+      return {
+        type: name,
+        result: projectRelocationResultSchema.parse(
+          singleAssociatedValue(payload),
+        ),
+      };
     case "errorOccurred":
       return {
         type: name,
@@ -551,6 +578,7 @@ export function decodeEnvelope(input: unknown): DaemonWireEnvelope {
         clientID: envelope.clientID,
         resumeFrom: envelope.resumeFrom,
         subscription: envelope.subscription,
+        capabilities: envelope.capabilities,
       };
     case "request":
       if (!envelope.requestID || !envelope.command) {

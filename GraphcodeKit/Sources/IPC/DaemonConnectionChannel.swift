@@ -33,6 +33,21 @@ public enum DaemonWireErrorCode: String, Codable, Sendable {
   case nodeResourceInvalidCursor
   case nodeResourceUnsupportedResource
   case nodeResourceTransportFailure
+  case projectRelocationUnauthorized
+  case projectRelocationUnsupported
+  case projectRelocationSourceMissing
+  case projectRelocationIdentityChanged
+  case projectRelocationRevisionChanged
+  case projectRelocationActiveSessions
+  case projectRelocationActiveWorktrees
+  case projectRelocationDestinationCollision
+  case projectRelocationUnsafePath
+  case projectRelocationCrossVolume
+  case projectRelocationPermission
+  case projectRelocationPreflight
+  case projectRelocationRollback
+  case projectRelocationRecovery
+  case projectRelocationConflict
   case connectionClosed
   case transportFailure
 }
@@ -696,6 +711,10 @@ public actor DaemonConnectionChannel {
       return paths.contains(graph.project.path)
     case .mailbox(let projectPath, _), .nodesChanged(let projectPath, _, _):
       return paths.contains(projectPath)
+    case .projectRelocationPrepared(let plan):
+      return paths.contains(plan.sourcePath) || paths.contains(plan.destinationPath)
+    case .projectRelocated(let result):
+      return paths.contains(result.sourcePath) || paths.contains(result.destinationPath)
     case .transcriptPage, .nodeResourcePage:
       return true
     case .recentProjectsListed:

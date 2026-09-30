@@ -13,6 +13,7 @@ public struct ProjectCapabilities: Codable, Equatable, Sendable {
   public var interactiveTerminals: Bool
   public var diagnostics: Bool
   public var memoryReads: Bool
+  public var projectRelocation: Bool
 
   public init(
     revealInFileManager: Bool = false,
@@ -20,7 +21,8 @@ public struct ProjectCapabilities: Codable, Equatable, Sendable {
     attachments: Bool = false,
     interactiveTerminals: Bool = false,
     diagnostics: Bool = false,
-    memoryReads: Bool = false
+    memoryReads: Bool = false,
+    projectRelocation: Bool = false
   ) {
     self.revealInFileManager = revealInFileManager
     self.templates = templates
@@ -28,10 +30,12 @@ public struct ProjectCapabilities: Codable, Equatable, Sendable {
     self.interactiveTerminals = interactiveTerminals
     self.diagnostics = diagnostics
     self.memoryReads = memoryReads
+    self.projectRelocation = projectRelocation
   }
 
   private enum CodingKeys: String, CodingKey {
     case revealInFileManager, templates, attachments, interactiveTerminals, diagnostics, memoryReads
+    case projectRelocation
   }
 
   public init(from decoder: Decoder) throws {
@@ -44,6 +48,8 @@ public struct ProjectCapabilities: Codable, Equatable, Sendable {
       try container.decodeIfPresent(Bool.self, forKey: .interactiveTerminals) ?? false
     diagnostics = try container.decodeIfPresent(Bool.self, forKey: .diagnostics) ?? false
     memoryReads = try container.decodeIfPresent(Bool.self, forKey: .memoryReads) ?? false
+    projectRelocation =
+      try container.decodeIfPresent(Bool.self, forKey: .projectRelocation) ?? false
   }
 }
 
@@ -76,7 +82,8 @@ public struct ProjectMetadata: Codable, Equatable, Sendable {
       attachments: true,
       interactiveTerminals: true,
       diagnostics: true,
-      memoryReads: true))
+      memoryReads: true,
+      projectRelocation: true))
 
   public static let ssh = ProjectMetadata(
     location: .ssh,

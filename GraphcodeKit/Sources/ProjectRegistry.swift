@@ -8,17 +8,20 @@ public struct ProjectRegistryCommandResult: Equatable, Sendable {
   /// `.forgetProject`). The daemon uses this bit to distinguish that outcome from an
   /// internal routing failure.
   public let succeeded: Bool
+  public let closeConnectionAfterResponse: Bool
 
   public init(
     response: DaemonEvent? = nil,
     error: String? = nil,
     errorCode: DaemonWireErrorCode? = nil,
-    succeeded: Bool? = nil
+    succeeded: Bool? = nil,
+    closeConnectionAfterResponse: Bool = false
   ) {
     self.response = response
     self.error = error
     self.errorCode = errorCode
     self.succeeded = succeeded ?? (error == nil)
+    self.closeConnectionAfterResponse = closeConnectionAfterResponse
   }
 }
 
@@ -57,6 +60,7 @@ public actor ProjectRegistry {
   private let replayStore: DaemonReplayStore
   private let settingsURL: URL
   private let classifyProject: @Sendable (String) -> ProjectMetadata
+  private let relocationCoordinator: ProjectRelocationCoordinator
   private var stores: [String: GraphStore] = [:]
   private var connections: [UUID: DaemonConnectionChannel] = [:]
   private var connectionProjectPaths: [UUID: Set<String>] = [:]
@@ -189,6 +193,7 @@ public actor ProjectRegistry {
       nil,
     quickChatExists: (@Sendable (LoopNode, String?) async -> Bool)? = nil,
     enumerateQuickChatSessions: (@Sendable () async -> [UUID])? = nil,
+    relocationCoordinator: ProjectRelocationCoordinator? = nil,
     classifyProject: @escaping @Sendable (String) -> ProjectMetadata = {
       ProjectMetadata.inferred(fromProjectPath: $0)
     }
@@ -202,6 +207,10 @@ public actor ProjectRegistry {
     self.replayStore = replayStore
     self.settingsURL = settingsURL
     self.classifyProject = classifyProject
+    self.relocationCoordinator =
+      relocationCoordinator
+      ?? ProjectRelocationCoordinator(
+        supportDirectory: persistenceDirectory, platformPaths: platformPaths)
     self.ensureSession = ensureSession
     self.terminateSession = terminateSession
     self.restartSession = restartSession
@@ -264,6 +273,16 @@ public actor ProjectRegistry {
           await ZmxSessionLauncher.reapCondemnedSessions()
         }
       }
+    }
+    do {
+      let recovered = try self.relocationCoordinator.recoverPending(persistence: persistence)
+      if !recovered.isEmpty {
+        DaemonLog.shared.record(
+          "project-relocation-recovery", [("recovered", String(recovered.count))])
+      }
+    } catch {
+      DaemonLog.shared.record(
+        "project-relocation-recovery", [("error", String(describing: error))])
     }
   }
 
@@ -572,7 +591,7 @@ public actor ProjectRegistry {
       sidebarConnections.insert(connectionID)
       for path in prunedOpenProjects()
       where Self.isWellFormedProjectPath(path, platformPaths: platformPaths) {
-        await open(
+        _ = await open(
           Self.canonicalize(path, platformPaths: platformPaths),
           for: connectionID,
           channel: channel)
@@ -897,6 +916,75 @@ public actor ProjectRegistry {
           errorCode: .nodeResourceUnauthorized)
       }
 
+    case .prepareProjectRelocation(let sourcePath, let destinationPath, let options):
+      guard case .v2 = channel.mode,
+        connectionCapabilities[connectionID]?.contains(
+          ClientCapability.projectRelocation.rawValue) == true
+      else {
+        return ProjectRegistryCommandResult(
+          error: ProjectRelocationError.unauthorized.localizedDescription,
+          errorCode: .projectRelocationUnauthorized)
+      }
+      do {
+        let preflight = try await relocationPreflight(sourcePath: sourcePath)
+        let plan = try relocationCoordinator.prepare(
+          sourcePath: preflight.path,
+          destinationPath: destinationPath,
+          graphRevision: preflight.revision,
+          options: options)
+        response = .projectRelocationPrepared(plan)
+      } catch let failure as ProjectRelocationError {
+        return ProjectRegistryCommandResult(
+          error: failure.localizedDescription, errorCode: Self.wireCode(for: failure))
+      } catch {
+        return ProjectRegistryCommandResult(
+          error: ProjectRelocationError.preflightFailed.localizedDescription,
+          errorCode: .projectRelocationPreflight)
+      }
+
+    case .relocateProject(let request):
+      guard case .v2 = channel.mode,
+        connectionCapabilities[connectionID]?.contains(
+          ClientCapability.projectRelocation.rawValue) == true
+      else {
+        return ProjectRegistryCommandResult(
+          error: ProjectRelocationError.unauthorized.localizedDescription,
+          errorCode: .projectRelocationUnauthorized)
+      }
+      do {
+        let preflight = try await relocationPreflight(sourcePath: request.sourcePath)
+        guard preflight.revision == request.expectedGraphRevision else {
+          throw ProjectRelocationError.graphRevisionChanged
+        }
+        guard
+          let stableGraph = await preflight.store.beginRelocation(
+            expectedRevision: request.expectedGraphRevision)
+        else {
+          throw ProjectRelocationError.graphRevisionChanged
+        }
+        var committed = false
+        defer {
+          if !committed {
+            Task { await preflight.store.endRelocation() }
+          }
+        }
+        let result = try relocationCoordinator.relocate(
+          request, graph: stableGraph, persistence: persistence)
+        committed = !FileManager.default.fileExists(atPath: result.sourcePath)
+        await convergeRelocation(
+          result, oldStore: preflight.store, requestingConnection: connectionID)
+        return ProjectRegistryCommandResult(
+          response: .projectRelocated(result),
+          closeConnectionAfterResponse: result.recoveryRequired)
+      } catch let failure as ProjectRelocationError {
+        return ProjectRegistryCommandResult(
+          error: failure.localizedDescription, errorCode: Self.wireCode(for: failure))
+      } catch {
+        return ProjectRegistryCommandResult(
+          error: ProjectRelocationError.preflightFailed.localizedDescription,
+          errorCode: .projectRelocationPreflight)
+      }
+
     case .announce(let capabilities):
       // Reaches every store this connection has already joined too: the app's launch
       // sends its joins and its announcement together, and which lands first must not
@@ -982,7 +1070,8 @@ public actor ProjectRegistry {
         return nil
       }
       return .graphChanged(await store.graph)
-    case .announce, .mailbox, .transcript, .nodeResource:
+    case .announce, .mailbox, .transcript, .nodeResource, .prepareProjectRelocation,
+      .relocateProject:
       return nil
     }
   }
@@ -1008,6 +1097,96 @@ public actor ProjectRegistry {
       )
     case .unreadable, .encodingFailed, .writeFailed:
       return (.settingsUnavailable, "settings.json could not be read or saved")
+    }
+  }
+
+  private static func wireCode(for error: ProjectRelocationError) -> DaemonWireErrorCode {
+    switch error {
+    case .unauthorized: return .projectRelocationUnauthorized
+    case .unsupported: return .projectRelocationUnsupported
+    case .sourceMissing: return .projectRelocationSourceMissing
+    case .sourceIdentityChanged: return .projectRelocationIdentityChanged
+    case .graphRevisionChanged: return .projectRelocationRevisionChanged
+    case .activeSessions: return .projectRelocationActiveSessions
+    case .activeWorktrees: return .projectRelocationActiveWorktrees
+    case .destinationCollision: return .projectRelocationDestinationCollision
+    case .unsafePath: return .projectRelocationUnsafePath
+    case .crossVolume: return .projectRelocationCrossVolume
+    case .permissionDenied: return .projectRelocationPermission
+    case .preflightFailed: return .projectRelocationPreflight
+    case .rolledBack, .rollbackFailed: return .projectRelocationRollback
+    case .recoveryFailed: return .projectRelocationRecovery
+    case .duplicateConflict: return .projectRelocationConflict
+    case .transportFailure: return .transportFailure
+    }
+  }
+
+  private func relocationPreflight(sourcePath: String) async throws -> (
+    path: String, graph: LoopGraph, revision: Int, store: GraphStore
+  ) {
+    guard Self.isWellFormedProjectPath(sourcePath, platformPaths: platformPaths) else {
+      throw ProjectRelocationError.unsafePath
+    }
+    let path = Self.canonicalize(sourcePath, platformPaths: platformPaths)
+    let metadata = classifyProject(path)
+    guard metadata.location == .local, metadata.capabilities.projectRelocation else {
+      throw ProjectRelocationError.unsupported
+    }
+    guard let store = stores[path] else {
+      throw ProjectRelocationError.preflightFailed
+    }
+    let snapshot = await store.relocationSnapshot()
+    guard snapshot.graph.nodesAtAnyDepth.allSatisfy({ $0.worktreeBinding == nil }) else {
+      throw ProjectRelocationError.activeWorktrees
+    }
+    guard let nodeSessionExists else {
+      throw ProjectRelocationError.preflightFailed
+    }
+    for node in snapshot.graph.nodesAtAnyDepth {
+      if await nodeSessionExists(node, path) {
+        throw ProjectRelocationError.activeSessions
+      }
+    }
+    return (path, snapshot.graph, snapshot.revision, store)
+  }
+
+  private func convergeRelocation(
+    _ result: ProjectRelocationResult,
+    oldStore: GraphStore,
+    requestingConnection: UUID
+  ) async {
+    let affected = connectionProjectPaths.compactMap { id, paths in
+      paths.contains(result.sourcePath) ? id : nil
+    }
+    stores.removeValue(forKey: result.sourcePath)
+    writer.forget(path: result.sourcePath)
+    let event = DaemonEvent.projectRelocated(result)
+
+    if result.recoveryRequired {
+      for id in affected where id != requestingConnection {
+        await removeConnection(id)
+      }
+      return
+    }
+
+    let newStore = await store(forProjectPath: result.destinationPath, ensuringSessions: false)
+    for id in affected {
+      guard
+        connectionCapabilities[id]?.contains(
+          ClientCapability.projectRelocation.rawValue) == true,
+        let channel = connections[id]
+      else {
+        await removeConnection(id)
+        continue
+      }
+      await send(event, to: id)
+      _ = await oldStore.removeConnection(id, leaveReplay: true)
+      connectionProjectPaths[id]?.remove(result.sourcePath)
+      connectionProjectPaths[id, default: []].insert(result.destinationPath)
+      _ = await newStore.addConnection(
+        id: id,
+        channel: channel,
+        capabilities: connectionCapabilities[id] ?? [])
     }
   }
 
@@ -1257,7 +1436,7 @@ public actor ProjectRegistry {
   /// where its `.spawn` edges are allowed to point, not a separate code path.
   public func openGlobalGraph(for connectionID: UUID) async {
     guard let channel = connections[connectionID] else { return }
-    await open(LoopGraphScope.globalPath, for: connectionID, channel: channel)
+    _ = await open(LoopGraphScope.globalPath, for: connectionID, channel: channel)
   }
 
   /// Delivers a cross-graph spawn into its target project.
@@ -1274,12 +1453,13 @@ public actor ProjectRegistry {
     let canonicalPath = Self.canonicalize(targetPath, platformPaths: platformPaths)
     guard canonicalPath != LoopGraphScope.globalPath else { return }
     guard let store = stores[canonicalPath] else { return }
-    await store.handle(.createNode(draft))
+    _ = await store.handle(.createNode(draft))
   }
 
   // MARK: - Store lookup
 
-  private func store(forProjectPath path: String) async -> GraphStore {
+  private func store(forProjectPath path: String, ensuringSessions: Bool = true) async -> GraphStore
+  {
     if let existing = stores[path] { return existing }
     let persistedGraph = writer.load(path: path)
     let metadata = classifyProject(path)
@@ -1384,10 +1564,14 @@ public actor ProjectRegistry {
     // Only on first load of this project — a time-based node's session outlives the app
     // but not a reboot, so something has to restart it, and this is the moment the
     // persisted graph is first seen. Already-running sessions are left untouched.
-    await newStore.ensureUnattendedSessions()
+    if ensuringSessions {
+      await newStore.ensureUnattendedSessions()
+    }
     // The load-time ensure above is the *local* machine's reboot recovery. A remote host
     // reboots on its own schedule, so its loops need a repeating check as well.
-    if RemoteProjectLocation.parse(projectPath: path) != nil { startRemoteLivenessSweep() }
+    if ensuringSessions, RemoteProjectLocation.parse(projectPath: path) != nil {
+      startRemoteLivenessSweep()
+    }
     return newStore
   }
 

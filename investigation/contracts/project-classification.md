@@ -13,7 +13,8 @@ reference and every `LoopGraph.project` snapshot.
       "attachments": true,
       "interactiveTerminals": true,
       "diagnostics": true,
-      "memoryReads": true
+      "memoryReads": true,
+      "projectRelocation": true
     }
   }
 }
@@ -39,11 +40,11 @@ writeback, and again before persistence, replay insertion, or broadcast.
 
 Current daemon capability defaults reflect implemented behavior:
 
-| Location  | Reveal | Templates | Attachments | Interactive terminals | Diagnostics | Memory reads |
-| --------- | ------ | --------- | ----------- | --------------------- | ----------- | ------------ |
-| Local     | Yes    | Yes       | Yes         | Yes                   | Yes         | Yes          |
-| SSH       | No     | No        | No          | No                    | Yes         | Yes          |
-| Codespace | No     | No        | No          | No                    | Yes         | Yes          |
+| Location  | Reveal | Templates | Attachments | Interactive terminals | Diagnostics | Memory reads | Relocation |
+| --------- | ------ | --------- | ----------- | --------------------- | ----------- | ------------ | ---------- |
+| Local     | Yes    | Yes       | Yes         | Yes                   | Yes         | Yes          | Yes        |
+| SSH       | No     | No        | No          | No                    | Yes         | Yes          | No         |
+| Codespace | No     | No        | No          | No                    | Yes         | Yes          | No         |
 
 Remote diagnostics cover the existing daemon-owned remote usage, presence, summary, and
 transcript reads. Memory reads are location-independent because the daemon-owned durable

@@ -7,6 +7,7 @@ export interface ProjectCapabilities {
   interactiveTerminals: boolean;
   diagnostics: boolean;
   memoryReads?: boolean;
+  projectRelocation?: boolean;
 }
 
 export interface ProjectMetadata {
@@ -321,6 +322,18 @@ export interface NodeResourcePage {
   hasMore: boolean;
 }
 
+export interface ProjectRelocationPlan {
+  sourcePath: string;
+  destinationPath: string;
+  sourceIdentity: string;
+  graphRevision: number;
+}
+
+export interface ProjectRelocationResult extends ProjectRelocationPlan {
+  operationID: string;
+  recoveryRequired: boolean;
+}
+
 export type DaemonEvent =
   | { type: "recentProjectsListed"; projects: ProjectRef[] }
   | { type: "graphChanged"; graph: LoopGraph }
@@ -333,6 +346,8 @@ export type DaemonEvent =
   | { type: "settingsChanged"; snapshot: SettingsSnapshot }
   | { type: "transcriptPage"; page: TranscriptPage }
   | { type: "nodeResourcePage"; page: NodeResourcePage }
+  | { type: "projectRelocationPrepared"; plan: ProjectRelocationPlan }
+  | { type: "projectRelocated"; result: ProjectRelocationResult }
   | { type: "errorOccurred"; message: string }
   | { type: "unsupported"; name: string; payload: unknown };
 
@@ -349,6 +364,7 @@ export interface DaemonHelloEnvelope {
   clientID?: string;
   resumeFrom?: number;
   subscription?: { projectPaths?: string[] };
+  capabilities?: string[];
 }
 
 export interface DaemonRequestEnvelope {

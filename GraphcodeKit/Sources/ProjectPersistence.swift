@@ -281,4 +281,71 @@ public struct ProjectPersistence: Sendable {
     guard let data = try? JSONEncoder().encode(paths) else { return }
     try? data.write(to: openProjectsFile, options: .atomic)
   }
+
+  public func completeProjectRelocation(
+    from sourcePath: String,
+    to destinationPath: String,
+    graph: LoopGraph,
+    supportSourcePath: String? = nil
+  ) throws {
+    var rewritten = graph
+    let project = ProjectRef(
+      path: destinationPath,
+      name: URL(fileURLWithPath: destinationPath).lastPathComponent,
+      lastOpenedAt: graph.project.lastOpenedAt,
+      metadata: graph.project.metadata)
+    rewritten = rewritten.enforcingRootProject(project)
+
+    var slim = rewritten
+    slim.mailroom = []
+    try JSONEncoder().encode(slim).write(
+      to: fileURL(forProjectPath: destinationPath), options: .atomic)
+    let destinationRoom = mailroomURL(forProjectPath: destinationPath)
+    if rewritten.mailroom.isEmpty {
+      if FileManager.default.fileExists(atPath: destinationRoom.path) {
+        try FileManager.default.removeItem(at: destinationRoom)
+      }
+    } else {
+      try JSONEncoder().encode(rewritten.mailroom).write(to: destinationRoom, options: .atomic)
+    }
+
+    try NodeMemory.relocateProjectStorage(
+      from: supportSourcePath ?? sourcePath, to: destinationPath,
+      baseURL: projectsDirectory.deletingLastPathComponent())
+
+    let recents = loadRecentProjects().map { recent in
+      guard relocationPathsMatch(recent.path, sourcePath) else { return recent }
+      return ProjectRef(
+        path: destinationPath,
+        name: project.name,
+        lastOpenedAt: recent.lastOpenedAt,
+        metadata: project.metadata)
+    }
+    try JSONEncoder().encode(recents).write(to: recentProjectsFile, options: .atomic)
+    let open = loadOpenProjects().map {
+      relocationPathsMatch($0, sourcePath) ? destinationPath : $0
+    }
+    try JSONEncoder().encode(open).write(to: openProjectsFile, options: .atomic)
+    try LoopHistoryStore(baseDirectory: projectsDirectory.deletingLastPathComponent())
+      .relocateProject(from: sourcePath, to: destinationPath)
+
+    for url in [
+      fileURL(forProjectPath: sourcePath),
+      mailroomURL(forProjectPath: sourcePath),
+      legacyFileURL(forProjectPath: sourcePath),
+      legacyMailroomURL(forProjectPath: sourcePath),
+    ] where FileManager.default.fileExists(atPath: url.path) {
+      try FileManager.default.removeItem(at: url)
+    }
+    Self.roomDigests.forget(mailroomURL(forProjectPath: sourcePath).path)
+  }
+
+  private func relocationPathsMatch(_ lhs: String, _ rhs: String) -> Bool {
+    #if os(Windows)
+      return lhs.replacingOccurrences(of: "\\", with: "/").lowercased()
+        == rhs.replacingOccurrences(of: "\\", with: "/").lowercased()
+    #else
+      return lhs == rhs
+    #endif
+  }
 }

@@ -26,4 +26,12 @@ public struct LoopHistoryStore: Sendable {
     guard let data = try? JSONEncoder().encode(history) else { return }
     try? data.write(to: fileURL, options: .atomic)
   }
+
+  public func relocateProject(from sourcePath: String, to destinationPath: String) throws {
+    guard FileManager.default.fileExists(atPath: fileURL.path) else { return }
+    let data = try Data(contentsOf: fileURL)
+    var history = try JSONDecoder().decode(LoopHistory.self, from: data)
+    history.relocateProject(from: sourcePath, to: destinationPath)
+    try JSONEncoder().encode(history).write(to: fileURL, options: .atomic)
+  }
 }

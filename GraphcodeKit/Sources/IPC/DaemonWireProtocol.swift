@@ -37,6 +37,7 @@ public struct DaemonWireEnvelope: Codable, Equatable, Sendable {
   public var clientID: UUID?
   public var resumeFrom: UInt64?
   public var subscription: DaemonWireSubscription?
+  public var capabilities: [String]?
   public var requestID: UUID?
   public var sequence: UInt64?
   public var command: DaemonCommand?
@@ -52,6 +53,7 @@ public struct DaemonWireEnvelope: Codable, Equatable, Sendable {
     clientID: UUID? = nil,
     resumeFrom: UInt64? = nil,
     subscription: DaemonWireSubscription? = nil,
+    capabilities: [String]? = nil,
     requestID: UUID? = nil,
     sequence: UInt64? = nil,
     command: DaemonCommand? = nil,
@@ -66,6 +68,7 @@ public struct DaemonWireEnvelope: Codable, Equatable, Sendable {
     self.clientID = clientID
     self.resumeFrom = resumeFrom
     self.subscription = subscription
+    self.capabilities = capabilities
     self.requestID = requestID
     self.sequence = sequence
     self.command = command
@@ -94,7 +97,8 @@ public struct DaemonWireEnvelope: Codable, Equatable, Sendable {
       version: DaemonWireProtocol.currentVersion,
       kind: .hello,
       supportedVersions: DaemonWireProtocol.supportedVersions,
-      selectedVersion: selectedVersion)
+      selectedVersion: selectedVersion,
+      capabilities: [ServerCapability.projectRelocation.rawValue])
   }
 
   public static func request(id: UUID, command: DaemonCommand) -> Self {
@@ -172,7 +176,9 @@ public struct DaemonWireEnvelope: Codable, Equatable, Sendable {
       guard requestID != nil else { throw ValidationError.missingField("requestID") }
       guard command != nil else { throw ValidationError.missingField("command") }
       guard supportedVersions == nil, selectedVersion == nil, clientID == nil, resumeFrom == nil,
-        subscription == nil, sequence == nil, event == nil, error == nil, success == nil
+        subscription == nil, sequence == nil, event == nil, error == nil,
+        success == nil
+          && capabilities == nil
       else {
         throw ValidationError.unexpectedField
       }
@@ -181,7 +187,9 @@ public struct DaemonWireEnvelope: Codable, Equatable, Sendable {
       guard event != nil || success == true else { throw ValidationError.missingField("event") }
       guard success != false else { throw ValidationError.invalidField("success") }
       guard supportedVersions == nil, selectedVersion == nil, clientID == nil, resumeFrom == nil,
-        subscription == nil, sequence == nil, command == nil, error == nil
+        subscription == nil, sequence == nil, command == nil,
+        error == nil
+          && capabilities == nil
       else {
         throw ValidationError.unexpectedField
       }
@@ -189,7 +197,9 @@ public struct DaemonWireEnvelope: Codable, Equatable, Sendable {
       guard sequence != nil else { throw ValidationError.missingField("sequence") }
       guard event != nil else { throw ValidationError.missingField("event") }
       guard supportedVersions == nil, selectedVersion == nil, clientID == nil, resumeFrom == nil,
-        subscription == nil, requestID == nil, command == nil, error == nil, success == nil
+        subscription == nil, requestID == nil, command == nil, error == nil,
+        success == nil
+          && capabilities == nil
       else {
         throw ValidationError.unexpectedField
       }
@@ -199,7 +209,9 @@ public struct DaemonWireEnvelope: Codable, Equatable, Sendable {
         throw ValidationError.invalidField("error")
       }
       guard supportedVersions == nil, selectedVersion == nil, clientID == nil, resumeFrom == nil,
-        subscription == nil, sequence == nil, command == nil, event == nil, success == nil
+        subscription == nil, sequence == nil, command == nil, event == nil,
+        success == nil
+          && capabilities == nil
       else {
         throw ValidationError.unexpectedField
       }
