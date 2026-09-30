@@ -556,4 +556,15 @@ public enum NodeMemory {
       try fileManager.moveItem(at: source, to: destination)
     }
   }
+
+  public static func hasProjectStorage(
+    projectPath: String,
+    baseURL: URL = SupportDirectory.url
+  ) -> Bool {
+    let root = baseURL.appendingPathComponent("memory", isDirectory: true)
+    return FileManager.default.fileExists(
+      atPath: root.appendingPathComponent(
+        projectStorageKey(for: projectPath), isDirectory: true
+      ).path)
+  }
 }

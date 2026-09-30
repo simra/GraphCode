@@ -32,21 +32,44 @@ public struct ProjectRelocationRequest: Codable, Equatable, Sendable {
   }
 }
 public struct ProjectRelocationPlan: Codable, Equatable, Sendable {
+  public var operationID: UUID
   public var sourcePath: String
   public var destinationPath: String
   public var sourceIdentity: String
   public var graphRevision: Int
 
   public init(
+    operationID: UUID,
     sourcePath: String,
     destinationPath: String,
     sourceIdentity: String,
     graphRevision: Int
   ) {
+    self.operationID = operationID
     self.sourcePath = sourcePath
     self.destinationPath = destinationPath
     self.sourceIdentity = sourceIdentity
     self.graphRevision = graphRevision
+  }
+}
+public enum ProjectRelocationRecoveryDisposition: String, Codable, Equatable, Sendable {
+  case recovered
+  case abandonedBeforeCommit
+  case quarantined
+}
+public struct ProjectRelocationRecoveryStatus: Codable, Equatable, Sendable {
+  public var operationID: UUID?
+  public var disposition: ProjectRelocationRecoveryDisposition
+  public var detail: String
+
+  public init(
+    operationID: UUID?,
+    disposition: ProjectRelocationRecoveryDisposition,
+    detail: String
+  ) {
+    self.operationID = operationID
+    self.disposition = disposition
+    self.detail = detail
   }
 }
 public struct ProjectRelocationResult: Codable, Equatable, Sendable {
@@ -130,9 +153,15 @@ public final class ProjectRelocationCoordinator: @unchecked Sendable {
     }
 
     var request: ProjectRelocationRequest
+    var authorizedClientID: UUID
     var plan: ProjectRelocationPlan
     var graph: LoopGraph
     var phase: Phase
+  }
+  private struct Receipt: Codable {
+    var request: ProjectRelocationRequest
+    var authorizedClientID: UUID
+    var result: ProjectRelocationResult
   }
 
   private let supportDirectory: URL
@@ -154,24 +183,39 @@ public final class ProjectRelocationCoordinator: @unchecked Sendable {
   }
 
   public func prepare(
+    operationID: UUID = UUID(),
     sourcePath: String,
     destinationPath: String,
     graphRevision: Int,
-    options: ProjectRelocationOptions = ProjectRelocationOptions()
+    options: ProjectRelocationOptions = ProjectRelocationOptions(),
+    persistence: ProjectPersistence? = nil
   ) throws -> ProjectRelocationPlan {
     try withMutationLock {
+      let persistence =
+        persistence
+        ?? ProjectPersistence(
+          baseDirectory: supportDirectory,
+          platformPaths: platformPaths)
       guard options.migrateSupportState else {
         throw ProjectRelocationError.unsupported
       }
+      guard !fileManager.fileExists(atPath: receiptURL(operationID).path),
+        !fileManager.fileExists(atPath: journalURL(operationID).path)
+      else {
+        throw ProjectRelocationError.duplicateConflict
+      }
       return try preflight(
+        operationID: operationID,
         sourcePath: sourcePath,
         destinationPath: destinationPath,
-        graphRevision: graphRevision)
+        graphRevision: graphRevision,
+        persistence: persistence)
     }
   }
 
   public func relocate(
     _ request: ProjectRelocationRequest,
+    authorizedClientID: UUID = UUID(uuidString: "00000000-0000-4000-8000-000000000012")!,
     graph: LoopGraph,
     persistence: ProjectPersistence
   ) throws -> ProjectRelocationResult {
@@ -179,22 +223,23 @@ public final class ProjectRelocationCoordinator: @unchecked Sendable {
       guard request.options.migrateSupportState else {
         throw ProjectRelocationError.unsupported
       }
-      if let receipt = try loadReceipt(request.operationID) {
-        guard pathEquals(receipt.sourcePath, request.sourcePath),
-          pathEquals(receipt.destinationPath, request.destinationPath),
-          receipt.sourceIdentity == request.expectedSourceIdentity,
-          receipt.graphRevision == request.expectedGraphRevision
-        else {
-          throw ProjectRelocationError.duplicateConflict
-        }
-        return receipt
+      if let replay = try validatedReplay(
+        for: request, authorizedClientID: authorizedClientID)
+      {
+        return replay
       }
 
+      let stableSource = try StableProjectDirectory(path: request.sourcePath)
       let plan = try preflight(
+        operationID: request.operationID,
         sourcePath: request.sourcePath,
         destinationPath: request.destinationPath,
-        graphRevision: request.expectedGraphRevision)
+        graphRevision: request.expectedGraphRevision,
+        persistence: persistence)
       guard plan.sourceIdentity == request.expectedSourceIdentity else {
+        throw ProjectRelocationError.sourceIdentityChanged
+      }
+      guard stableSource.identityToken == plan.sourceIdentity else {
         throw ProjectRelocationError.sourceIdentityChanged
       }
       let destinationProject = ProjectRef(
@@ -204,15 +249,30 @@ public final class ProjectRelocationCoordinator: @unchecked Sendable {
         metadata: graph.project.metadata)
       let rewrittenGraph = graph.enforcingRootProject(destinationProject)
       let journal = Journal(
-        request: request, plan: plan, graph: rewrittenGraph, phase: .prepared)
+        request: request,
+        authorizedClientID: authorizedClientID,
+        plan: plan,
+        graph: rewrittenGraph,
+        phase: .prepared)
 
       try fault(.beforeJournal)
       try writeJournal(journal)
       do {
         try fault(.beforeFilesystemCommit)
-        try fileManager.moveItem(
-          at: URL(fileURLWithPath: plan.sourcePath, isDirectory: true),
-          to: URL(fileURLWithPath: plan.destinationPath, isDirectory: true))
+        try stableSource.verify(path: plan.sourcePath)
+        guard !containsWorktreeTopology(at: plan.sourcePath) else {
+          throw ProjectRelocationError.activeWorktrees
+        }
+        try persistence.preflightProjectRelocationDestination(plan.destinationPath)
+        try preflightRelocationState(
+          destinationPath: plan.destinationPath,
+          excluding: request.operationID)
+        try StableProjectDirectory.inspectDestinationParent(
+          URL(fileURLWithPath: plan.destinationPath).deletingLastPathComponent().path)
+        try stableSource.rename(to: plan.destinationPath)
+      } catch let relocationError as ProjectRelocationError {
+        try? removeJournal(request.operationID)
+        throw relocationError
       } catch {
         try? removeJournal(request.operationID)
         throw mapFilesystemError(error)
@@ -254,13 +314,12 @@ public final class ProjectRelocationCoordinator: @unchecked Sendable {
               graphRevision: request.expectedGraphRevision,
               recoveryRequired: true)
           }
-          try fileManager.moveItem(
-            at: URL(fileURLWithPath: plan.destinationPath, isDirectory: true),
-            to: URL(fileURLWithPath: plan.sourcePath, isDirectory: true))
+          try stableSource.verify(path: plan.destinationPath)
+          try stableSource.rename(to: plan.sourcePath)
           try? removeJournal(request.operationID)
           throw ProjectRelocationError.rolledBack
-        } catch let relocationError as ProjectRelocationError {
-          throw relocationError
+        } catch ProjectRelocationError.rolledBack {
+          throw ProjectRelocationError.rolledBack
         } catch {
           return ProjectRelocationResult(
             operationID: request.operationID,
@@ -279,7 +338,11 @@ public final class ProjectRelocationCoordinator: @unchecked Sendable {
         sourceIdentity: plan.sourceIdentity,
         graphRevision: request.expectedGraphRevision)
       do {
-        try writeReceipt(result)
+        try writeReceipt(
+          Receipt(
+            request: request,
+            authorizedClientID: authorizedClientID,
+            result: result))
         try removeJournal(request.operationID)
         return result
       } catch {
@@ -294,51 +357,119 @@ public final class ProjectRelocationCoordinator: @unchecked Sendable {
     }
   }
 
-  public func recoverPending(persistence: ProjectPersistence) throws -> [ProjectRelocationResult] {
+  public func replayResult(
+    for request: ProjectRelocationRequest,
+    authorizedClientID: UUID
+  ) throws -> ProjectRelocationResult? {
     try withMutationLock {
-      let directory = journalDirectory
-      guard fileManager.fileExists(atPath: directory.path) else { return [] }
-      let files = try fileManager.contentsOfDirectory(
-        at: directory, includingPropertiesForKeys: nil)
-      var recovered: [ProjectRelocationResult] = []
-      for file in files where file.pathExtension == "json" {
-        let journal = try JSONDecoder().decode(Journal.self, from: Data(contentsOf: file))
-        let sourceExists = fileManager.fileExists(atPath: journal.plan.sourcePath)
-        let destinationExists = fileManager.fileExists(atPath: journal.plan.destinationPath)
-        switch (sourceExists, destinationExists, journal.phase) {
-        case (true, false, _):
-          guard try identityToken(at: journal.plan.sourcePath) == journal.plan.sourceIdentity
-          else { throw ProjectRelocationError.recoveryFailed }
-          try fileManager.removeItem(at: file)
-        case (false, true, _):
-          guard try identityToken(at: journal.plan.destinationPath) == journal.plan.sourceIdentity
-          else { throw ProjectRelocationError.recoveryFailed }
-          try persistence.completeProjectRelocation(
-            from: journal.plan.sourcePath,
-            to: journal.plan.destinationPath,
-            graph: journal.graph,
-            supportSourcePath: journal.request.sourcePath)
-          let result = ProjectRelocationResult(
-            operationID: journal.request.operationID,
-            sourcePath: journal.plan.sourcePath,
-            destinationPath: journal.plan.destinationPath,
-            sourceIdentity: journal.plan.sourceIdentity,
-            graphRevision: journal.request.expectedGraphRevision)
-          try writeReceipt(result)
-          try fileManager.removeItem(at: file)
-          recovered.append(result)
-        default:
-          throw ProjectRelocationError.recoveryFailed
+      try validatedReplay(for: request, authorizedClientID: authorizedClientID)
+    }
+  }
+
+  private func validatedReplay(
+    for request: ProjectRelocationRequest,
+    authorizedClientID: UUID
+  ) throws -> ProjectRelocationResult? {
+    guard let receipt = try loadReceipt(request.operationID) else { return nil }
+    guard receipt.authorizedClientID == authorizedClientID else {
+      throw ProjectRelocationError.unauthorized
+    }
+    guard receipt.request == request else {
+      throw ProjectRelocationError.duplicateConflict
+    }
+    return receipt.result
+  }
+
+  public func recoverPending(
+    persistence: ProjectPersistence
+  ) -> [ProjectRelocationRecoveryStatus] {
+    do {
+      return try withMutationLock {
+        let directory = journalDirectory
+        guard fileManager.fileExists(atPath: directory.path) else { return [] }
+        let files = try fileManager.contentsOfDirectory(
+          at: directory, includingPropertiesForKeys: nil
+        ).filter { $0.pathExtension == "json" }
+          .sorted { $0.lastPathComponent < $1.lastPathComponent }
+        var statuses: [ProjectRelocationRecoveryStatus] = []
+        for file in files {
+          do {
+            let journal = try JSONDecoder().decode(Journal.self, from: Data(contentsOf: file))
+            let sourceExists = fileManager.fileExists(atPath: journal.plan.sourcePath)
+            let destinationExists = fileManager.fileExists(atPath: journal.plan.destinationPath)
+            switch (sourceExists, destinationExists, journal.phase) {
+            case (true, false, _):
+              guard try identityToken(at: journal.plan.sourcePath) == journal.plan.sourceIdentity
+              else { throw ProjectRelocationError.recoveryFailed }
+              try archiveJournal(file, disposition: "abandoned")
+              statuses.append(
+                ProjectRelocationRecoveryStatus(
+                  operationID: journal.request.operationID,
+                  disposition: .abandonedBeforeCommit,
+                  detail: "source remained authoritative"))
+            case (false, true, _):
+              guard
+                try identityToken(at: journal.plan.destinationPath) == journal.plan.sourceIdentity
+              else { throw ProjectRelocationError.recoveryFailed }
+              try persistence.completeProjectRelocation(
+                from: journal.plan.sourcePath,
+                to: journal.plan.destinationPath,
+                graph: journal.graph,
+                supportSourcePath: journal.request.sourcePath)
+              let result = ProjectRelocationResult(
+                operationID: journal.request.operationID,
+                sourcePath: journal.plan.sourcePath,
+                destinationPath: journal.plan.destinationPath,
+                sourceIdentity: journal.plan.sourceIdentity,
+                graphRevision: journal.request.expectedGraphRevision)
+              try writeReceipt(
+                Receipt(
+                  request: journal.request,
+                  authorizedClientID: journal.authorizedClientID,
+                  result: result))
+              try archiveJournal(file, disposition: "recovered")
+              statuses.append(
+                ProjectRelocationRecoveryStatus(
+                  operationID: journal.request.operationID,
+                  disposition: .recovered,
+                  detail: "destination support state completed"))
+            default:
+              throw ProjectRelocationError.recoveryFailed
+            }
+          } catch {
+            let operationID =
+              (try? JSONDecoder().decode(
+                Journal.self, from: Data(contentsOf: file)))?.request.operationID
+            do {
+              try quarantineJournal(file)
+            } catch {
+              // Leave the original journal in place when even quarantine cannot be proven.
+            }
+            statuses.append(
+              ProjectRelocationRecoveryStatus(
+                operationID: operationID,
+                disposition: .quarantined,
+                detail: String(describing: error)))
+          }
         }
+        return statuses
       }
-      return recovered
+    } catch {
+      return [
+        ProjectRelocationRecoveryStatus(
+          operationID: nil,
+          disposition: .quarantined,
+          detail: String(describing: error))
+      ]
     }
   }
 
   private func preflight(
+    operationID: UUID,
     sourcePath: String,
     destinationPath: String,
-    graphRevision: Int
+    graphRevision: Int,
+    persistence: ProjectPersistence
   ) throws -> ProjectRelocationPlan {
     let canonicalSource: String
     let canonicalDestination: String
@@ -387,6 +518,7 @@ public final class ProjectRelocationCoordinator: @unchecked Sendable {
     if try hasCaseCollision(destinationURL) {
       throw ProjectRelocationError.destinationCollision
     }
+    try StableProjectDirectory.inspectDestinationParent(parent.path)
     guard fileManager.isWritableFile(atPath: parent.path),
       fileManager.isWritableFile(
         atPath: URL(fileURLWithPath: canonicalSource).deletingLastPathComponent().path)
@@ -399,11 +531,48 @@ public final class ProjectRelocationCoordinator: @unchecked Sendable {
     guard !containsWorktreeTopology(at: canonicalSource) else {
       throw ProjectRelocationError.activeWorktrees
     }
+    try persistence.preflightProjectRelocationDestination(canonicalDestination)
+    try preflightRelocationState(
+      destinationPath: canonicalDestination,
+      excluding: operationID)
     return ProjectRelocationPlan(
+      operationID: operationID,
       sourcePath: canonicalSource,
       destinationPath: canonicalDestination,
-      sourceIdentity: try identityToken(at: canonicalSource),
+      sourceIdentity: try StableProjectDirectory(path: canonicalSource).identityToken,
       graphRevision: graphRevision)
+  }
+
+  private func preflightRelocationState(
+    destinationPath: String,
+    excluding operationID: UUID
+  ) throws {
+    if fileManager.fileExists(atPath: journalDirectory.path) {
+      for file in try fileManager.contentsOfDirectory(
+        at: journalDirectory, includingPropertiesForKeys: nil)
+      where file.pathExtension == "json" {
+        let journal = try JSONDecoder().decode(Journal.self, from: Data(contentsOf: file))
+        guard journal.request.operationID != operationID else { continue }
+        if pathEquals(journal.plan.sourcePath, destinationPath)
+          || pathEquals(journal.plan.destinationPath, destinationPath)
+        {
+          throw ProjectRelocationError.destinationCollision
+        }
+      }
+    }
+    if fileManager.fileExists(atPath: receiptDirectory.path) {
+      for file in try fileManager.contentsOfDirectory(
+        at: receiptDirectory, includingPropertiesForKeys: nil)
+      where file.pathExtension == "json" {
+        let receipt = try JSONDecoder().decode(Receipt.self, from: Data(contentsOf: file))
+        guard receipt.request.operationID != operationID else { continue }
+        if pathEquals(receipt.result.sourcePath, destinationPath)
+          || pathEquals(receipt.result.destinationPath, destinationPath)
+        {
+          throw ProjectRelocationError.destinationCollision
+        }
+      }
+    }
   }
 
   private func containsWorktreeTopology(at path: String) -> Bool {
@@ -422,18 +591,7 @@ public final class ProjectRelocationCoordinator: @unchecked Sendable {
   }
 
   private func identityToken(at path: String) throws -> String {
-    let attributes: [FileAttributeKey: Any]
-    do {
-      attributes = try fileManager.attributesOfItem(atPath: path)
-    } catch {
-      throw mapFilesystemError(error)
-    }
-    let volume = String(describing: attributes[.systemNumber] ?? "")
-    let file = String(describing: attributes[.systemFileNumber] ?? "")
-    guard !volume.isEmpty, !file.isEmpty else {
-      throw ProjectRelocationError.preflightFailed
-    }
-    return GraphcodeSHA256.hex(Data("\(volume):\(file)".utf8))
+    try StableProjectDirectory(path: path).identityToken
   }
 
   private func volumeIdentity(at path: String) throws -> String {
@@ -508,9 +666,10 @@ public final class ProjectRelocationCoordinator: @unchecked Sendable {
     }
   }
 
-  private func writeReceipt(_ result: ProjectRelocationResult) throws {
+  private func writeReceipt(_ receipt: Receipt) throws {
     try fileManager.createDirectory(at: receiptDirectory, withIntermediateDirectories: true)
-    try writeDurably(JSONEncoder().encode(result), to: receiptURL(result.operationID))
+    try writeDurably(
+      JSONEncoder().encode(receipt), to: receiptURL(receipt.request.operationID))
   }
 
   private func writeDurably(_ data: Data, to url: URL) throws {
@@ -520,10 +679,42 @@ public final class ProjectRelocationCoordinator: @unchecked Sendable {
     try handle.synchronize()
   }
 
-  private func loadReceipt(_ id: UUID) throws -> ProjectRelocationResult? {
+  private func loadReceipt(_ id: UUID) throws -> Receipt? {
     let url = receiptURL(id)
     guard fileManager.fileExists(atPath: url.path) else { return nil }
-    return try JSONDecoder().decode(ProjectRelocationResult.self, from: Data(contentsOf: url))
+    return try JSONDecoder().decode(Receipt.self, from: Data(contentsOf: url))
+  }
+
+  private var recoveryArchiveDirectory: URL {
+    supportDirectory.appendingPathComponent("project-relocations", isDirectory: true)
+      .appendingPathComponent("recovered", isDirectory: true)
+  }
+
+  private var recoveryQuarantineDirectory: URL {
+    supportDirectory.appendingPathComponent("project-relocations", isDirectory: true)
+      .appendingPathComponent("quarantine", isDirectory: true)
+  }
+
+  private func archiveJournal(_ file: URL, disposition: String) throws {
+    try moveRecoveryEvidence(
+      file,
+      to: recoveryArchiveDirectory.appendingPathComponent(
+        "\(file.deletingPathExtension().lastPathComponent)-\(disposition).json"))
+  }
+
+  private func quarantineJournal(_ file: URL) throws {
+    try moveRecoveryEvidence(
+      file,
+      to: recoveryQuarantineDirectory.appendingPathComponent(file.lastPathComponent))
+  }
+
+  private func moveRecoveryEvidence(_ source: URL, to destination: URL) throws {
+    try fileManager.createDirectory(
+      at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
+    guard !fileManager.fileExists(atPath: destination.path) else {
+      throw ProjectRelocationError.recoveryFailed
+    }
+    try fileManager.moveItem(at: source, to: destination)
   }
 
   private func mapFilesystemError(_ error: Error) -> ProjectRelocationError {

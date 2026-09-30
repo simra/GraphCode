@@ -15,18 +15,28 @@ import Foundation
 /// on its way out, and what a test calls before reading the file back.
 public final class GraphWriter: @unchecked Sendable {
   private let persistence: ProjectPersistence
+  private let beforeWrite: @Sendable (LoopGraph) -> Void
   private let queue = DispatchQueue(label: "dev.graphcode.graphcoded.persist", qos: .utility)
   private let lock = NSLock()
   private var pending: [String: LoopGraph] = [:]
+  private var relocationBlockedPaths: Set<String> = []
   private var scheduled = false
 
-  public init(persistence: ProjectPersistence) {
+  public init(
+    persistence: ProjectPersistence,
+    beforeWrite: @escaping @Sendable (LoopGraph) -> Void = { _ in }
+  ) {
     self.persistence = persistence
+    self.beforeWrite = beforeWrite
   }
 
   /// Queues the newest snapshot of a project and returns at once.
   public func save(_ graph: LoopGraph) {
     lock.lock()
+    guard !relocationBlockedPaths.contains(graph.project.path) else {
+      lock.unlock()
+      return
+    }
     pending[graph.project.path] = graph
     let drainNeeded = !scheduled
     scheduled = true
@@ -70,6 +80,22 @@ public final class GraphWriter: @unchecked Sendable {
     }
   }
 
+  /// Blocks new old-path saves and returns only after every save accepted before the
+  /// block has reached disk. Relocation calls this while the graph lease is held.
+  public func beginRelocation(path: String) {
+    lock.lock()
+    relocationBlockedPaths.insert(path)
+    lock.unlock()
+    queue.sync { drain() }
+  }
+
+  /// A pre-commit failure or verified rollback makes the old path writable again.
+  public func cancelRelocation(path: String) {
+    lock.lock()
+    relocationBlockedPaths.remove(path)
+    lock.unlock()
+  }
+
   /// Returns once everything queued so far is on disk.
   public func flush() {
     queue.sync { drain() }
@@ -85,6 +111,7 @@ public final class GraphWriter: @unchecked Sendable {
       }
       pending.removeValue(forKey: graph.project.path)
       lock.unlock()
+      beforeWrite(graph)
       persistence.saveGraph(graph)
     }
   }

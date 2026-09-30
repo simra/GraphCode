@@ -305,6 +305,7 @@ public struct ProjectPersistence: Sendable {
       if FileManager.default.fileExists(atPath: destinationRoom.path) {
         try FileManager.default.removeItem(at: destinationRoom)
       }
+
     } else {
       try JSONEncoder().encode(rewritten.mailroom).write(to: destinationRoom, options: .atomic)
     }
@@ -338,6 +339,30 @@ public struct ProjectPersistence: Sendable {
       try FileManager.default.removeItem(at: url)
     }
     Self.roomDigests.forget(mailroomURL(forProjectPath: sourcePath).path)
+  }
+
+  public func preflightProjectRelocationDestination(_ destinationPath: String) throws {
+    let files = [
+      fileURL(forProjectPath: destinationPath),
+      mailroomURL(forProjectPath: destinationPath),
+      legacyFileURL(forProjectPath: destinationPath),
+      legacyMailroomURL(forProjectPath: destinationPath),
+    ]
+    guard !files.contains(where: { FileManager.default.fileExists(atPath: $0.path) }),
+      !loadRecentProjects().contains(where: {
+        relocationPathsMatch($0.path, destinationPath)
+      }),
+      !loadOpenProjects().contains(where: {
+        relocationPathsMatch($0, destinationPath)
+      }),
+      !NodeMemory.hasProjectStorage(
+        projectPath: destinationPath,
+        baseURL: projectsDirectory.deletingLastPathComponent()),
+      !LoopHistoryStore(baseDirectory: projectsDirectory.deletingLastPathComponent())
+        .containsProjectPath(destinationPath)
+    else {
+      throw ProjectRelocationError.destinationCollision
+    }
   }
 
   private func relocationPathsMatch(_ lhs: String, _ rhs: String) -> Bool {

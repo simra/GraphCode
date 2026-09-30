@@ -104,7 +104,20 @@ public struct LoopHistory: Codable, Equatable, Sendable {
       guard case .loop(let projectPath, let nodeID) = visit, projectPath == sourcePath else {
         return visit
       }
+
       return .loop(projectPath: destinationPath, nodeID: nodeID)
+    }
+  }
+
+  public func containsProjectPath(_ path: String) -> Bool {
+    entries.contains {
+      guard case .loop(let projectPath, _) = $0 else { return false }
+      #if os(Windows)
+        return projectPath.replacingOccurrences(of: "\\", with: "/").lowercased()
+          == path.replacingOccurrences(of: "\\", with: "/").lowercased()
+      #else
+        return projectPath == path
+      #endif
     }
   }
 

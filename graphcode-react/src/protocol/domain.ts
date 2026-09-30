@@ -323,6 +323,7 @@ export interface NodeResourcePage {
 }
 
 export interface ProjectRelocationPlan {
+  operationID: string;
   sourcePath: string;
   destinationPath: string;
   sourceIdentity: string;
@@ -330,7 +331,6 @@ export interface ProjectRelocationPlan {
 }
 
 export interface ProjectRelocationResult extends ProjectRelocationPlan {
-  operationID: string;
   recoveryRequired: boolean;
 }
 

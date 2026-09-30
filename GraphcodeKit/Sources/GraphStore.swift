@@ -475,6 +475,7 @@ public actor GraphStore {
   /// session opens on the current brief and the node's stored snapshot is refreshed with
   /// it; see `resolvedForLaunch`.
   private func ensureSession(_ node: LoopNode) {
+    guard !relocationLease else { return }
     onEnsureSession?(resolvedForLaunch(node), graph.project.path)
     guard onFindMissingProvider != nil else { return }
     Task { await self.stopIfProviderMissing(node) }
@@ -588,6 +589,7 @@ public actor GraphStore {
   /// Template followers are resolved at the same run boundary as unattended ensures,
   /// and any refreshed snapshot is persisted and broadcast before the session starts.
   public func nodeForSessionLaunch(_ nodeID: UUID) async -> LoopNode? {
+    guard !relocationLease else { return nil }
     guard let node = graph.nodesAtAnyDepth.first(where: { $0.id == nodeID }) else { return nil }
     let resolved = resolvedForLaunch(node)
     await broadcastIfTemplatesRefreshed()
@@ -812,6 +814,8 @@ public actor GraphStore {
   public func endRelocation() {
     relocationLease = false
   }
+
+  public var isRelocating: Bool { relocationLease }
 
   // MARK: - Commands
 
@@ -4484,6 +4488,7 @@ public actor GraphStore {
   /// existing session first — `zmx run` itself is *not* idempotent, and re-running it
   /// against a live session types the prompt in a second time.
   public func ensureUnattendedSessions() async {
+    guard !relocationLease else { return }
     // A loop stopped for a missing CLI waits for the human's restart: relaunching it at
     // boot would only reach the same missing CLI and raise the same dialog.
     for node in graph.nodes where node.runsUnattended && node.launchFailure == nil {
@@ -4534,6 +4539,7 @@ public actor GraphStore {
   ///   restarts a `.stopped` time-based node, which is defensible once at boot and wrong
   ///   every minute: a human who stopped a remote loop would watch it come back.
   public func ensureUnattendedSessionsAlive() async {
+    guard !relocationLease else { return }
     for node in graph.nodes where node.runsUnattended && !node.isResolved {
       ensureSession(node)
     }

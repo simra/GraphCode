@@ -34,4 +34,8 @@ public struct LoopHistoryStore: Sendable {
     history.relocateProject(from: sourcePath, to: destinationPath)
     try JSONEncoder().encode(history).write(to: fileURL, options: .atomic)
   }
+
+  public func containsProjectPath(_ path: String) -> Bool {
+    load().containsProjectPath(path)
+  }
 }

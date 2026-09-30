@@ -30,6 +30,7 @@ import PackageDescription
       "GraphStore.swift",
       "GraphWriter.swift",
       "ProjectRelocation.swift",
+      "ProjectRelocationNative.swift",
       "TerminalLayoutStore.swift",
       "LoopHistory.swift",
       "LoopHistoryStore.swift",

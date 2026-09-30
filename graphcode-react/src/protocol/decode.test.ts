@@ -20,6 +20,29 @@ describe("decodeEnvelope", () => {
     if (hello.kind !== "hello") throw new Error("Expected hello");
     expect(hello.capabilities).toContain("projectRelocation");
 
+    const prepared = decodeEnvelope({
+      version: 2,
+      kind: "response",
+      requestID: operationID,
+      event: {
+        projectRelocationPrepared: {
+          operationID,
+          sourcePath: "C:\\work\\old",
+          destinationPath: "C:\\work\\new",
+          sourceIdentity: "identity",
+          graphRevision: 4,
+        },
+      },
+    });
+    expect(prepared.kind).toBe("response");
+    if (
+      prepared.kind !== "response" ||
+      prepared.event?.type !== "projectRelocationPrepared"
+    ) {
+      throw new Error("Expected projectRelocationPrepared response");
+    }
+    expect(prepared.event.plan.operationID).toBe(operationID);
+
     const response = decodeEnvelope({
       version: 2,
       kind: "response",

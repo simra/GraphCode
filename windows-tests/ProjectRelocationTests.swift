@@ -1,5 +1,6 @@
 import Foundation
 import GraphcodeKit
+import MailroomKit
 import Testing
 
 private final class RelocationTestConnection: @unchecked Sendable, DaemonConnection {
@@ -232,7 +233,7 @@ struct ProjectRelocationTests {
     let recovery = ProjectRelocationCoordinator(
       supportDirectory: fixture.support,
       platformPaths: WindowsPlatformPaths(homeDirectory: fixture.root))
-    let recovered = try recovery.recoverPending(persistence: persistence)
+    let recovered = recovery.recoverPending(persistence: persistence)
     #expect(recovered.map(\.operationID) == [operationID])
     let replay = try recovery.relocate(
       ProjectRelocationRequest(
@@ -323,14 +324,15 @@ struct ProjectRelocationTests {
     let recoveredCoordinator = ProjectRelocationCoordinator(
       supportDirectory: fixture.support,
       platformPaths: WindowsPlatformPaths(homeDirectory: fixture.root))
-    let recovered = try recoveredCoordinator.recoverPending(persistence: persistence)
+    let recovered = recoveredCoordinator.recoverPending(persistence: persistence)
     #expect(recovered.map(\.operationID) == [operationID])
     #expect(
       persistence.loadGraph(path: fixture.destination.path)?.project.path
         == fixture.destination.path)
     #expect(
       try recoveredCoordinator.relocate(
-        request, graph: graph, persistence: persistence) == recovered.first)
+        request, graph: graph, persistence: persistence
+      ).operationID == operationID)
   }
 
   @Test
@@ -374,6 +376,7 @@ struct ProjectRelocationTests {
       .openProject(path: fixture.source.path), connectionID: connection.id)
     let remoteResult = await remoteRegistry.apply(
       .prepareProjectRelocation(
+        operationID: UUID(),
         sourcePath: fixture.source.path, destinationPath: fixture.destination.path,
         options: ProjectRelocationOptions()),
       connectionID: connection.id)
@@ -409,6 +412,7 @@ struct ProjectRelocationTests {
       connectionID: activeConnection.id)
     let activeResult = await activeRegistry.apply(
       .prepareProjectRelocation(
+        operationID: UUID(),
         sourcePath: activeSource.path, destinationPath: activeDestination.path,
         options: ProjectRelocationOptions()),
       connectionID: activeConnection.id)
@@ -441,8 +445,10 @@ struct ProjectRelocationTests {
         .openProject(path: fixture.source.path), connectionID: connection.id)
     }
 
+    let operationID = UUID()
     let prepared = await registry.apply(
       .prepareProjectRelocation(
+        operationID: operationID,
         sourcePath: fixture.source.path, destinationPath: fixture.destination.path,
         options: ProjectRelocationOptions()),
       connectionID: first.id)
@@ -450,13 +456,12 @@ struct ProjectRelocationTests {
       Issue.record("expected relocation plan")
       return
     }
-    let operationID = UUID()
     let relocated = await registry.apply(
       .relocateProject(
         ProjectRelocationRequest(
           operationID: operationID,
-          sourcePath: fixture.source.path,
-          destinationPath: fixture.destination.path,
+          sourcePath: plan.sourcePath,
+          destinationPath: plan.destinationPath,
           expectedSourceIdentity: plan.sourceIdentity,
           expectedGraphRevision: plan.graphRevision)),
       connectionID: first.id)
@@ -491,6 +496,565 @@ struct ProjectRelocationTests {
     }
     #expect(message.contains("relocation"))
     await store.endRelocation()
+  }
+
+  @Test
+  func prepareRequiresJoinAndOnlyOriginatingClientCanCommitOrReplay() async throws {
+    let fixture = try fixture()
+    defer { try? FileManager.default.removeItem(at: fixture.root) }
+    let registry = ProjectRegistry(
+      persistenceDirectory: fixture.support,
+      platformPaths: WindowsPlatformPaths(homeDirectory: fixture.root),
+      ensureSession: nil,
+      terminateSession: nil,
+      nodeSessionExists: { _, _ in false })
+    let owner = RelocationTestConnection()
+    let peer = RelocationTestConnection()
+    let unjoined = RelocationTestConnection()
+    for connection in [owner, peer, unjoined] {
+      await registry.addConnection(
+        id: connection.id,
+        channel: DaemonConnectionChannel(connection: connection, mode: .v2(version: 2)))
+      _ = await registry.apply(
+        .announce(capabilities: [ClientCapability.projectRelocation.rawValue]),
+        connectionID: connection.id)
+    }
+    for connection in [owner, peer] {
+      _ = await registry.apply(
+        .openProject(path: fixture.source.path), connectionID: connection.id)
+    }
+
+    let operationID = UUID()
+    let deniedPrepare = await registry.apply(
+      .prepareProjectRelocation(
+        operationID: UUID(),
+        sourcePath: fixture.source.path,
+        destinationPath: fixture.destination.path,
+        options: ProjectRelocationOptions()),
+      connectionID: unjoined.id)
+    #expect(deniedPrepare?.errorCode == .projectRelocationUnauthorized)
+
+    let prepared = await registry.apply(
+      .prepareProjectRelocation(
+        operationID: operationID,
+        sourcePath: fixture.source.path,
+        destinationPath: fixture.destination.path,
+        options: ProjectRelocationOptions()),
+      connectionID: owner.id)
+    guard case .projectRelocationPrepared(let plan) = prepared?.response else {
+      Issue.record("expected owner relocation plan")
+      return
+    }
+    let request = ProjectRelocationRequest(
+      operationID: operationID,
+      sourcePath: plan.sourcePath,
+      destinationPath: plan.destinationPath,
+      expectedSourceIdentity: plan.sourceIdentity,
+      expectedGraphRevision: plan.graphRevision)
+    let stolen = await registry.apply(.relocateProject(request), connectionID: peer.id)
+    #expect(stolen?.errorCode == .projectRelocationUnauthorized)
+    #expect(FileManager.default.fileExists(atPath: fixture.source.path))
+
+    let committed = await registry.apply(.relocateProject(request), connectionID: owner.id)
+    guard case .projectRelocated(let result) = committed?.response else {
+      Issue.record("expected owner relocation result")
+      return
+    }
+    let replay = await registry.apply(.relocateProject(request), connectionID: owner.id)
+    #expect(replay?.response == .projectRelocated(result))
+    let guessedReplay = await registry.apply(.relocateProject(request), connectionID: peer.id)
+    #expect(guessedReplay?.errorCode == .projectRelocationUnauthorized)
+    var changed = request
+    changed.destinationPath += "-other"
+    let mismatch = await registry.apply(.relocateProject(changed), connectionID: owner.id)
+    #expect(mismatch?.errorCode == .projectRelocationConflict)
+
+    let reconnect = RelocationTestConnection()
+    await registry.addConnection(
+      id: reconnect.id,
+      channel: DaemonConnectionChannel(
+        connection: reconnect,
+        mode: .v2(version: 2),
+        clientID: owner.id))
+    _ = await registry.apply(
+      .announce(capabilities: [ClientCapability.projectRelocation.rawValue]),
+      connectionID: reconnect.id)
+    let reconnectReplay = await registry.apply(
+      .relocateProject(request), connectionID: reconnect.id)
+    #expect(reconnectReplay?.response == .projectRelocated(result))
+  }
+
+  @Test
+  func postCommitProjectErrorRemainsSuccessShapedWhenRollbackIsUnproven() throws {
+    let fixture = try fixture()
+    defer { try? FileManager.default.removeItem(at: fixture.root) }
+    let persistence = ProjectPersistence(
+      baseDirectory: fixture.support,
+      platformPaths: WindowsPlatformPaths(homeDirectory: fixture.root))
+    let graph = LoopGraph(
+      project: ProjectRef(path: fixture.source.path, name: "source"))
+    persistence.saveGraph(graph)
+    let coordinator = ProjectRelocationCoordinator(
+      supportDirectory: fixture.support,
+      platformPaths: WindowsPlatformPaths(homeDirectory: fixture.root),
+      fault: { point in
+        if point == .afterFilesystemCommit {
+          throw SyntheticFault()
+        }
+        if point == .beforeRollback {
+          throw ProjectRelocationError.permissionDenied
+        }
+      })
+    let operationID = UUID()
+    let plan = try coordinator.prepare(
+      operationID: operationID,
+      sourcePath: fixture.source.path,
+      destinationPath: fixture.destination.path,
+      graphRevision: 0,
+      persistence: persistence)
+
+    let result = try coordinator.relocate(
+      ProjectRelocationRequest(
+        operationID: operationID,
+        sourcePath: plan.sourcePath,
+        destinationPath: plan.destinationPath,
+        expectedSourceIdentity: plan.sourceIdentity,
+        expectedGraphRevision: plan.graphRevision),
+      graph: graph,
+      persistence: persistence)
+
+    #expect(result.recoveryRequired)
+    #expect(!FileManager.default.fileExists(atPath: fixture.source.path))
+    #expect(FileManager.default.fileExists(atPath: fixture.destination.path))
+  }
+
+  @Test
+  func preparedFieldsAreImmutableAndDisconnectReleasesTheLease() async throws {
+    let fixture = try fixture()
+    defer { try? FileManager.default.removeItem(at: fixture.root) }
+    let registry = ProjectRegistry(
+      persistenceDirectory: fixture.support,
+      platformPaths: WindowsPlatformPaths(homeDirectory: fixture.root),
+      ensureSession: nil,
+      terminateSession: nil,
+      nodeSessionExists: { _, _ in false })
+
+    func join(_ connection: RelocationTestConnection) async {
+      await registry.addConnection(
+        id: connection.id,
+        channel: DaemonConnectionChannel(connection: connection, mode: .v2(version: 2)))
+      _ = await registry.apply(
+        .announce(capabilities: [ClientCapability.projectRelocation.rawValue]),
+        connectionID: connection.id)
+      _ = await registry.apply(
+        .openProject(path: fixture.source.path), connectionID: connection.id)
+    }
+
+    let first = RelocationTestConnection()
+    await join(first)
+    let firstOperation = UUID()
+    let prepared = await registry.apply(
+      .prepareProjectRelocation(
+        operationID: firstOperation,
+        sourcePath: fixture.source.path,
+        destinationPath: fixture.destination.path,
+        options: ProjectRelocationOptions()),
+      connectionID: first.id)
+    guard case .projectRelocationPrepared(let plan) = prepared?.response else {
+      Issue.record("expected relocation plan")
+      return
+    }
+    let mismatched = ProjectRelocationRequest(
+      operationID: firstOperation,
+      sourcePath: plan.sourcePath,
+      destinationPath: plan.destinationPath,
+      expectedSourceIdentity: plan.sourceIdentity,
+      expectedGraphRevision: plan.graphRevision + 1)
+    let conflict = await registry.apply(.relocateProject(mismatched), connectionID: first.id)
+    #expect(conflict?.errorCode == .projectRelocationConflict)
+
+    let second = RelocationTestConnection()
+    await join(second)
+    let secondPrepare = await registry.apply(
+      .prepareProjectRelocation(
+        operationID: UUID(),
+        sourcePath: fixture.source.path,
+        destinationPath: fixture.destination.path,
+        options: ProjectRelocationOptions()),
+      connectionID: second.id)
+    #expect(secondPrepare?.error == nil)
+    await registry.removeConnection(second.id)
+
+    let third = RelocationTestConnection()
+    await join(third)
+    let thirdPrepare = await registry.apply(
+      .prepareProjectRelocation(
+        operationID: UUID(),
+        sourcePath: fixture.source.path,
+        destinationPath: fixture.destination.path,
+        options: ProjectRelocationOptions()),
+      connectionID: third.id)
+    #expect(thirdPrepare?.error == nil)
+  }
+
+  @Test
+  func worktreeTopologyIntroducedAfterPrepareAbortsBeforeRename() async throws {
+    let fixture = try fixture()
+    defer { try? FileManager.default.removeItem(at: fixture.root) }
+    let registry = ProjectRegistry(
+      persistenceDirectory: fixture.support,
+      platformPaths: WindowsPlatformPaths(homeDirectory: fixture.root),
+      ensureSession: nil,
+      terminateSession: nil,
+      nodeSessionExists: { _, _ in false })
+    let connection = RelocationTestConnection()
+    await registry.addConnection(
+      id: connection.id,
+      channel: DaemonConnectionChannel(connection: connection, mode: .v2(version: 2)))
+    _ = await registry.apply(
+      .announce(capabilities: [ClientCapability.projectRelocation.rawValue]),
+      connectionID: connection.id)
+    _ = await registry.apply(
+      .openProject(path: fixture.source.path), connectionID: connection.id)
+    let operationID = UUID()
+    let prepared = await registry.apply(
+      .prepareProjectRelocation(
+        operationID: operationID,
+        sourcePath: fixture.source.path,
+        destinationPath: fixture.destination.path,
+        options: ProjectRelocationOptions()),
+      connectionID: connection.id)
+    guard case .projectRelocationPrepared(let plan) = prepared?.response else {
+      Issue.record("expected relocation plan")
+      return
+    }
+    try Data("[submodule \"synthetic\"]\n".utf8).write(
+      to: fixture.source.appendingPathComponent(".gitmodules"))
+
+    let result = await registry.apply(
+      .relocateProject(
+        ProjectRelocationRequest(
+          operationID: operationID,
+          sourcePath: plan.sourcePath,
+          destinationPath: plan.destinationPath,
+          expectedSourceIdentity: plan.sourceIdentity,
+          expectedGraphRevision: plan.graphRevision)),
+      connectionID: connection.id)
+
+    #expect(result?.errorCode == .projectRelocationActiveWorktrees)
+    #expect(FileManager.default.fileExists(atPath: fixture.source.path))
+    #expect(!FileManager.default.fileExists(atPath: fixture.destination.path))
+  }
+
+  @Test
+  func leaseBlocksSessionStartsAndFinalSessionRecheckAbortsCommit() async throws {
+    let fixture = try fixture()
+    defer { try? FileManager.default.removeItem(at: fixture.root) }
+    final class SessionSwitch: @unchecked Sendable {
+      private let lock = NSLock()
+      private var value = false
+      func set(_ value: Bool) { lock.withLock { self.value = value } }
+      func get() -> Bool { lock.withLock { value } }
+    }
+    let sessions = SessionSwitch()
+    let registry = ProjectRegistry(
+      persistenceDirectory: fixture.support,
+      platformPaths: WindowsPlatformPaths(homeDirectory: fixture.root),
+      ensureSession: nil,
+      terminateSession: nil,
+      nodeSessionExists: { _, _ in sessions.get() })
+    let connection = RelocationTestConnection()
+    await registry.addConnection(
+      id: connection.id,
+      channel: DaemonConnectionChannel(connection: connection, mode: .v2(version: 2)))
+    _ = await registry.apply(
+      .announce(capabilities: [ClientCapability.projectRelocation.rawValue]),
+      connectionID: connection.id)
+    _ = await registry.apply(
+      .openProject(path: fixture.source.path), connectionID: connection.id)
+    let created = await registry.apply(
+      .graphCommand(
+        projectPath: fixture.source.path,
+        command: .createNode(
+          NodeDraft(title: "Loop", loopType: .turnBased, firstInstruction: "Work"))),
+      connectionID: connection.id)
+    guard case .graphChanged(let graph) = created?.response, let nodeID = graph.nodes.first?.id
+    else {
+      Issue.record("expected test loop")
+      return
+    }
+    let operationID = UUID()
+    let prepared = await registry.apply(
+      .prepareProjectRelocation(
+        operationID: operationID,
+        sourcePath: fixture.source.path,
+        destinationPath: fixture.destination.path,
+        options: ProjectRelocationOptions()),
+      connectionID: connection.id)
+    guard case .projectRelocationPrepared(let plan) = prepared?.response else {
+      Issue.record("expected leased relocation")
+      return
+    }
+    let openSession = await registry.apply(
+      .openNodeSession(projectPath: fixture.source.path, nodeID: nodeID),
+      connectionID: connection.id)
+    #expect(openSession?.error?.contains("relocation") == true)
+    let deletion = await registry.apply(
+      .deleteProjectGraph(path: fixture.source.path), connectionID: connection.id)
+    #expect(deletion?.error?.contains("relocation") == true)
+
+    sessions.set(true)
+    let commit = await registry.apply(
+      .relocateProject(
+        ProjectRelocationRequest(
+          operationID: operationID,
+          sourcePath: plan.sourcePath,
+          destinationPath: plan.destinationPath,
+          expectedSourceIdentity: plan.sourceIdentity,
+          expectedGraphRevision: plan.graphRevision)),
+      connectionID: connection.id)
+    #expect(commit?.errorCode == .projectRelocationActiveSessions)
+    #expect(FileManager.default.fileExists(atPath: fixture.source.path))
+    #expect(!FileManager.default.fileExists(atPath: fixture.destination.path))
+  }
+
+  @Test
+  func staleDestinationSupportStateIsNeverOverwritten() throws {
+    enum Surface: CaseIterable { case graphAndMailroom, recents, open, memory, history }
+    for surface in Surface.allCases {
+      let fixture = try fixture()
+      defer { try? FileManager.default.removeItem(at: fixture.root) }
+      let persistence = ProjectPersistence(baseDirectory: fixture.support)
+      let sentinelNode = UUID()
+      switch surface {
+      case .graphAndMailroom:
+        var graph = LoopGraph(
+          project: ProjectRef(path: fixture.destination.path, name: "stale"))
+        graph.mailroom = [
+          MailroomPost(
+            id: 1, at: Date(timeIntervalSince1970: 1), authorID: nil,
+            author: "fixture", topic: nil, body: "do not overwrite")
+        ]
+        persistence.saveGraph(graph)
+      case .recents:
+        persistence.recordOpened(ProjectRef(path: fixture.destination.path, name: "stale"))
+      case .open:
+        persistence.saveOpenProjects([fixture.destination.path])
+      case .memory:
+        let url = NodeMemory.logURL(
+          forProjectPath: fixture.destination.path,
+          nodeID: sentinelNode,
+          baseURL: fixture.support)
+        try FileManager.default.createDirectory(
+          at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data("destination sentinel\n".utf8).write(to: url)
+      case .history:
+        var history = LoopHistory()
+        history.record(.loop(projectPath: fixture.destination.path, nodeID: sentinelNode))
+        LoopHistoryStore(baseDirectory: fixture.support).save(history)
+      }
+      let coordinator = ProjectRelocationCoordinator(
+        supportDirectory: fixture.support,
+        platformPaths: WindowsPlatformPaths(homeDirectory: fixture.root))
+      #expect(throws: ProjectRelocationError.destinationCollision) {
+        _ = try coordinator.prepare(
+          sourcePath: fixture.source.path,
+          destinationPath: fixture.destination.path,
+          graphRevision: 0,
+          persistence: persistence)
+      }
+      #expect(FileManager.default.fileExists(atPath: fixture.source.path))
+      #expect(!FileManager.default.fileExists(atPath: fixture.destination.path))
+      switch surface {
+      case .graphAndMailroom:
+        #expect(
+          persistence.loadGraph(path: fixture.destination.path)?.mailroom.first?.body
+            == "do not overwrite")
+      case .recents:
+        #expect(persistence.loadRecentProjects().contains { $0.path == fixture.destination.path })
+      case .open:
+        #expect(persistence.loadOpenProjects() == [fixture.destination.path])
+      case .memory:
+        #expect(
+          NodeMemory.entries(
+            forProjectPath: fixture.destination.path,
+            nodeID: sentinelNode,
+            baseURL: fixture.support
+          ).contains("destination sentinel"))
+      case .history:
+        #expect(
+          LoopHistoryStore(baseDirectory: fixture.support)
+            .containsProjectPath(fixture.destination.path))
+      }
+    }
+  }
+
+  @Test
+  func graphWriterDrainPreventsOldPathRecreation() throws {
+    let fixture = try fixture()
+    defer { try? FileManager.default.removeItem(at: fixture.root) }
+    let persistence = ProjectPersistence(baseDirectory: fixture.support)
+    let enteredWrite = DispatchSemaphore(value: 0)
+    let releaseWrite = DispatchSemaphore(value: 0)
+    let relocationFinished = DispatchSemaphore(value: 0)
+    let graph = LoopGraph(project: ProjectRef(path: fixture.source.path, name: "source"))
+    let writer = GraphWriter(
+      persistence: persistence,
+      beforeWrite: { _ in
+        enteredWrite.signal()
+        releaseWrite.wait()
+      })
+    writer.save(graph)
+    #expect(enteredWrite.wait(timeout: .now() + 2) == .success)
+    DispatchQueue.global().async {
+      writer.beginRelocation(path: fixture.source.path)
+      relocationFinished.signal()
+    }
+    releaseWrite.signal()
+    #expect(relocationFinished.wait(timeout: .now() + 2) == .success)
+    persistence.deleteGraph(path: fixture.source.path)
+    writer.save(graph)
+    writer.flush()
+    #expect(persistence.loadGraph(path: fixture.source.path) == nil)
+  }
+
+  @Test
+  func destinationParentReparseAliasIsRejected() throws {
+    let fixture = try fixture()
+    defer { try? FileManager.default.removeItem(at: fixture.root) }
+    let realParent = fixture.root.appendingPathComponent("real-parent", isDirectory: true)
+    let aliasParent = fixture.root.appendingPathComponent("alias-parent", isDirectory: true)
+    try FileManager.default.createDirectory(at: realParent, withIntermediateDirectories: true)
+    do {
+      try FileManager.default.createSymbolicLink(
+        at: aliasParent, withDestinationURL: realParent)
+    } catch {
+      return
+    }
+    let coordinator = ProjectRelocationCoordinator(
+      supportDirectory: fixture.support,
+      platformPaths: WindowsPlatformPaths(homeDirectory: fixture.root))
+    #expect(throws: ProjectRelocationError.unsafePath) {
+      _ = try coordinator.prepare(
+        sourcePath: fixture.source.path,
+        destinationPath: aliasParent.appendingPathComponent("destination").path,
+        graphRevision: 0)
+    }
+    #expect(FileManager.default.fileExists(atPath: fixture.source.path))
+  }
+
+  @Test
+  func corruptJournalIsQuarantinedWithoutBlockingValidRecovery() throws {
+    let fixture = try fixture()
+    defer { try? FileManager.default.removeItem(at: fixture.root) }
+    let persistence = ProjectPersistence(baseDirectory: fixture.support)
+    let graph = LoopGraph(project: ProjectRef(path: fixture.source.path, name: "source"))
+    persistence.saveGraph(graph)
+    let operationID = UUID()
+    let coordinator = ProjectRelocationCoordinator(
+      supportDirectory: fixture.support,
+      platformPaths: WindowsPlatformPaths(homeDirectory: fixture.root),
+      fault: { point in
+        if point == .afterFilesystemCommit || point == .beforeRollback {
+          throw SyntheticFault()
+        }
+      })
+    let plan = try coordinator.prepare(
+      operationID: operationID,
+      sourcePath: fixture.source.path,
+      destinationPath: fixture.destination.path,
+      graphRevision: 0,
+      persistence: persistence)
+    let pending = try coordinator.relocate(
+      ProjectRelocationRequest(
+        operationID: operationID,
+        sourcePath: plan.sourcePath,
+        destinationPath: plan.destinationPath,
+        expectedSourceIdentity: plan.sourceIdentity,
+        expectedGraphRevision: plan.graphRevision),
+      graph: graph,
+      persistence: persistence)
+    #expect(pending.recoveryRequired)
+    let journals = fixture.support.appendingPathComponent(
+      "project-relocations\\journals", isDirectory: true)
+    try Data("{broken".utf8).write(
+      to: journals.appendingPathComponent("00000000-corrupt.json"))
+
+    let recovery = ProjectRelocationCoordinator(
+      supportDirectory: fixture.support,
+      platformPaths: WindowsPlatformPaths(homeDirectory: fixture.root))
+    let statuses = recovery.recoverPending(persistence: persistence)
+    #expect(statuses.count == 2)
+    #expect(statuses.contains { $0.disposition == .quarantined })
+    #expect(
+      statuses.contains {
+        $0.operationID == operationID && $0.disposition == .recovered
+      })
+    #expect(
+      FileManager.default.fileExists(
+        atPath: fixture.support.appendingPathComponent(
+          "project-relocations\\quarantine\\00000000-corrupt.json"
+        ).path))
+    #expect(
+      persistence.loadGraph(path: fixture.destination.path)?.project.path
+        == fixture.destination.path)
+  }
+
+  @Test
+  func staleReceiptAndJournalDestinationKeysBlockReuse() throws {
+    for leaveJournal in [false, true] {
+      let fixture = try fixture()
+      defer { try? FileManager.default.removeItem(at: fixture.root) }
+      let persistence = ProjectPersistence(baseDirectory: fixture.support)
+      let graph = LoopGraph(project: ProjectRef(path: fixture.source.path, name: "source"))
+      persistence.saveGraph(graph)
+      let operationID = UUID()
+      let coordinator = ProjectRelocationCoordinator(
+        supportDirectory: fixture.support,
+        platformPaths: WindowsPlatformPaths(homeDirectory: fixture.root),
+        fault: { point in
+          if leaveJournal,
+            point == .afterFilesystemCommit || point == .beforeRollback
+          {
+            throw SyntheticFault()
+          }
+        })
+      let plan = try coordinator.prepare(
+        operationID: operationID,
+        sourcePath: fixture.source.path,
+        destinationPath: fixture.destination.path,
+        graphRevision: 0,
+        persistence: persistence)
+      let result = try coordinator.relocate(
+        ProjectRelocationRequest(
+          operationID: operationID,
+          sourcePath: plan.sourcePath,
+          destinationPath: plan.destinationPath,
+          expectedSourceIdentity: plan.sourceIdentity,
+          expectedGraphRevision: plan.graphRevision),
+        graph: graph,
+        persistence: persistence)
+      #expect(result.recoveryRequired == leaveJournal)
+      let archived = fixture.root.appendingPathComponent("moved-aside", isDirectory: true)
+      try FileManager.default.moveItem(at: fixture.destination, to: archived)
+      persistence.deleteGraph(path: fixture.destination.path)
+      persistence.forgetProject(path: fixture.destination.path)
+      persistence.saveOpenProjects([])
+      try FileManager.default.createDirectory(
+        at: fixture.source, withIntermediateDirectories: true)
+      let next = ProjectRelocationCoordinator(
+        supportDirectory: fixture.support,
+        platformPaths: WindowsPlatformPaths(homeDirectory: fixture.root))
+      #expect(throws: ProjectRelocationError.destinationCollision) {
+        _ = try next.prepare(
+          sourcePath: fixture.source.path,
+          destinationPath: fixture.destination.path,
+          graphRevision: 0,
+          persistence: persistence)
+      }
+      #expect(FileManager.default.fileExists(atPath: archived.path))
+      #expect(FileManager.default.fileExists(atPath: fixture.source.path))
+    }
   }
 
   private struct SyntheticFault: Error {}

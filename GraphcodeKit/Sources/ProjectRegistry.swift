@@ -61,6 +61,15 @@ public actor ProjectRegistry {
   private let settingsURL: URL
   private let classifyProject: @Sendable (String) -> ProjectMetadata
   private let relocationCoordinator: ProjectRelocationCoordinator
+  private struct PreparedRelocation {
+    var connectionID: UUID
+    var clientID: UUID
+    var plan: ProjectRelocationPlan
+    var options: ProjectRelocationOptions
+    var graph: LoopGraph
+    var store: GraphStore
+  }
+  private var preparedRelocations: [UUID: PreparedRelocation] = [:]
   private var stores: [String: GraphStore] = [:]
   private var connections: [UUID: DaemonConnectionChannel] = [:]
   private var connectionProjectPaths: [UUID: Set<String>] = [:]
@@ -274,15 +283,15 @@ public actor ProjectRegistry {
         }
       }
     }
-    do {
-      let recovered = try self.relocationCoordinator.recoverPending(persistence: persistence)
-      if !recovered.isEmpty {
-        DaemonLog.shared.record(
-          "project-relocation-recovery", [("recovered", String(recovered.count))])
-      }
-    } catch {
+    let recoveryStatuses = self.relocationCoordinator.recoverPending(persistence: persistence)
+    for status in recoveryStatuses {
       DaemonLog.shared.record(
-        "project-relocation-recovery", [("error", String(describing: error))])
+        "project-relocation-recovery",
+        [
+          ("operation", status.operationID?.uuidString ?? "unknown"),
+          ("disposition", status.disposition.rawValue),
+          ("detail", status.detail),
+        ])
     }
   }
 
@@ -342,6 +351,11 @@ public actor ProjectRegistry {
   #endif
 
   public func removeConnection(_ id: UUID) async {
+    let abandoned = preparedRelocations.filter { $0.value.connectionID == id }
+    for (operationID, prepared) in abandoned {
+      preparedRelocations.removeValue(forKey: operationID)
+      await prepared.store.endRelocation()
+    }
     for path in connectionProjectPaths[id] ?? [] {
       guard let store = stores[path] else { continue }
       await store.removeConnection(id)
@@ -569,6 +583,9 @@ public actor ProjectRegistry {
     case .openProject(let path):
       switch routing(for: path, isSidebar: sidebarConnections.contains(connectionID)) {
       case .project(let canonicalPath):
+        guard !isProjectRelocating(canonicalPath) else {
+          return ProjectRegistryCommandResult(error: "project relocation is in progress")
+        }
         let snapshot = await open(canonicalPath, for: connectionID, channel: channel)
         response = .graphChanged(snapshot)
         error = nil
@@ -591,10 +608,11 @@ public actor ProjectRegistry {
       sidebarConnections.insert(connectionID)
       for path in prunedOpenProjects()
       where Self.isWellFormedProjectPath(path, platformPaths: platformPaths) {
-        _ = await open(
-          Self.canonicalize(path, platformPaths: platformPaths),
-          for: connectionID,
-          channel: channel)
+        let canonicalPath = Self.canonicalize(path, platformPaths: platformPaths)
+        guard !isProjectRelocating(canonicalPath) else {
+          return ProjectRegistryCommandResult(error: "project relocation is in progress")
+        }
+        _ = await open(canonicalPath, for: connectionID, channel: channel)
       }
       response = .recentProjectsListed(authoritativeRecentProjects())
       error = nil
@@ -605,14 +623,19 @@ public actor ProjectRegistry {
       error = nil
 
     case .closeProject(let path):
-      let snapshot = await close(
-        Self.canonicalize(path, platformPaths: platformPaths),
-        for: connectionID)
+      let canonicalPath = Self.canonicalize(path, platformPaths: platformPaths)
+      guard !isProjectRelocating(canonicalPath) else {
+        return ProjectRegistryCommandResult(error: "project relocation is in progress")
+      }
+      let snapshot = await close(canonicalPath, for: connectionID)
       response = snapshot.map(DaemonEvent.graphChanged)
       error = nil
 
     case .forgetProject(let path):
       let canonicalPath = Self.canonicalize(path, platformPaths: platformPaths)
+      guard !isProjectRelocating(canonicalPath) else {
+        return ProjectRegistryCommandResult(error: "project relocation is in progress")
+      }
       _ = await close(canonicalPath, for: connectionID)
       persistence.forgetProject(path: canonicalPath)
       if path != canonicalPath { persistence.forgetProject(path: path) }
@@ -620,6 +643,9 @@ public actor ProjectRegistry {
 
     case .deleteProjectGraph(let path):
       let canonicalPath = Self.canonicalize(path, platformPaths: platformPaths)
+      guard !isProjectRelocating(canonicalPath) else {
+        return ProjectRegistryCommandResult(error: "project relocation is in progress")
+      }
       _ = await close(canonicalPath, for: connectionID)
       persistence.forgetProject(path: canonicalPath)
       // The graph is the only handle on every loop's detached session, so its deletion
@@ -759,6 +785,9 @@ public actor ProjectRegistry {
       case .project(let canonicalPath):
         guard let store = stores[canonicalPath] else {
           return ProjectRegistryCommandResult(error: "\(path) isn't open — open it first.")
+        }
+        guard !(await store.isRelocating) else {
+          return ProjectRegistryCommandResult(error: "project relocation is in progress")
         }
         let graph = await store.graph
         guard let stored = graph.nodesAtAnyDepth.first(where: { $0.id == nodeID }) else {
@@ -916,7 +945,8 @@ public actor ProjectRegistry {
           errorCode: .nodeResourceUnauthorized)
       }
 
-    case .prepareProjectRelocation(let sourcePath, let destinationPath, let options):
+    case .prepareProjectRelocation(
+      let operationID, let sourcePath, let destinationPath, let options):
       guard case .v2 = channel.mode,
         connectionCapabilities[connectionID]?.contains(
           ClientCapability.projectRelocation.rawValue) == true
@@ -925,18 +955,48 @@ public actor ProjectRegistry {
           error: ProjectRelocationError.unauthorized.localizedDescription,
           errorCode: .projectRelocationUnauthorized)
       }
+      var leasedStore: GraphStore?
       do {
-        let preflight = try await relocationPreflight(sourcePath: sourcePath)
+        let preflight = try relocationProject(
+          sourcePath: sourcePath,
+          connectionID: connectionID)
+        guard
+          !preparedRelocations.values.contains(where: {
+            $0.plan.sourcePath == preflight.path
+          })
+        else {
+          throw ProjectRelocationError.preflightFailed
+        }
+        let snapshot = await preflight.store.relocationSnapshot()
+        guard
+          let stableGraph = await preflight.store.beginRelocation(
+            expectedRevision: snapshot.revision)
+        else {
+          throw ProjectRelocationError.graphRevisionChanged
+        }
+        leasedStore = preflight.store
+        try await validateRelocationDependents(graph: stableGraph, path: preflight.path)
         let plan = try relocationCoordinator.prepare(
+          operationID: operationID,
           sourcePath: preflight.path,
           destinationPath: destinationPath,
-          graphRevision: preflight.revision,
-          options: options)
+          graphRevision: snapshot.revision,
+          options: options,
+          persistence: persistence)
+        preparedRelocations[operationID] = PreparedRelocation(
+          connectionID: connectionID,
+          clientID: channel.clientID,
+          plan: plan,
+          options: options,
+          graph: stableGraph,
+          store: preflight.store)
         response = .projectRelocationPrepared(plan)
       } catch let failure as ProjectRelocationError {
+        if let leasedStore { await leasedStore.endRelocation() }
         return ProjectRegistryCommandResult(
           error: failure.localizedDescription, errorCode: Self.wireCode(for: failure))
       } catch {
+        if let leasedStore { await leasedStore.endRelocation() }
         return ProjectRegistryCommandResult(
           error: ProjectRelocationError.preflightFailed.localizedDescription,
           errorCode: .projectRelocationPreflight)
@@ -952,34 +1012,61 @@ public actor ProjectRegistry {
           errorCode: .projectRelocationUnauthorized)
       }
       do {
-        let preflight = try await relocationPreflight(sourcePath: request.sourcePath)
-        guard preflight.revision == request.expectedGraphRevision else {
-          throw ProjectRelocationError.graphRevisionChanged
+        let clientID = channel.clientID
+        if let replay = try relocationCoordinator.replayResult(
+          for: request, authorizedClientID: clientID)
+        {
+          return ProjectRegistryCommandResult(response: .projectRelocated(replay))
         }
-        guard
-          let stableGraph = await preflight.store.beginRelocation(
-            expectedRevision: request.expectedGraphRevision)
+        guard let prepared = preparedRelocations[request.operationID],
+          prepared.connectionID == connectionID
         else {
-          throw ProjectRelocationError.graphRevisionChanged
+          throw ProjectRelocationError.unauthorized
         }
-        var committed = false
-        defer {
-          if !committed {
-            Task { await preflight.store.endRelocation() }
-          }
+        let expectedRequest = ProjectRelocationRequest(
+          operationID: prepared.plan.operationID,
+          sourcePath: prepared.plan.sourcePath,
+          destinationPath: prepared.plan.destinationPath,
+          expectedSourceIdentity: prepared.plan.sourceIdentity,
+          expectedGraphRevision: prepared.plan.graphRevision,
+          options: prepared.options)
+        guard request == expectedRequest else {
+          throw ProjectRelocationError.duplicateConflict
         }
+        try await validateRelocationDependents(
+          graph: prepared.graph, path: prepared.plan.sourcePath)
+        writer.beginRelocation(path: prepared.plan.sourcePath)
+        try await validateRelocationDependents(
+          graph: prepared.graph, path: prepared.plan.sourcePath)
         let result = try relocationCoordinator.relocate(
-          request, graph: stableGraph, persistence: persistence)
-        committed = !FileManager.default.fileExists(atPath: result.sourcePath)
+          request,
+          authorizedClientID: prepared.clientID,
+          graph: prepared.graph,
+          persistence: persistence)
+        preparedRelocations.removeValue(forKey: request.operationID)
         await convergeRelocation(
-          result, oldStore: preflight.store, requestingConnection: connectionID)
+          result, oldStore: prepared.store, requestingConnection: connectionID)
         return ProjectRegistryCommandResult(
           response: .projectRelocated(result),
           closeConnectionAfterResponse: result.recoveryRequired)
       } catch let failure as ProjectRelocationError {
+        if let prepared = preparedRelocations[request.operationID],
+          prepared.connectionID == connectionID
+        {
+          preparedRelocations.removeValue(forKey: request.operationID)
+          writer.cancelRelocation(path: prepared.plan.sourcePath)
+          await prepared.store.endRelocation()
+        }
         return ProjectRegistryCommandResult(
           error: failure.localizedDescription, errorCode: Self.wireCode(for: failure))
       } catch {
+        if let prepared = preparedRelocations[request.operationID],
+          prepared.connectionID == connectionID
+        {
+          preparedRelocations.removeValue(forKey: request.operationID)
+          writer.cancelRelocation(path: prepared.plan.sourcePath)
+          await prepared.store.endRelocation()
+        }
         return ProjectRegistryCommandResult(
           error: ProjectRelocationError.preflightFailed.localizedDescription,
           errorCode: .projectRelocationPreflight)
@@ -1121,13 +1208,17 @@ public actor ProjectRegistry {
     }
   }
 
-  private func relocationPreflight(sourcePath: String) async throws -> (
-    path: String, graph: LoopGraph, revision: Int, store: GraphStore
-  ) {
+  private func relocationProject(
+    sourcePath: String,
+    connectionID: UUID
+  ) throws -> (path: String, store: GraphStore) {
     guard Self.isWellFormedProjectPath(sourcePath, platformPaths: platformPaths) else {
       throw ProjectRelocationError.unsafePath
     }
     let path = Self.canonicalize(sourcePath, platformPaths: platformPaths)
+    guard connectionProjectPaths[connectionID]?.contains(path) == true else {
+      throw ProjectRelocationError.unauthorized
+    }
     let metadata = classifyProject(path)
     guard metadata.location == .local, metadata.capabilities.projectRelocation else {
       throw ProjectRelocationError.unsupported
@@ -1135,19 +1226,28 @@ public actor ProjectRegistry {
     guard let store = stores[path] else {
       throw ProjectRelocationError.preflightFailed
     }
-    let snapshot = await store.relocationSnapshot()
-    guard snapshot.graph.nodesAtAnyDepth.allSatisfy({ $0.worktreeBinding == nil }) else {
+    return (path, store)
+  }
+
+  private func validateRelocationDependents(
+    graph: LoopGraph,
+    path: String
+  ) async throws {
+    guard graph.nodesAtAnyDepth.allSatisfy({ $0.worktreeBinding == nil }) else {
       throw ProjectRelocationError.activeWorktrees
     }
     guard let nodeSessionExists else {
       throw ProjectRelocationError.preflightFailed
     }
-    for node in snapshot.graph.nodesAtAnyDepth {
+    for node in graph.nodesAtAnyDepth {
       if await nodeSessionExists(node, path) {
         throw ProjectRelocationError.activeSessions
       }
     }
-    return (path, snapshot.graph, snapshot.revision, store)
+  }
+
+  private func isProjectRelocating(_ path: String) -> Bool {
+    preparedRelocations.values.contains { $0.plan.sourcePath == path }
   }
 
   private func convergeRelocation(

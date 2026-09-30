@@ -446,6 +446,7 @@ const nodeResourcePageSchema = z.object({
 });
 
 const projectRelocationPlanSchema = z.object({
+  operationID: uuidLike,
   sourcePath: z.string().min(1),
   destinationPath: z.string().min(1),
   sourceIdentity: z.string().min(1),
@@ -453,7 +454,6 @@ const projectRelocationPlanSchema = z.object({
 });
 
 const projectRelocationResultSchema = projectRelocationPlanSchema.extend({
-  operationID: uuidLike,
   recoveryRequired: z.boolean(),
 });
 

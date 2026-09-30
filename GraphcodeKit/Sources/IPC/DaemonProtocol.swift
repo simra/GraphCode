@@ -65,6 +65,7 @@ public enum DaemonCommand: Codable, Sendable, Equatable {
   /// never enters graph snapshots, broadcasts, or replay.
   case nodeResource(projectPath: String, query: NodeResourceQuery)
   case prepareProjectRelocation(
+    operationID: UUID,
     sourcePath: String,
     destinationPath: String,
     options: ProjectRelocationOptions
