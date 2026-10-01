@@ -36,6 +36,23 @@ public enum GraphStoreCommandResult: Equatable, Sendable {
   case rejected(message: String, graph: LoopGraph)
 }
 
+public enum GraphEffectCausalDisposition: Equatable, Sendable {
+  case execute
+  case superseded
+  case conflict
+}
+
+public enum GraphEffectCausalityError: Error, Equatable, LocalizedError, Sendable {
+  case destructiveEffectConflictsWithCurrentNode(UUID)
+
+  public var errorDescription: String? {
+    switch self {
+    case .destructiveEffectConflictsWithCurrentNode(let nodeID):
+      return "pending destructive effects conflict with current node \(nodeID)"
+    }
+  }
+}
+
 public struct GraphPostCommitEffectPlan: Codable, Equatable, Sendable {
   public enum Operation: Codable, Equatable, Sendable {
     case ensureSession(effectID: UUID, node: LoopNode)
@@ -167,11 +184,104 @@ public struct GraphPostCommitEffectPlan: Codable, Equatable, Sendable {
   public var id: UUID
   public var projectPath: String
   public var operations: [Operation]
+  public var nodeIncarnations: [UUID: Date]?
 
-  public init(id: UUID = UUID(), projectPath: String, operations: [Operation]) {
+  public init(
+    id: UUID = UUID(),
+    projectPath: String,
+    operations: [Operation],
+    nodeIncarnations: [UUID: Date]? = nil
+  ) {
     self.id = id
     self.projectPath = projectPath
     self.operations = operations
+    self.nodeIncarnations = nodeIncarnations
+  }
+
+  public func causalDisposition(
+    of operation: Operation,
+    authoritativeGraph: LoopGraph?
+  ) -> GraphEffectCausalDisposition {
+    let nodeID = operation.nodeID
+    let current = authoritativeGraph?.nodesAtAnyDepth.first { $0.id == nodeID }
+    let expectedIncarnation =
+      nodeIncarnations?[nodeID] ?? operation.embeddedNode?.createdAt
+    switch operation {
+    case .terminateSession, .removeMemory, .cancelGoalPoller, .cancelHeartbeat:
+      return current == nil ? .execute : .conflict
+    case .ensureSession(_, let planned):
+      guard let current,
+        expectedIncarnation == current.createdAt,
+        !current.isResolved,
+        planned.loopType == current.loopType,
+        planned.backend == current.backend,
+        planned.modelTier == current.modelTier,
+        planned.worktreeBinding == current.worktreeBinding,
+        planned.sessionPrompt == current.sessionPrompt
+      else { return .superseded }
+      return .execute
+    case .appendMemory:
+      guard let current, expectedIncarnation == current.createdAt else {
+        return .superseded
+      }
+      return .execute
+    case .armGoalPoller(let planned):
+      guard let current,
+        expectedIncarnation == current.createdAt,
+        current.loopType == .goalBased,
+        planned.goal == current.goal
+      else { return .superseded }
+      return .execute
+    case .armHeartbeat(let planned):
+      guard let current,
+        expectedIncarnation == current.createdAt,
+        current.loopType == .timeBased,
+        planned.heartbeatIntervalSeconds == current.heartbeatIntervalSeconds,
+        planned.triggerPrompt == current.triggerPrompt
+      else { return .superseded }
+      return .execute
+    }
+  }
+
+  public func reconciled(authoritativeGraph: LoopGraph?) throws -> GraphPostCommitEffectPlan {
+    var reconciled = self
+    reconciled.operations = try operations.compactMap { operation in
+      switch causalDisposition(of: operation, authoritativeGraph: authoritativeGraph) {
+      case .execute: return operation
+      case .superseded: return nil
+      case .conflict:
+        throw GraphEffectCausalityError.destructiveEffectConflictsWithCurrentNode(
+          operation.nodeID)
+      }
+    }
+    let retainedNodeIDs = Set(reconciled.operations.map(\.nodeID))
+    reconciled.nodeIncarnations = nodeIncarnations?.filter {
+      retainedNodeIDs.contains($0.key)
+    }
+    return reconciled
+  }
+}
+
+extension GraphPostCommitEffectPlan.Operation {
+  var nodeID: UUID {
+    switch self {
+    case .ensureSession(_, let node), .terminateSession(_, let node),
+      .armGoalPoller(let node), .armHeartbeat(let node):
+      return node.id
+    case .appendMemory(_, let nodeID, _), .removeMemory(let nodeID),
+      .cancelGoalPoller(let nodeID), .cancelHeartbeat(let nodeID):
+      return nodeID
+    }
+  }
+
+  var embeddedNode: LoopNode? {
+    switch self {
+    case .ensureSession(_, let node), .terminateSession(_, let node),
+      .armGoalPoller(let node), .armHeartbeat(let node):
+      return node
+    case .appendMemory, .removeMemory, .cancelGoalPoller, .cancelHeartbeat:
+      return nil
+    }
   }
 }
 
@@ -1437,7 +1547,9 @@ public actor GraphStore {
     let removed = before.nodesAtAnyDepth.filter { afterByID[$0.id] == nil }
     let topLevelAdded = Set(after.nodes.filter { beforeByID[$0.id] == nil }.map(\.id))
     var operations: [GraphPostCommitEffectPlan.Operation] = []
+    var nodeIncarnations: [UUID: Date] = [:]
     for node in added {
+      nodeIncarnations[node.id] = node.createdAt
       if let creator = node.createdBy, let parent = afterByID[creator] {
         operations.append(
           .appendMemory(
@@ -1460,12 +1572,16 @@ public actor GraphStore {
       }
     }
     for node in removed {
+      nodeIncarnations[node.id] = node.createdAt
       operations.append(.terminateSession(effectID: UUID(), node: node))
       operations.append(.removeMemory(nodeID: node.id))
       operations.append(.cancelGoalPoller(nodeID: node.id))
       operations.append(.cancelHeartbeat(nodeID: node.id))
     }
-    return GraphPostCommitEffectPlan(projectPath: after.project.path, operations: operations)
+    return GraphPostCommitEffectPlan(
+      projectPath: after.project.path,
+      operations: operations,
+      nodeIncarnations: nodeIncarnations)
   }
 
   private static func nestedRecurrenceIsLive(
@@ -1484,6 +1600,15 @@ public actor GraphStore {
   public func applyPostCommitEffects(_ plan: GraphPostCommitEffectPlan) async throws {
     guard plan.projectPath == graph.project.path else { return }
     for operation in plan.operations {
+      switch plan.causalDisposition(of: operation, authoritativeGraph: graph) {
+      case .superseded:
+        continue
+      case .conflict:
+        throw GraphEffectCausalityError.destructiveEffectConflictsWithCurrentNode(
+          operation.nodeID)
+      case .execute:
+        break
+      }
       switch operation {
       case .ensureSession(let effectID, let node):
         if let onEnsureSessionEffect {

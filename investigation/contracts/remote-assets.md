@@ -194,6 +194,26 @@ cleanup run. The tombstone remains while any authorized journal is pending. Appl
 markers are durable before manifest compaction; startup repairs a crash between those
 steps and prunes only generations that are neither current nor pending.
 
+Before each manifest switch, every carried journal is reconciled against the projected
+authoritative graph. A node incarnation is `(UUID, createdAt)`: constructive session,
+memory, and recurrence effects execute only for that exact incarnation and compatible
+current configuration. Removal atomically drops obsolete ensure, append, and arm effects
+while retaining the new terminate, remove, cancel, and asset-cleanup work. Incompatible
+updates and retypes supersede older constructive effects rather than executing stale
+configuration. Destructive effects execute only while the node UUID is absent; recreating
+the same UUID is backpressured until cleanup for the prior incarnation is durably applied,
+because session and memory resources are keyed by UUID. Changed journals are staged under
+new generation files before the switch, unchanged journals retain receipt identity, and
+the manifest authenticates only the reconciled ordered set. Recovery repeats the same
+causal validation before each operation. Legacy journals infer incarnation from their
+generation graph or embedded node where available; ambiguous UUID-only constructive work
+is discarded rather than attached to a possible replacement incarnation. Attachment
+lease recovery independently requires the current node to contain the exact authenticated
+opaque references for every leased name, size, digest, project identity, node ID, and
+draft owner. A same-UUID replacement with different or missing references rolls the old
+lease back; held deletion cleanup activates only when the replacement does not retain any
+exact descriptor from that deletion transaction.
+
 After durable graph success, the host executes the effect journal and idempotently
 publishes retained content before the catalog drops the lease. Session launch and
 termination effects carry stable identifiers and are awaited through throwing backend

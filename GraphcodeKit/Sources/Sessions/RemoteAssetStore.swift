@@ -1592,10 +1592,11 @@ public actor RemoteAssetStore {
   }
 
   public func reconcile(
-    projectPath: String, metadata: ProjectMetadata, graphNodeIDs: Set<UUID>
+    projectPath: String, metadata: ProjectMetadata, graphNodes: [LoopNode]
   ) async {
     await maintainFinalizedDrafts()
     let identity = RemoteAssetIdentity.project(projectPath, metadata)
+    let graphNodesByID = Dictionary(uniqueKeysWithValues: graphNodes.map { ($0.id, $0) })
     if cleanupQueue.values.contains(where: {
       $0.projectIdentity == identity && ($0.status == .pending || $0.status == .held)
     }) {
@@ -1619,13 +1620,16 @@ public actor RemoteAssetStore {
     for key in drafts.keys where drafts[key]?.projectIdentity == identity {
       drafts[key]?.projectPath = projectPath
     }
-    let deletionTransactions = Set<UUID>(
-      cleanupQueue.values.compactMap { record in
-        guard record.projectIdentity == identity, record.status == .held,
-          !graphNodeIDs.contains(record.context.nodeID), let transactionID = record.transactionID
-        else { return nil }
-        return transactionID
-      })
+    let heldDeletionRecords = cleanupQueue.values.filter {
+      $0.projectIdentity == identity && $0.status == .held && $0.transactionID != nil
+    }
+    let deletionTransactions = Set(heldDeletionRecords.compactMap(\.transactionID)).filter {
+      transactionID in
+      heldDeletionRecords.filter { $0.transactionID == transactionID }.allSatisfy { record in
+        guard let node = graphNodesByID[record.context.nodeID] else { return true }
+        return !cleanupIsReferenced(record, by: node)
+      }
+    }
     for transactionID in deletionTransactions {
       _ = activateDeletion(transactionID: transactionID)
     }
@@ -1633,7 +1637,7 @@ public actor RemoteAssetStore {
       $0.value.projectIdentity == identity
     }
     for (leaseID, lease) in leases {
-      if graphNodeIDs.contains(lease.nodeID) {
+      if let node = graphNodesByID[lease.nodeID], leaseIsReferenced(lease, by: node) {
         switch await finalizeCreate(
           leaseID: leaseID, retainedNames: Set(lease.descriptors.map(\.name)))
         {
@@ -1648,6 +1652,39 @@ public actor RemoteAssetStore {
     }
     await maintainFinalizedDrafts()
     _ = persistCatalog()
+  }
+
+  private func leaseIsReferenced(_ lease: DraftLease, by node: LoopNode) -> Bool {
+    guard node.attachments.count == lease.descriptors.count else { return false }
+    var references: [String: ReferencePayload] = [:]
+    for attachment in node.attachments {
+      guard attachment.isOpaqueReference,
+        let reference = try? decodeReference(attachment.path),
+        references.updateValue(reference, forKey: reference.name) == nil
+      else { return false }
+    }
+    return lease.descriptors.allSatisfy { descriptor in
+      guard let reference = references[descriptor.name] else { return false }
+      return reference.projectIdentity == lease.projectIdentity
+        && reference.nodeID == lease.nodeID
+        && reference.name == descriptor.name
+        && reference.size == descriptor.size
+        && reference.sha256 == descriptor.sha256
+        && reference.draftOwner == lease.owner
+    }
+  }
+
+  private func cleanupIsReferenced(_ record: CleanupRecord, by node: LoopNode) -> Bool {
+    node.attachments.contains { attachment in
+      guard attachment.isOpaqueReference,
+        let reference = try? decodeReference(attachment.path)
+      else { return false }
+      return reference.projectIdentity == record.projectIdentity
+        && reference.nodeID == record.context.nodeID
+        && reference.name == record.descriptor.name
+        && reference.size == record.descriptor.size
+        && reference.sha256 == record.descriptor.sha256
+    }
   }
 
   public func resourceUsage() async -> RemoteAssetUsageSnapshot {

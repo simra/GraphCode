@@ -1130,11 +1130,7 @@ public actor ProjectRegistry {
       }
       var projectEffectError: (any Error)?
       do {
-        if let store = stores[canonicalPath] {
-          try await store.applyPostCommitEffects(projectEffectPlan)
-        } else {
-          try await applyDeletedProjectEffects(projectEffectPlan)
-        }
+        try await applyDeletedProjectEffects(projectEffectPlan)
         persistence.markGraphEffectsApplied(graphReceipt)
       } catch {
         projectEffectError = error
@@ -2444,7 +2440,7 @@ public actor ProjectRegistry {
         graph.project.metadata ?? ProjectMetadata.inferred(fromProjectPath: canonicalPath)
       await remoteAssets.reconcile(
         projectPath: canonicalPath, metadata: metadata,
-        graphNodeIDs: Set(graph.nodesAtAnyDepth.map(\.id)))
+        graphNodes: graph.nodesAtAnyDepth)
     }
     connectionProjectPaths[connectionID, default: []].insert(canonicalPath)
     let snapshot = await store.addConnection(id: connectionID, channel: channel)
@@ -2466,11 +2462,11 @@ public actor ProjectRegistry {
   }
 
   private func recoverRemoteAssetsAtStartup() async {
-    var projects: [String: (ProjectMetadata, Set<UUID>)] = [:]
+    var projects: [String: (ProjectMetadata, [LoopNode])] = [:]
     for graph in persistence.loadStoredGraphs()
     where graph.project.path != LoopGraphScope.globalPath {
       let metadata = graph.project.metadata ?? classifyProject(graph.project.path)
-      projects[graph.project.path] = (metadata, Set(graph.nodesAtAnyDepth.map(\.id)))
+      projects[graph.project.path] = (metadata, graph.nodesAtAnyDepth)
     }
     for project in persistence.loadRecentProjects()
     where project.path != LoopGraphScope.globalPath && projects[project.path] == nil {
@@ -2482,7 +2478,7 @@ public actor ProjectRegistry {
     }
     for (path, value) in projects {
       await remoteAssets.reconcile(
-        projectPath: path, metadata: value.0, graphNodeIDs: value.1)
+        projectPath: path, metadata: value.0, graphNodes: value.1)
     }
     await remoteAssets.maintainRecoveredState()
   }
@@ -2510,7 +2506,8 @@ public actor ProjectRegistry {
   }
 
   private func applyDeletedProjectEffects(_ plan: GraphPostCommitEffectPlan) async throws {
-    for operation in plan.operations {
+    let reconciled = try plan.reconciled(authoritativeGraph: nil)
+    for operation in reconciled.operations {
       switch operation {
       case .terminateSession(let effectID, let node):
         if let terminateSession {
