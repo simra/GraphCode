@@ -174,12 +174,23 @@ name and verifies regular/single-link identity plus exact size and SHA-256 in a
 lease-owned namespace. Local retained objects use a compact full-digest content key;
 SSH/Codespace use the equivalent no-replace hard-link/unlink operation. The lease is
 reverified immediately before `GraphStore`, and launch during the graph command resolves
-from that lease. `GraphStore` must receive an acknowledged atomic save of the exact graph
-snapshot before replay, broadcast, or lease publication. Save failure restores the
-pre-command graph and rolls back only the draft-owned lease. After durable graph success,
-the host idempotently publishes retained content and the catalog drops the lease; a
-restart between those steps completes publication from the persisted graph as authority.
-Existing retained content is verified and never removed by rollback. Successful creation
+from that lease. `GraphStore` projects the exact command in a side-effect-free store,
+derives a durable post-commit plan for session, memory, and recurrence changes, and commits
+the projected graph before executing that plan. Save failure leaves the live graph,
+sessions, memory, recurrence, replay, broadcasts, and retained assets unchanged.
+
+Graph and Mailroom bytes are written to one generation namespace. An atomic current-
+generation manifest selects both files, so restart observes either the complete old pair
+or the complete new pair. The same generation contains the post-commit effect journal;
+startup replays only a manifest-authorized generation and ignores failed pre-switch
+writes. Whole-project deletion atomically selects a deletion tombstone before effects or
+cleanup run. The tombstone and effect journal remain until idempotent recovery is
+acknowledged, then are removed. Existing split graph/Mailroom files migrate on load.
+
+After durable graph success, the host executes the effect journal and idempotently
+publishes retained content before the catalog drops the lease. A restart between those
+steps uses the persisted graph as authority. Existing retained content is verified and
+never removed by rollback. Successful creation
 removes only unselected draft files. Cleanup failures release draft accounting only after
 durable cleanup ownership exists and never delete pre-existing files or an existing node
 directory.
@@ -193,6 +204,15 @@ restores the graph, and leaves assets intact. Whole-project deletion follows the
 ordering by durably deleting the graph before activating cleanup or terminating project
 state. Startup atomically activates complete held transactions whose nodes are absent
 from the authoritative persisted graph.
+
+Outstanding cleanup also retains a bounded authenticated routing locator in the protected
+asset catalog. It contains the opaque project identity, the minimum authoritative
+local/SSH/Codespace route, location metadata, and an original bounded expiry, signed with
+the daemon asset key. This locator is not placed in graph JSON, replay, recents, or logs.
+It survives whole-project deletion and lets startup retry cleanup without an open/recent
+project entry; it is removed only after that project's pending/held records finish.
+Tampered, malformed, oversized, or excess locators follow the catalog's bounded
+quarantine policy.
 
 Deletion opens a stable parent, no-follow verifies the exact safe name, size, SHA-256, and
 identity, and moves the candidate to a deterministic private cleanup name before unlink.

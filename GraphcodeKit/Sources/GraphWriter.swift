@@ -22,7 +22,8 @@ public final class GraphWriter: @unchecked Sendable {
 
   private struct PendingWrite {
     var graph: LoopGraph
-    var acknowledgements: [@Sendable (Result<Void, Failure>) -> Void]
+    var effectPlan: GraphPostCommitEffectPlan?
+    var acknowledgements: [@Sendable (Result<GraphPersistenceReceipt, Failure>) -> Void]
   }
 
   private let persistence: ProjectPersistence
@@ -56,7 +57,7 @@ public final class GraphWriter: @unchecked Sendable {
       pending[graph.project.path] = writes
     } else {
       pending[graph.project.path, default: []].append(
-        PendingWrite(graph: graph, acknowledgements: []))
+        PendingWrite(graph: graph, effectPlan: nil, acknowledgements: []))
     }
     let drainNeeded = !scheduled
     scheduled = true
@@ -68,28 +69,33 @@ public final class GraphWriter: @unchecked Sendable {
   /// Queues a graph and resumes only after the serial writer has atomically persisted
   /// it. Every acknowledgement attached to a coalesced write observes that write's
   /// success or failure.
-  public func saveAcknowledged(_ graph: LoopGraph) async throws {
+  public func saveAcknowledged(
+    _ graph: LoopGraph,
+    effectPlan: GraphPostCommitEffectPlan? = nil
+  ) async throws -> GraphPersistenceReceipt {
     try await withCheckedThrowingContinuation {
-      (continuation: CheckedContinuation<Void, any Error>) in
+      (continuation: CheckedContinuation<GraphPersistenceReceipt, any Error>) in
       lock.lock()
       guard !relocationBlockedPaths.contains(graph.project.path) else {
         lock.unlock()
         continuation.resume(throwing: Failure.relocationInProgress)
         return
       }
-      let acknowledge: @Sendable (Result<Void, Failure>) -> Void = { result in
+      let acknowledge: @Sendable (Result<GraphPersistenceReceipt, Failure>) -> Void = { result in
         continuation.resume(with: result)
       }
       if var writes = pending[graph.project.path], var existing = writes.last,
         existing.acknowledgements.isEmpty
       {
         existing.graph = graph
+        existing.effectPlan = effectPlan
         existing.acknowledgements.append(acknowledge)
         writes[writes.count - 1] = existing
         pending[graph.project.path] = writes
       } else {
         pending[graph.project.path, default: []].append(
-          PendingWrite(graph: graph, acknowledgements: [acknowledge]))
+          PendingWrite(
+            graph: graph, effectPlan: effectPlan, acknowledgements: [acknowledge]))
       }
       let drainNeeded = !scheduled
       scheduled = true
@@ -140,14 +146,17 @@ public final class GraphWriter: @unchecked Sendable {
     }
   }
 
-  public func deleteAcknowledged(path: String) throws {
+  public func deleteAcknowledged(
+    path: String,
+    effectPlan: GraphPostCommitEffectPlan? = nil
+  ) throws -> GraphPersistenceReceipt {
     lock.lock()
     relocationBlockedPaths.insert(path)
     lock.unlock()
     do {
-      try queue.sync {
+      return try queue.sync {
         drain()
-        try persistence.deleteGraphAcknowledged(path: path)
+        return try persistence.deleteGraphAcknowledged(path: path, effectPlan: effectPlan)
       }
     } catch {
       lock.lock()
@@ -200,10 +209,18 @@ public final class GraphWriter: @unchecked Sendable {
       lock.unlock()
       beforeWrite(write.graph)
       do {
-        try persistence.saveGraphAcknowledged(write.graph)
-        for acknowledge in write.acknowledgements { acknowledge(.success(())) }
+        let receipt = try persistence.saveGraphAcknowledged(
+          write.graph, effectPlan: write.effectPlan)
+        for acknowledge in write.acknowledgements { acknowledge(.success(receipt)) }
       } catch {
         let failure = Failure.persistenceFailed(String(describing: error))
+        if write.acknowledgements.isEmpty {
+          DaemonLog.shared.record(
+            "graph-writer-save-failure",
+            [
+              ("error-type", String(reflecting: type(of: error)))
+            ])
+        }
         for acknowledge in write.acknowledgements { acknowledge(.failure(failure)) }
         if !write.acknowledgements.isEmpty {
           lock.lock()

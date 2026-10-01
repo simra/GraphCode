@@ -410,6 +410,10 @@ public actor ProjectRegistry {
     relocationCoordinator: ProjectRelocationCoordinator? = nil,
     beforeGraphWrite: @escaping @Sendable (LoopGraph) throws -> Void = { _ in },
     beforeGraphDelete: @escaping @Sendable (String) throws -> Void = { _ in },
+    beforeGraphTransactionStage:
+      @escaping @Sendable (
+        LoopGraph, GraphPersistenceStage
+      ) throws -> Void = { _, _ in },
     classifyProject: @escaping @Sendable (String) -> ProjectMetadata = {
       ProjectMetadata.inferred(fromProjectPath: $0)
     }
@@ -417,7 +421,8 @@ public actor ProjectRegistry {
     self.platformPaths = platformPaths
     persistence = ProjectPersistence(
       baseDirectory: persistenceDirectory, platformPaths: platformPaths,
-      beforeGraphWrite: beforeGraphWrite, beforeGraphDelete: beforeGraphDelete)
+      beforeGraphWrite: beforeGraphWrite, beforeGraphDelete: beforeGraphDelete,
+      beforeGraphTransactionStage: beforeGraphTransactionStage)
     writer = GraphWriter(persistence: persistence)
     self.persistsSynchronously = persistsSynchronously
     quickChatStore = QuickChatStore(baseDirectory: persistenceDirectory)
@@ -507,6 +512,7 @@ public actor ProjectRegistry {
         ])
     }
     Task { [weak self] in
+      await self?.recoverGraphPostCommitEffects()
       await self?.recoverRemoteAssetsAtStartup()
     }
   }
@@ -1010,8 +1016,20 @@ public actor ProjectRegistry {
         return ProjectRegistryCommandResult(
           error: failure.message, errorCode: Self.wireCode(for: failure))
       }
+      let projectEffectPlan = GraphPostCommitEffectPlan(
+        projectPath: canonicalPath,
+        operations: (graph?.nodesAtAnyDepth ?? []).flatMap { node in
+          [
+            .terminateSession(node),
+            .removeMemory(nodeID: node.id),
+            .cancelGoalPoller(nodeID: node.id),
+            .cancelHeartbeat(nodeID: node.id),
+          ]
+        })
+      let graphReceipt: GraphPersistenceReceipt
       do {
-        try writer.deleteAcknowledged(path: canonicalPath)
+        graphReceipt = try writer.deleteAcknowledged(
+          path: canonicalPath, effectPlan: projectEffectPlan)
       } catch {
         if let deletionTransactionID {
           _ = await remoteAssets.cancelDeletion(transactionID: deletionTransactionID)
@@ -1026,12 +1044,14 @@ public actor ProjectRegistry {
           .errorOccurred(
             "project attachment cleanup is durably held and will resume after restart"))
       }
+      if let store = stores[canonicalPath] {
+        await store.applyPostCommitEffects(projectEffectPlan)
+      } else {
+        await applyDeletedProjectEffects(projectEffectPlan)
+      }
+      persistence.markGraphEffectsApplied(graphReceipt)
       _ = await close(canonicalPath, for: connectionID)
       persistence.forgetProject(path: canonicalPath)
-      for node in graph?.nodesAtAnyDepth ?? [] {
-        terminateSession?(node, canonicalPath)
-        NodeMemory.remove(projectPath: canonicalPath, nodeID: node.id)
-      }
       // Drop the in-memory store too, or a later reopen would resurrect the graph we
       // just deleted from the one still sitting in `stores`.
       stores.removeValue(forKey: canonicalPath)
@@ -2355,6 +2375,37 @@ public actor ProjectRegistry {
     await remoteAssets.maintainRecoveredState()
   }
 
+  private func recoverGraphPostCommitEffects() async {
+    for pending in persistence.loadPendingGraphEffects() {
+      if persistence.loadGraph(path: pending.receipt.projectPath) != nil {
+        let store = await store(
+          forProjectPath: pending.receipt.projectPath, ensuringSessions: false)
+        await store.applyPostCommitEffects(pending.plan)
+      } else {
+        await applyDeletedProjectEffects(pending.plan)
+      }
+      persistence.markGraphEffectsApplied(pending.receipt)
+    }
+  }
+
+  private func applyDeletedProjectEffects(_ plan: GraphPostCommitEffectPlan) async {
+    for operation in plan.operations {
+      switch operation {
+      case .terminateSession(let node):
+        terminateSession?(node, plan.projectPath)
+      case .removeMemory(let nodeID):
+        NodeMemory.remove(projectPath: plan.projectPath, nodeID: nodeID)
+      case .ensureSession(let node):
+        await ensureSession?(node, plan.projectPath)
+      case .appendMemory(let effectID, let nodeID, let entry):
+        NodeMemory.appendOnce(
+          effectID: effectID, entry, projectPath: plan.projectPath, nodeID: nodeID)
+      case .armGoalPoller, .cancelGoalPoller, .armHeartbeat, .cancelHeartbeat:
+        break
+      }
+    }
+  }
+
   /// Joins every attached sidebar client to a project one of *them* — or the CLI, or a
   /// plugin driving it — just added to the open set, so it arrives as an ordinary
   /// `.graphChanged` snapshot.
@@ -2623,9 +2674,14 @@ public actor ProjectRegistry {
         // the first to have started — see `refreshAwakeAssertion`.
         Task { await self?.refreshAwakeAssertion() }
       },
-      onDurableGraphChanged: { [weak self, writer] updatedGraph in
-        try await writer.saveAcknowledged(updatedGraph)
+      onDurableGraphChanged: { [weak self, writer] updatedGraph, effectPlan in
+        let receipt = try await writer.saveAcknowledged(
+          updatedGraph, effectPlan: effectPlan)
         await self?.refreshAwakeAssertion()
+        return receipt
+      },
+      onDurableEffectsApplied: { [persistence] receipt in
+        persistence.markGraphEffectsApplied(receipt)
       },
       onGraphEvent: { event in
         guard case .graphChanged(let updatedGraph) = event else { return [:] }
@@ -2656,6 +2712,10 @@ public actor ProjectRegistry {
       // `GraphStore` stays unaware of where memory lives — the same split as sessions.
       onAppendMemory: { nodeID, entry in
         NodeMemory.append(entry, projectPath: path, nodeID: nodeID)
+      },
+      onAppendMemoryOnce: { effectID, nodeID, entry in
+        NodeMemory.appendOnce(
+          effectID: effectID, entry, projectPath: path, nodeID: nodeID)
       },
       onRemoveMemory: { nodeID in
         NodeMemory.remove(projectPath: path, nodeID: nodeID)

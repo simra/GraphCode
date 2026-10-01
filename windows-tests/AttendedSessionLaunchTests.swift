@@ -94,11 +94,12 @@ struct AttendedSessionLaunchTests {
       channel: DaemonConnectionChannel(connection: connection, mode: .v1))
     await registry.handle(.openProject(path: projectPath), connectionID: connectionID)
     let sketchID = UUID()
-    await registry.handle(
+    let created = await registry.apply(
       .graphCommand(
         projectPath: projectPath,
         command: .createNode(NodeDraft(id: sketchID, title: "Main", loopType: .sketch))),
       connectionID: connectionID)
+    #expect(created?.error == nil)
 
     let result = await registry.apply(
       .openNodeSession(projectPath: projectPath, nodeID: sketchID),

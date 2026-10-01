@@ -118,6 +118,23 @@ public enum NodeMemory {
     }
   }
 
+  public static func appendOnce(
+    effectID: UUID, _ entry: String, projectPath: String, nodeID: UUID,
+    baseURL: URL = SupportDirectory.url
+  ) {
+    withStorageLock {
+      let marker = " [graph-effect:\(effectID.uuidString)]"
+      let url = logURL(forProjectPath: projectPath, nodeID: nodeID, baseURL: baseURL)
+      if let existing = try? String(contentsOf: url, encoding: .utf8),
+        existing.contains(marker)
+      {
+        return
+      }
+      appendUnlocked(
+        entry + marker, projectPath: projectPath, nodeID: nodeID, baseURL: baseURL)
+    }
+  }
+
   private static func appendUnlocked(
     _ entry: String, projectPath: String, nodeID: UUID, baseURL: URL
   ) {
@@ -158,7 +175,13 @@ public enum NodeMemory {
   ) -> [String] {
     let url = logURL(forProjectPath: projectPath, nodeID: nodeID, baseURL: baseURL)
     guard let text = try? String(contentsOf: url, encoding: .utf8) else { return [] }
-    return text.split(whereSeparator: \.isNewline).map(String.init)
+    return text.split(whereSeparator: \.isNewline).map {
+      let line = String($0)
+      guard let marker = line.range(of: " [graph-effect:", options: .backwards),
+        line.hasSuffix("]")
+      else { return line }
+      return String(line[..<marker.lowerBound])
+    }
   }
 
   /// Writes the wake digest — the budgeted view a fresh session reads before starting —

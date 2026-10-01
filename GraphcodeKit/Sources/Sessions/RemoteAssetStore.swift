@@ -596,11 +596,46 @@ public actor RemoteAssetStore {
     }
   }
 
+  private struct CleanupRoutingLocator: Codable, Sendable {
+    var projectIdentity: String
+    var projectPath: String
+    var metadata: ProjectMetadata
+    var createdAt: Date
+    var expiresAt: Date
+    var signature: String
+  }
+
   private struct DurableCatalog: Codable, Sendable {
     var version: Int
     var drafts: [String: DraftState]
     var leases: [UUID: DraftLease]
     var cleanup: [String: CleanupRecord]
+    var routing: [String: CleanupRoutingLocator]
+
+    private enum CodingKeys: String, CodingKey {
+      case version, drafts, leases, cleanup, routing
+    }
+
+    init(
+      version: Int, drafts: [String: DraftState], leases: [UUID: DraftLease],
+      cleanup: [String: CleanupRecord], routing: [String: CleanupRoutingLocator]
+    ) {
+      self.version = version
+      self.drafts = drafts
+      self.leases = leases
+      self.cleanup = cleanup
+      self.routing = routing
+    }
+
+    init(from decoder: Decoder) throws {
+      let values = try decoder.container(keyedBy: CodingKeys.self)
+      version = try values.decode(Int.self, forKey: .version)
+      drafts = try values.decode([String: DraftState].self, forKey: .drafts)
+      leases = try values.decode([UUID: DraftLease].self, forKey: .leases)
+      cleanup = try values.decode([String: CleanupRecord].self, forKey: .cleanup)
+      routing =
+        try values.decodeIfPresent([String: CleanupRoutingLocator].self, forKey: .routing) ?? [:]
+    }
   }
 
   private struct ReferencePayload: Codable, Equatable, Sendable {
@@ -642,6 +677,7 @@ public actor RemoteAssetStore {
   private var drafts: [String: DraftState] = [:]
   private var draftLeases: [UUID: DraftLease] = [:]
   private var cleanupQueue: [String: CleanupRecord] = [:]
+  private var cleanupRouting: [String: CleanupRoutingLocator] = [:]
   private var ownerDraftUsage: [UUID: DraftUsage] = [:]
   private var projectDraftUsage: [String: DraftUsage] = [:]
   private var globalDraftUsage = DraftUsage()
@@ -666,10 +702,18 @@ public actor RemoteAssetStore {
     draftLifetime = max(0, finalizedDraftLifetime)
     self.catalogURL = catalogURL
     self.attachmentsDirectory = attachmentsDirectory
-    let restored = Self.loadCatalog(from: catalogURL)
+    let restored = Self.loadCatalog(from: catalogURL, authenticationKey: self.authenticationKey)
     drafts = restored.drafts
     draftLeases = restored.leases
     cleanupQueue = restored.cleanup
+    cleanupRouting = restored.routing
+    for key in cleanupQueue.keys {
+      guard let record = cleanupQueue[key],
+        let locator = cleanupRouting[record.projectIdentity]
+      else { continue }
+      cleanupQueue[key]?.context.projectPath = locator.projectPath
+      cleanupQueue[key]?.context.metadata = locator.metadata
+    }
     for key in drafts.keys where drafts[key]?.provisional.isEmpty == false {
       drafts[key]?.provisional.removeAll()
     }
@@ -1467,6 +1511,7 @@ public actor RemoteAssetStore {
     else { return .failure(.resourceExhausted) }
     guard !additions.isEmpty else { return .success(nil) }
     let previous = cleanupQueue
+    let previousRouting = cleanupRouting
     let current = now()
     for (context, descriptor, leaseID, target) in additions {
       let key = cleanupKey(
@@ -1479,8 +1524,12 @@ public actor RemoteAssetStore {
         deadline: current.addingTimeInterval(Self.cleanupLifetime), status: .held,
         lastError: nil)
     }
+    if let context = additions.first?.0 {
+      ensureCleanupRouting(context: context, projectIdentity: identity, now: current)
+    }
     guard persistCatalog() else {
       cleanupQueue = previous
+      cleanupRouting = previousRouting
       return .failure(.transportFailure)
     }
     return .success(transactionID)
@@ -1547,6 +1596,14 @@ public actor RemoteAssetStore {
   ) async {
     await maintainFinalizedDrafts()
     let identity = RemoteAssetIdentity.project(projectPath, metadata)
+    if cleanupQueue.values.contains(where: {
+      $0.projectIdentity == identity && ($0.status == .pending || $0.status == .held)
+    }) {
+      ensureCleanupRouting(
+        context: AttachmentTransferContext(
+          projectPath: projectPath, metadata: metadata, nodeID: UUID()),
+        projectIdentity: identity, now: now())
+    }
     for leaseID in draftLeases.keys where draftLeases[leaseID]?.projectIdentity == identity {
       draftLeases[leaseID]?.projectPath = projectPath
     }
@@ -1955,8 +2012,31 @@ public actor RemoteAssetStore {
       attempts: 0, nextAttemptAt: current,
       deadline: current.addingTimeInterval(
         Self.cleanupLifetime), status: .pending, lastError: nil)
+    ensureCleanupRouting(context: context, projectIdentity: identity, now: current)
     _ = persistCatalog()
     scheduleDraftExpiry()
+  }
+
+  private func ensureCleanupRouting(
+    context: AttachmentTransferContext, projectIdentity: String, now current: Date
+  ) {
+    guard !context.projectPath.isEmpty, context.projectPath.utf8.count <= 4_096,
+      let authenticationKey
+    else { return }
+    let expiresAt = current.addingTimeInterval(Self.cleanupLifetime)
+    var locator = CleanupRoutingLocator(
+      projectIdentity: projectIdentity, projectPath: context.projectPath,
+      metadata: context.metadata, createdAt: current, expiresAt: expiresAt, signature: "")
+    locator.signature = Self.routingSignature(locator, key: authenticationKey)
+    cleanupRouting[projectIdentity] = locator
+  }
+
+  private func pruneCleanupRouting() {
+    let owned = Set(
+      cleanupQueue.values.compactMap {
+        $0.status == .pending || $0.status == .held ? $0.projectIdentity : nil
+      })
+    cleanupRouting = cleanupRouting.filter { owned.contains($0.key) }
   }
 
   private func cleanupKey(
@@ -1972,8 +2052,15 @@ public actor RemoteAssetStore {
   @discardableResult
   private func persistCatalog() -> Bool {
     guard let catalogURL else { return true }
+    pruneCleanupRouting()
+    let requiredRouting = Set(
+      cleanupQueue.values.compactMap {
+        $0.status == .pending || $0.status == .held ? $0.projectIdentity : nil
+      })
     let catalog = DurableCatalog(
-      version: 1, drafts: drafts, leases: draftLeases, cleanup: cleanupQueue)
+      version: requiredRouting.isSubset(of: Set(cleanupRouting.keys)) ? 2 : 1,
+      drafts: drafts, leases: draftLeases, cleanup: cleanupQueue,
+      routing: cleanupRouting)
     guard let data = try? JSONEncoder().encode(catalog) else { return false }
     guard data.count <= Self.maximumCatalogBytes else { return false }
     do {
@@ -1986,8 +2073,11 @@ public actor RemoteAssetStore {
     }
   }
 
-  private static func loadCatalog(from catalogURL: URL?) -> DurableCatalog {
-    let empty = DurableCatalog(version: 1, drafts: [:], leases: [:], cleanup: [:])
+  private static func loadCatalog(
+    from catalogURL: URL?, authenticationKey: Data?
+  ) -> DurableCatalog {
+    let empty = DurableCatalog(
+      version: 2, drafts: [:], leases: [:], cleanup: [:], routing: [:])
     guard let catalogURL, FileManager.default.fileExists(atPath: catalogURL.path) else {
       return empty
     }
@@ -2004,10 +2094,24 @@ public actor RemoteAssetStore {
       var draftAttachments = 0
       var orphanLeaseBytes = 0
       var orphanLeaseAttachments = 0
-      guard catalog.version == 1, catalog.cleanup.count <= maximumCleanupRecords,
+      guard catalog.version == 1 || catalog.version == 2,
+        catalog.cleanup.count <= maximumCleanupRecords,
         catalog.drafts.count <= maximumFinalizedDraftsGlobal,
-        catalog.leases.count <= maximumCleanupRecords
+        catalog.leases.count <= maximumCleanupRecords,
+        catalog.routing.count <= maximumCleanupRecords
       else { throw RemoteAssetError.invalidReference }
+      if catalog.version == 2 {
+        guard let authenticationKey else { throw RemoteAssetError.invalidReference }
+        for (identity, locator) in catalog.routing {
+          guard identity == locator.projectIdentity, identity.count == 64,
+            identity.allSatisfy(\.isHexDigit),
+            !locator.projectPath.isEmpty, locator.projectPath.utf8.count <= 4_096,
+            locator.createdAt <= locator.expiresAt,
+            locator.expiresAt.timeIntervalSince(locator.createdAt) <= cleanupLifetime,
+            locator.signature == routingSignature(locator, key: authenticationKey)
+          else { throw RemoteAssetError.invalidReference }
+        }
+      }
       for record in catalog.cleanup.values {
         guard record.projectIdentity.count == 64,
           record.projectIdentity.allSatisfy(\.isHexDigit),
@@ -2022,6 +2126,16 @@ public actor RemoteAssetStore {
           !cleanupBytes.addingReportingOverflow(record.descriptor.size).overflow
         else { throw RemoteAssetError.invalidReference }
         cleanupBytes += record.descriptor.size
+      }
+      if catalog.version == 2 {
+        let routedIdentities = Set(catalog.routing.keys)
+        let requiredIdentities = Set(
+          catalog.cleanup.values.compactMap {
+            $0.status == .pending || $0.status == .held ? $0.projectIdentity : nil
+          })
+        guard requiredIdentities.isSubset(of: routedIdentities),
+          routedIdentities.isSubset(of: Set(catalog.cleanup.values.map(\.projectIdentity)))
+        else { throw RemoteAssetError.invalidReference }
       }
       guard cleanupBytes <= maximumCleanupBytes else {
         throw RemoteAssetError.invalidReference
@@ -2444,6 +2558,20 @@ public actor RemoteAssetStore {
     }
     let innerDigest = GraphcodeSHA256.digest(Data(inner + Array(message)))
     return GraphcodeSHA256.digest(Data(outer + Array(innerDigest)))
+  }
+
+  private static func routingSignature(
+    _ locator: CleanupRoutingLocator, key: Data
+  ) -> String {
+    let encoder = JSONEncoder()
+    encoder.outputFormatting = [.sortedKeys]
+    let metadata = (try? encoder.encode(locator.metadata)) ?? Data()
+    let payload = Data(
+      (locator.projectIdentity + "\0" + locator.projectPath + "\0"
+        + metadata.base64EncodedString() + "\0"
+        + String(locator.createdAt.timeIntervalSince1970) + "\0"
+        + String(locator.expiresAt.timeIntervalSince1970)).utf8)
+    return hmacSHA256(key: key, message: payload).base64EncodedString()
   }
 
   private static func constantTimeEqual(_ lhs: Data, _ rhs: Data) -> Bool {

@@ -1,4 +1,5 @@
 import Foundation
+import MailroomKit
 import XCTest
 
 @testable import GraphcodeKit
@@ -57,6 +58,38 @@ private final class RemoteAssetPersistenceFailure: @unchecked Sendable {
 
   func check() throws {
     if lock.withLock({ failing }) {
+      throw CocoaError(.fileWriteUnknown)
+    }
+  }
+}
+
+private final class RemoteAssetEffectRecorder: @unchecked Sendable {
+  private let lock = NSLock()
+  private var ensured: [UUID] = []
+  private var terminated: [UUID] = []
+  private var appended: [UUID] = []
+  private var removed: [UUID] = []
+
+  func ensure(_ node: LoopNode) { lock.withLock { ensured.append(node.id) } }
+  func terminate(_ node: LoopNode) { lock.withLock { terminated.append(node.id) } }
+  func append(_ nodeID: UUID) { lock.withLock { appended.append(nodeID) } }
+  func remove(_ nodeID: UUID) { lock.withLock { removed.append(nodeID) } }
+
+  func snapshot() -> (ensured: [UUID], terminated: [UUID], appended: [UUID], removed: [UUID]) {
+    lock.withLock { (ensured, terminated, appended, removed) }
+  }
+}
+
+private final class RemoteAssetStageFailure: @unchecked Sendable {
+  private let lock = NSLock()
+  private var stage: GraphPersistenceStage?
+
+  func fail(at stage: GraphPersistenceStage?) {
+    lock.withLock { self.stage = stage }
+  }
+
+  func check(_ candidate: GraphPersistenceStage) throws {
+    if lock.withLock({ stage == candidate }) {
       throw CocoaError(.fileWriteUnknown)
     }
   }
@@ -313,6 +346,7 @@ final class RemoteAssetTests: XCTestCase {
     fixture: Fixture, now: @escaping @Sendable () -> Date = { Date() },
     finalizedDraftLifetime: TimeInterval = RemoteAssetStore.finalizedDraftLifetime,
     catalogURL: URL? = nil,
+    authenticationKey: Data = Data(repeating: 0x41, count: 32),
     attachmentsDirectory: @escaping @Sendable (String, UUID) -> URL = {
       NodeMemory.attachmentsDirectory(forProjectPath: $0, nodeID: $1)
     }
@@ -361,7 +395,7 @@ final class RemoteAssetTests: XCTestCase {
           try await fixture.resolveLease(
             path: path, nodeID: nodeID, leaseID: leaseID, descriptor: descriptor)
         }),
-      authenticationKey: Data(repeating: 0x41, count: 32),
+      authenticationKey: authenticationKey,
       now: now,
       finalizedDraftLifetime: finalizedDraftLifetime,
       catalogURL: catalogURL,
@@ -2701,6 +2735,240 @@ final class RemoteAssetTests: XCTestCase {
       path: project.path, nodeID: durableID, name: durableAttachment.fileName)
     XCTAssertEqual(projectDeleteStaged, durableBytes)
     await registry.removeConnection(connection.id)
+  }
+
+  func testDurableCommandsStageSessionsMemoryAndNestedCascadeEffects() async throws {
+    let project = ProjectRef(path: "C:\\synthetic\\effect-plan", name: "Effects")
+    let parentID = UUID()
+    let childID = UUID()
+    let compositeID = UUID()
+    let nestedID = UUID()
+    let nested = LoopNode(id: nestedID, title: "Nested", loopType: .turnBased)
+    let composite = LoopNode(
+      id: compositeID, title: "Composite", loopType: .composite,
+      subGraph: LoopGraph(project: project, nodes: [nested]))
+    let parent = LoopNode(id: parentID, title: "Parent", loopType: .turnBased)
+    let child = LoopNode(
+      id: childID, title: "Child", loopType: .turnBased, createdBy: parentID)
+    let recorder = RemoteAssetEffectRecorder()
+    let failure = RemoteAssetPersistenceFailure()
+    failure.setFailing(true)
+    let store = GraphStore(
+      graph: LoopGraph(project: project, nodes: [parent, child, composite]),
+      onDurableGraphChanged: { graph, _ in
+        try failure.check()
+        return GraphPersistenceReceipt(
+          projectPath: graph.project.path, generation: UUID().uuidString)
+      },
+      onEnsureSession: { node, _ in recorder.ensure(node) },
+      onTerminateSession: { node, _ in recorder.terminate(node) },
+      onAppendMemory: { nodeID, _ in recorder.append(nodeID) },
+      onAppendMemoryOnce: { _, nodeID, _ in recorder.append(nodeID) },
+      onRemoveMemory: { nodeID in recorder.remove(nodeID) })
+
+    let unattendedID = UUID()
+    let failedCreate = await store.handle(
+      .createNode(
+        NodeDraft(
+          id: unattendedID, title: "Unattended", loopType: .timeBased,
+          triggerPrompt: "/loop 1h Work", createdBy: parentID)),
+      requiresDurablePersistence: true)
+    guard case .rejected = failedCreate else { return XCTFail("expected save failure") }
+    let graphAfterCreateFailure = await store.graph
+    XCTAssertFalse(
+      graphAfterCreateFailure.nodesAtAnyDepth.contains(where: { $0.id == unattendedID }))
+    XCTAssertEqual(recorder.snapshot().ensured, [])
+    XCTAssertEqual(recorder.snapshot().appended, [])
+
+    let failedCascade = await store.handle(
+      .deleteNode(parentID), requiresDurablePersistence: true)
+    guard case .rejected = failedCascade else { return XCTFail("expected cascade save failure") }
+    let graphAfterCascadeFailure = await store.graph
+    XCTAssertTrue(graphAfterCascadeFailure.nodesAtAnyDepth.contains(where: { $0.id == parentID }))
+    XCTAssertTrue(graphAfterCascadeFailure.nodesAtAnyDepth.contains(where: { $0.id == childID }))
+    XCTAssertEqual(recorder.snapshot().terminated, [])
+    XCTAssertEqual(recorder.snapshot().removed, [])
+
+    let failedNested = await store.handle(
+      .subGraphCommand(nodeID: compositeID, command: .deleteNode(nestedID)),
+      requiresDurablePersistence: true)
+    guard case .rejected = failedNested else { return XCTFail("expected nested save failure") }
+    let graphAfterNestedFailure = await store.graph
+    XCTAssertTrue(graphAfterNestedFailure.nodesAtAnyDepth.contains(where: { $0.id == nestedID }))
+    XCTAssertEqual(recorder.snapshot().terminated, [])
+
+    failure.setFailing(false)
+    let committed = await store.handle(
+      .deleteNode(parentID), requiresDurablePersistence: true)
+    guard case .applied = committed else { return XCTFail("expected durable delete") }
+    XCTAssertEqual(Set(recorder.snapshot().terminated), [parentID, childID])
+    XCTAssertEqual(Set(recorder.snapshot().removed), [parentID, childID])
+  }
+
+  func testGraphAndMailroomGenerationSwitchIsCoherentAcrossEveryFaultBoundary() throws {
+    let root = FileManager.default.temporaryDirectory
+      .appendingPathComponent("graph-generation-\(UUID())", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let path = "C:\\synthetic\\generation"
+    let project = ProjectRef(path: path, name: "Generation")
+    let oldNode = LoopNode(id: UUID(), title: "Old", loopType: .turnBased)
+    let newNode = LoopNode(id: UUID(), title: "New", loopType: .turnBased)
+    let oldPost = MailroomPost(
+      id: 1, at: Date(timeIntervalSince1970: 1), authorID: nil,
+      author: "old", topic: nil, body: "old room")
+    let newPost = MailroomPost(
+      id: 2, at: Date(timeIntervalSince1970: 2), authorID: nil,
+      author: "new", topic: nil, body: "new room")
+    var oldGraph = LoopGraph(project: project, nodes: [oldNode])
+    oldGraph.mailroom = [oldPost]
+    var newGraph = LoopGraph(project: project, nodes: [newNode])
+    newGraph.mailroom = [newPost]
+    let effectPlan = GraphPostCommitEffectPlan(
+      projectPath: path,
+      operations: [.ensureSession(newNode)])
+    let failure = RemoteAssetStageFailure()
+    let persistence = ProjectPersistence(
+      baseDirectory: root, platformPaths: CurrentPlatformPaths.value,
+      beforeGraphTransactionStage: { _, stage in try failure.check(stage) })
+    try persistence.saveGraphAcknowledged(oldGraph)
+
+    for stage in [
+      GraphPersistenceStage.beforeGraphWrite, .afterGraphWrite, .afterMailroomWrite,
+      .beforeManifestSwitch,
+    ] {
+      failure.fail(at: stage)
+      XCTAssertThrowsError(
+        try persistence.saveGraphAcknowledged(newGraph, effectPlan: effectPlan))
+      let restored = try XCTUnwrap(ProjectPersistence(baseDirectory: root).loadGraph(path: path))
+      XCTAssertEqual(restored.nodes.map(\.id), [oldNode.id])
+      XCTAssertEqual(restored.mailroom, [oldPost])
+      XCTAssertTrue(ProjectPersistence(baseDirectory: root).loadPendingGraphEffects().isEmpty)
+    }
+
+    failure.fail(at: .afterManifestSwitch)
+    XCTAssertNoThrow(
+      try persistence.saveGraphAcknowledged(newGraph, effectPlan: effectPlan))
+    let committed = try XCTUnwrap(ProjectPersistence(baseDirectory: root).loadGraph(path: path))
+    XCTAssertEqual(committed.nodes.map(\.id), [newNode.id])
+    XCTAssertEqual(committed.mailroom, [newPost])
+    XCTAssertEqual(
+      ProjectPersistence(baseDirectory: root).loadPendingGraphEffects().first?.plan,
+      effectPlan)
+  }
+
+  func testProjectDeletePostCommitEffectsRecoverWithoutGraphRecentsOrOpenState() async throws {
+    let root = FileManager.default.temporaryDirectory
+      .appendingPathComponent("graph-effect-recovery-\(UUID())", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let path = "ssh://fixture.example/effect-recovery"
+    let project = ProjectRef(path: path, name: "Recovery", metadata: .ssh)
+    let node = LoopNode(id: UUID(), title: "Remote", loopType: .turnBased)
+    let persistence = ProjectPersistence(baseDirectory: root)
+    try persistence.saveGraphAcknowledged(LoopGraph(project: project, nodes: [node]))
+    let plan = GraphPostCommitEffectPlan(
+      projectPath: path,
+      operations: [
+        .terminateSession(node), .removeMemory(nodeID: node.id),
+        .cancelGoalPoller(nodeID: node.id), .cancelHeartbeat(nodeID: node.id),
+      ])
+    _ = try persistence.deleteGraphAcknowledged(path: path, effectPlan: plan)
+    XCTAssertNil(persistence.loadGraph(path: path))
+    XCTAssertTrue(persistence.loadRecentProjects().isEmpty)
+    XCTAssertTrue(persistence.loadOpenProjects().isEmpty)
+
+    let recorder = RemoteAssetEffectRecorder()
+    var registry: ProjectRegistry? = ProjectRegistry(
+      persistenceDirectory: root,
+      ensureSession: nil,
+      terminateSession: { node, _ in recorder.terminate(node) },
+      restartSession: nil,
+      classifyProject: { _ in .ssh })
+    for _ in 0..<100
+    where recorder.snapshot().terminated.isEmpty
+      || !persistence.loadPendingGraphEffects().isEmpty
+    {
+      try? await Task.sleep(for: .milliseconds(10))
+    }
+    XCTAssertEqual(recorder.snapshot().terminated, [node.id])
+    XCTAssertTrue(persistence.loadPendingGraphEffects().isEmpty)
+    registry = nil
+    _ = registry
+  }
+
+  func testCleanupRoutingSurvivesProjectDeletionWithoutRegistryEntriesAndRejectsTampering()
+    async throws
+  {
+    let root = FileManager.default.temporaryDirectory
+      .appendingPathComponent("cleanup-routing-\(UUID())", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let catalog = root.appendingPathComponent("catalog.json")
+    let fixture = Fixture()
+    let key = Data(repeating: 0x5a, count: 32)
+    let path = "ssh://fixture.example/removed/project"
+    let owner = UUID()
+    let nodeID = UUID()
+    let bytes = Data("route-after-delete".utf8)
+    var first: RemoteAssetStore? = store(
+      fixture: fixture, catalogURL: catalog, authenticationKey: key)
+    let ticket = try await first!.beginUpload(
+      owner: owner, projectPath: path, metadata: .ssh, nodeID: nodeID,
+      declaration: declaration(data: bytes), existingCount: 0
+    ).get()
+    _ = try await first!.append(
+      owner: owner, transferID: ticket.transferID, offset: 0, data: bytes
+    ).get()
+    _ = try await first!.finalize(owner: owner, transferID: ticket.transferID).get()
+    await fixture.setRemoveFailures(20)
+    do {
+      _ = try await first!.completeDelivery(
+        owner: owner, deliveryID: ticket.transferID, delivered: false
+      ).get()
+      XCTFail("expected cleanup outage")
+    } catch {}
+    first = nil
+
+    await fixture.setRemoveFailures(0)
+    let recovered = store(
+      fixture: fixture, catalogURL: catalog, authenticationKey: key)
+    await recovered.maintainRecoveredState()
+    let usage = await recovered.resourceUsage()
+    XCTAssertEqual(usage.pendingDraftCleanups, 0)
+    let recoveredData = await fixture.stagedData(
+      path: path, nodeID: nodeID, name: "image-1.png")
+    XCTAssertNil(recoveredData)
+
+    let secondNode = UUID()
+    let tamperedCatalog = root.appendingPathComponent("tampered-catalog.json")
+    let second = store(fixture: fixture, catalogURL: tamperedCatalog, authenticationKey: key)
+    let secondTicket = try await second.beginUpload(
+      owner: owner, projectPath: path, metadata: .ssh, nodeID: secondNode,
+      declaration: declaration(name: "second.png", data: bytes), existingCount: 0
+    ).get()
+    _ = try await second.append(
+      owner: owner, transferID: secondTicket.transferID, offset: 0, data: bytes
+    ).get()
+    let secondAttachment = try await finalize(
+      second, owner: owner, transferID: secondTicket.transferID)
+    let heldDeletion = await second.prepareDeletion(
+      projectPath: path, metadata: .ssh,
+      nodes: [
+        LoopNode(
+          id: secondNode, title: "Held", loopType: .turnBased,
+          firstInstruction: "fixture", attachments: [secondAttachment])
+      ])
+    XCTAssertNotNil(try heldDeletion.get())
+    var catalogText = try String(contentsOf: tamperedCatalog, encoding: .utf8)
+    catalogText = catalogText.replacingOccurrences(
+      of: "fixture.example", with: "attacker.example")
+    try catalogText.write(to: tamperedCatalog, atomically: true, encoding: .utf8)
+    let tampered = store(fixture: fixture, catalogURL: tamperedCatalog, authenticationKey: key)
+    let tamperedUsage = await tampered.resourceUsage()
+    XCTAssertEqual(tamperedUsage.pendingDraftCleanups, 0)
+    let quarantined = try FileManager.default.contentsOfDirectory(
+      at: root, includingPropertiesForKeys: nil
+    ).filter { $0.lastPathComponent.contains(".corrupt-") }
+    XCTAssertGreaterThanOrEqual(quarantined.count, 1)
+    XCTAssertLessThanOrEqual(quarantined.count, RemoteAssetStore.maximumCatalogQuarantineFiles)
   }
 
   func testDescriptorBoundCleanupQuarantinesSameNameReplacement() async throws {

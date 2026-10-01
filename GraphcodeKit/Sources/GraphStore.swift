@@ -35,6 +35,29 @@ public enum GraphStoreCommandResult: Equatable, Sendable {
   case rejected(message: String, graph: LoopGraph)
 }
 
+public struct GraphPostCommitEffectPlan: Codable, Equatable, Sendable {
+  public enum Operation: Codable, Equatable, Sendable {
+    case ensureSession(LoopNode)
+    case terminateSession(LoopNode)
+    case appendMemory(effectID: UUID, nodeID: UUID, entry: String)
+    case removeMemory(nodeID: UUID)
+    case armGoalPoller(LoopNode)
+    case cancelGoalPoller(nodeID: UUID)
+    case armHeartbeat(LoopNode)
+    case cancelHeartbeat(nodeID: UUID)
+  }
+
+  public var id: UUID
+  public var projectPath: String
+  public var operations: [Operation]
+
+  public init(id: UUID = UUID(), projectPath: String, operations: [Operation]) {
+    self.id = id
+    self.projectPath = projectPath
+    self.operations = operations
+  }
+}
+
 public actor GraphStore {
   public private(set) var graph: LoopGraph
   private let authoritativeProject: ProjectRef
@@ -52,7 +75,9 @@ public actor GraphStore {
   // Tests observe actual queue admission instead of guessing with sleeps.
   var queuedCommandSequence: UInt64 { nextCommandID }
   private let onGraphChanged: (@Sendable (LoopGraph) -> Void)?
-  private let onDurableGraphChanged: (@Sendable (LoopGraph) async throws -> Void)?
+  private let onDurableGraphChanged:
+    (@Sendable (LoopGraph, GraphPostCommitEffectPlan) async throws -> GraphPersistenceReceipt)?
+  private let onDurableEffectsApplied: (@Sendable (GraphPersistenceReceipt) -> Void)?
   private let onGraphEvent: (@Sendable (DaemonEvent) -> [UUID: DaemonWireEnvelope])?
   private let onConnectionFailure: (@Sendable (UUID) -> Void)?
   private let onEnsureSession: (@Sendable (LoopNode, String?) -> Void)?
@@ -93,6 +118,7 @@ public actor GraphStore {
   /// hand-offs. Injected like every other side effect so the store stays unit-testable
   /// with no filesystem.
   private let onAppendMemory: (@Sendable (UUID, String) -> Void)?
+  private let onAppendMemoryOnce: (@Sendable (UUID, UUID, String) -> Void)?
   /// Tears a deleted node's memory down alongside its session.
   private let onRemoveMemory: (@Sendable (UUID) -> Void)?
   /// Replaces a node's playbook, snapshotting the old one (`NodeMemory.refinePlaybook`).
@@ -323,7 +349,10 @@ public actor GraphStore {
     authoritativeProject: ProjectRef? = nil,
     deliveryDeadline: Duration = .seconds(45),
     onGraphChanged: (@Sendable (LoopGraph) -> Void)? = nil,
-    onDurableGraphChanged: (@Sendable (LoopGraph) async throws -> Void)? = nil,
+    onDurableGraphChanged: (
+      @Sendable (LoopGraph, GraphPostCommitEffectPlan) async throws -> GraphPersistenceReceipt
+    )? = nil,
+    onDurableEffectsApplied: (@Sendable (GraphPersistenceReceipt) -> Void)? = nil,
     onGraphEvent: (@Sendable (DaemonEvent) -> [UUID: DaemonWireEnvelope])? = nil,
     onConnectionFailure: (@Sendable (UUID) -> Void)? = nil,
     onEnsureSession: (@Sendable (LoopNode, String?) -> Void)? = nil,
@@ -345,6 +374,7 @@ public actor GraphStore {
     onResumeSession: (@Sendable (LoopNode, String?) async -> Bool)? = nil,
     onSpawnIntoProject: (@Sendable (String, NodeDraft) -> Void)? = nil,
     onAppendMemory: (@Sendable (UUID, String) -> Void)? = nil,
+    onAppendMemoryOnce: (@Sendable (UUID, UUID, String) -> Void)? = nil,
     onRemoveMemory: (@Sendable (UUID) -> Void)? = nil,
     onRefinePlaybook: (@Sendable (UUID, String) -> Bool)? = nil,
     onRollbackPlaybook: (@Sendable (UUID) -> Bool)? = nil,
@@ -372,6 +402,7 @@ public actor GraphStore {
     self.subGraphDepth = subGraphDepth
     self.onGraphChanged = onGraphChanged
     self.onDurableGraphChanged = onDurableGraphChanged
+    self.onDurableEffectsApplied = onDurableEffectsApplied
     self.onGraphEvent = onGraphEvent
     self.onConnectionFailure = onConnectionFailure
     self.onEnsureSession = onEnsureSession
@@ -394,6 +425,7 @@ public actor GraphStore {
     self.onSessionAlive = onSessionAlive
     self.onSpawnIntoProject = onSpawnIntoProject
     self.onAppendMemory = onAppendMemory
+    self.onAppendMemoryOnce = onAppendMemoryOnce
     self.onRemoveMemory = onRemoveMemory
     self.onRefinePlaybook = onRefinePlaybook
     self.onRollbackPlaybook = onRollbackPlaybook
@@ -495,7 +527,7 @@ public actor GraphStore {
       let failure = await onFindMissingProvider(node, graph.project.path),
       stopForMissingProvider(node.id, failure)
     else { return }
-    await broadcast()
+    _ = await broadcast()
   }
 
   /// A stop rather than a failure: nothing the loop did went wrong, and the restart that
@@ -585,7 +617,7 @@ public actor GraphStore {
   private func broadcastIfTemplatesRefreshed() async {
     guard templatesRefreshed else { return }
     templatesRefreshed = false
-    await broadcast()
+    _ = await broadcast()
   }
 
   /// Returns the daemon-owned node configuration an attended terminal should launch.
@@ -897,6 +929,10 @@ public actor GraphStore {
     let shadow = GraphStore(
       graph: graph,
       authoritativeProject: authoritativeProject,
+      onHeartbeatEnabled: onHeartbeatEnabled,
+      onDefaultBackend: onDefaultBackend,
+      onResolveTemplate: onResolveTemplate,
+      onMailroomEnabled: onMailroomEnabled,
       subGraphDepth: subGraphDepth)
     return await shadow.handle(command, broadcastErrors: broadcastErrors)
   }
@@ -926,6 +962,9 @@ public actor GraphStore {
     requiresDurablePersistence: Bool = false
   ) async -> GraphStoreCommandResult {
     enforceRootProjectInvariant()
+    if requiresDurablePersistence {
+      return await applyDurableCommand(command, broadcastErrors: broadcastErrors)
+    }
     let graphBeforeCommand = graph
     switch command {
     case .createNode(var draft):
@@ -1220,6 +1259,119 @@ public actor GraphStore {
     return .applied(graph: graph)
   }
 
+  private func applyDurableCommand(
+    _ command: GraphCommand,
+    broadcastErrors: Bool
+  ) async -> GraphStoreCommandResult {
+    let before = graph
+    let previewed = await preview(command, broadcastErrors: false)
+    guard case .applied(let projected) = previewed else {
+      if case .rejected(let message, _) = previewed {
+        return await reject(message, broadcastErrors: broadcastErrors)
+      }
+      return .rejected(message: "graph command could not be projected", graph: graph)
+    }
+    let effects = Self.postCommitEffects(before: before, after: projected)
+    guard let onDurableGraphChanged else {
+      return .rejected(message: "graph persistence acknowledgement is unavailable", graph: graph)
+    }
+    let receipt: GraphPersistenceReceipt
+    do {
+      receipt = try await onDurableGraphChanged(projected, effects)
+    } catch {
+      return .rejected(message: "graph persistence failed: \(error)", graph: graph)
+    }
+    graph = projected
+    enforceRootProjectInvariant()
+    await applyPostCommitEffects(effects)
+    onDurableEffectsApplied?(receipt)
+    if let error = await broadcast(alreadyPersisted: true) {
+      return .rejected(message: error, graph: graph)
+    }
+    return .applied(graph: graph)
+  }
+
+  private static func postCommitEffects(
+    before: LoopGraph, after: LoopGraph
+  ) -> GraphPostCommitEffectPlan {
+    let beforeByID = Dictionary(uniqueKeysWithValues: before.nodesAtAnyDepth.map { ($0.id, $0) })
+    let afterByID = Dictionary(uniqueKeysWithValues: after.nodesAtAnyDepth.map { ($0.id, $0) })
+    let added = after.nodesAtAnyDepth.filter { beforeByID[$0.id] == nil }
+    let removed = before.nodesAtAnyDepth.filter { afterByID[$0.id] == nil }
+    let topLevelAdded = Set(after.nodes.filter { beforeByID[$0.id] == nil }.map(\.id))
+    var operations: [GraphPostCommitEffectPlan.Operation] = []
+    for node in added {
+      if let creator = node.createdBy, let parent = afterByID[creator] {
+        operations.append(
+          .appendMemory(
+            effectID: UUID(),
+            nodeID: node.id,
+            entry:
+              "created by \(parent.title) — report results to it with: "
+              + "graphcode node send \(after.project.path) \(creator.uuidString) <message>"
+              + (node.loopType == .goalBased
+                ? "; once your goal is met, also run: graphcode node done "
+                  + "\(after.project.path) \(node.id.uuidString) <result>"
+                : "")))
+      }
+      if topLevelAdded.contains(node.id), node.runsUnattended {
+        operations.append(.ensureSession(node))
+      }
+      if topLevelAdded.contains(node.id) || nestedRecurrenceIsLive(node.id, in: after.nodes) {
+        if node.loopType == .goalBased { operations.append(.armGoalPoller(node)) }
+        operations.append(.armHeartbeat(node))
+      }
+    }
+    for node in removed {
+      operations.append(.terminateSession(node))
+      operations.append(.removeMemory(nodeID: node.id))
+      operations.append(.cancelGoalPoller(nodeID: node.id))
+      operations.append(.cancelHeartbeat(nodeID: node.id))
+    }
+    return GraphPostCommitEffectPlan(projectPath: after.project.path, operations: operations)
+  }
+
+  private static func nestedRecurrenceIsLive(
+    _ nodeID: UUID, in nodes: some Collection<LoopNode>
+  ) -> Bool {
+    for node in nodes {
+      guard let subGraph = node.subGraph else { continue }
+      if subGraph.nodes.contains(where: { $0.id == nodeID }) {
+        return node.pilotState == .piloted || node.pilotState == .armed
+      }
+      if nestedRecurrenceIsLive(nodeID, in: subGraph.nodes) { return true }
+    }
+    return false
+  }
+
+  public func applyPostCommitEffects(_ plan: GraphPostCommitEffectPlan) async {
+    guard plan.projectPath == graph.project.path else { return }
+    for operation in plan.operations {
+      switch operation {
+      case .ensureSession(let node):
+        ensureSession(node)
+      case .terminateSession(let node):
+        terminateSession(node)
+      case .appendMemory(let effectID, let nodeID, let entry):
+        if let onAppendMemoryOnce {
+          onAppendMemoryOnce(effectID, nodeID, entry)
+        } else {
+          recordMemory(nodeID, entry)
+        }
+      case .removeMemory(let nodeID):
+        onRemoveMemory?(nodeID)
+      case .armGoalPoller(let node):
+        armGoalPoller(for: node)
+      case .cancelGoalPoller(let nodeID):
+        cancelGoalPoller(nodeID)
+      case .armHeartbeat(let node):
+        armHeartbeat(for: node)
+      case .cancelHeartbeat(let nodeID):
+        cancelHeartbeat(nodeID)
+      }
+    }
+  }
+
   // MARK: - Composites
 
   private static func containsEdgeUpdate(_ command: GraphCommand) -> Bool {
@@ -1361,7 +1513,7 @@ public actor GraphStore {
       onRemoveMemory: onRemoveMemory,
       onRefinePlaybook: onRefinePlaybook,
       onRollbackPlaybook: onRollbackPlaybook,
-      onAnnounceError: effects.errors.append,
+      onAnnounceError: { message in effects.errors.append(message) },
       // The board's gate forwards like any other side effect: a loop inside a piloted
       // composite is a real loop whose session got the standard briefing — teaching
       // verbs the child store would refuse is exactly the incoherence the gate exists
@@ -2225,7 +2377,7 @@ public actor GraphStore {
       pendingFollowUps.append(
         PendingFollowUp(id: UUID(), nodeID: nodeID, text: message, watchedPostID: nil))
     }
-    await drainAndBroadcast()
+    _ = await drainAndBroadcast()
   }
 
   /// A learned note into a node's memory log — `graphcode node memo`, the agent-written
@@ -2383,7 +2535,7 @@ public actor GraphStore {
     let followUp = PendingFollowUp(id: UUID(), nodeID: nodeID, text: prompt, watchedPostID: nil)
     pendingFollowUps.append(followUp)
     goalFollowUps[nodeID] = followUp.id
-    await drainAndBroadcast()
+    _ = await drainAndBroadcast()
   }
 
   /// Opening a resolved loop whose session was ended brings its conversation back. Panes
@@ -2925,7 +3077,7 @@ public actor GraphStore {
       return
     }
     if node.loopType == .composite {
-      await runInSubGraph(nodeID, .restartSessions, broadcastErrors: false)
+      _ = await runInSubGraph(nodeID, .restartSessions, broadcastErrors: false)
       return
     }
     await restart([node])
@@ -2934,7 +3086,7 @@ public actor GraphStore {
   private func restartSessions() async {
     let live = graph.nodes.filter { !$0.isResolved }
     for composite in live where composite.loopType == .composite {
-      await runInSubGraph(composite.id, .restartSessions, broadcastErrors: false)
+      _ = await runInSubGraph(composite.id, .restartSessions, broadcastErrors: false)
     }
     await restart(live.filter { $0.loopType != .composite })
   }
@@ -2990,7 +3142,7 @@ public actor GraphStore {
     // set below — a graph whose nodes have all stopped aggregates to `.idle`.
     if node.loopType == .composite, let subGraph = node.subGraph {
       for child in subGraph.nodes where !child.isResolved {
-        await runInSubGraph(
+        _ = await runInSubGraph(
           node.id, .stopNode(child.id), broadcastErrors: false)
       }
     }
@@ -4101,7 +4253,7 @@ public actor GraphStore {
       onRemoveMemory: onRemoveMemory,
       onRefinePlaybook: onRefinePlaybook,
       onRollbackPlaybook: onRollbackPlaybook,
-      onAnnounceError: effects.errors.append,
+      onAnnounceError: { message in effects.errors.append(message) },
       onMailroomEnabled: onMailroomEnabled,
       goalCache: goalCache,
       recurrence: effects.recurrence,
@@ -4118,7 +4270,7 @@ public actor GraphStore {
     graph.nodes[id: ownerID]?.subGraph = await child.graph
     enforceRootProjectInvariant()
     rollUpComposite(ownerID)
-    await drainAndBroadcast()
+    _ = await drainAndBroadcast()
   }
 
   /// Applies the recurrence requests a child store handed up, in order — an update's
@@ -4189,14 +4341,14 @@ public actor GraphStore {
       now.timeIntervalSince(node.createdAt) >= stallAfter
     {
       markStalled(nodeID)
-      await drainAndBroadcast()
+      _ = await drainAndBroadcast()
       return
     }
 
     // The budget is checked before the predicate for the same reason the stall bound
     // is: a loop that has blown its bound gets no further evaluations spent on it.
     if await enforceTokenBudget(nodeID, goal: goal) {
-      await drainAndBroadcast()
+      _ = await drainAndBroadcast()
       return
     }
 
@@ -4210,14 +4362,14 @@ public actor GraphStore {
         Self.verdict(verdict, isCurrentFor: current)
       else { return }
       if holdCompletion(nodeID, LoopResolution(basis: .nativeGoal, detail: verdict.detail)) {
-        await drainAndBroadcast()
+        _ = await drainAndBroadcast()
         return
       }
       resolveNode(
         nodeID, succeeded: true, basis: .nativeGoal,
         reason: "its backend recorded the goal as met", detail: verdict.detail,
         sessionMayStillBeLive: true)
-      await drainAndBroadcast()
+      _ = await drainAndBroadcast()
       return
     }
     let shellPredicate = ShellPredicate(
@@ -4274,7 +4426,7 @@ public actor GraphStore {
       resolveNode(
         nodeID, succeeded: true, basis: .predicate, reason: "its goal predicate passed",
         sessionMayStillBeLive: true)
-      await drainAndBroadcast()
+      _ = await drainAndBroadcast()
       return
     }
     if let fingerprint { goalCache.setFingerprint(fingerprint, for: nodeID) }
@@ -4580,7 +4732,10 @@ public actor GraphStore {
 
   // MARK: - Broadcast
 
-  private func broadcast(requiresDurablePersistence: Bool = false) async -> String? {
+  private func broadcast(
+    requiresDurablePersistence: Bool = false,
+    alreadyPersisted: Bool = false
+  ) async -> String? {
     let started = Date()
     enforceRootProjectInvariant()
     if requiresDurablePersistence {
@@ -4588,11 +4743,13 @@ public actor GraphStore {
         return "graph persistence acknowledgement is unavailable"
       }
       do {
-        try await onDurableGraphChanged(graph)
+        let plan = GraphPostCommitEffectPlan(projectPath: graph.project.path, operations: [])
+        let receipt = try await onDurableGraphChanged(graph, plan)
+        onDurableEffectsApplied?(receipt)
       } catch {
         return "graph persistence failed: \(error)"
       }
-    } else {
+    } else if !alreadyPersisted {
       onGraphChanged?(graph)
     }
     DaemonLog.shared.record(
