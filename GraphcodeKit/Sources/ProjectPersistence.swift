@@ -1,6 +1,12 @@
 import Foundation
 import MailroomKit
 
+#if canImport(Darwin)
+  import Darwin
+#elseif canImport(Glibc)
+  import Glibc
+#endif
+
 #if os(Windows)
   import WinSDK
 #endif
@@ -19,6 +25,7 @@ public enum EffectCompactionStage: Equatable, Sendable {
   case duringTemporaryWrite
   case beforeTemporarySync
   case beforeManifestReplace
+  case beforeDirectorySync
   case afterManifestSwitch
   case beforePruneEffectJournal(String)
   case beforePruneAppliedMarker(String)
@@ -849,13 +856,55 @@ public struct ProjectPersistence: Sendable {
     let committed = try FileHandle(forWritingTo: url)
     do {
       try committed.synchronize()
+      #if canImport(Darwin)
+        guard Darwin.fcntl(committed.fileDescriptor, F_FULLFSYNC) == 0 else {
+          throw posixError()
+        }
+      #endif
       try committed.close()
     } catch {
       try? committed.close()
       throw error
     }
+    try beforeEffectCompactionStage(.beforeDirectorySync)
+    try syncManifestParentDirectory(url.deletingLastPathComponent())
     try beforeEffectCompactionStage(.afterManifestSwitch)
   }
+
+  private func syncManifestParentDirectory(_ directory: URL) throws {
+    #if !os(Windows)
+      let descriptor = directory.path.withCString { path in
+        #if canImport(Darwin)
+          Darwin.open(path, O_RDONLY | O_NOFOLLOW | O_DIRECTORY | O_CLOEXEC)
+        #else
+          Glibc.open(path, O_RDONLY | O_NOFOLLOW | O_DIRECTORY | O_CLOEXEC)
+        #endif
+      }
+      guard descriptor >= 0 else { throw posixError() }
+      defer {
+        #if canImport(Darwin)
+          _ = Darwin.close(descriptor)
+        #else
+          _ = Glibc.close(descriptor)
+        #endif
+      }
+      var status = stat()
+      guard fstat(descriptor, &status) == 0,
+        status.st_mode & mode_t(S_IFMT) == mode_t(S_IFDIR)
+      else { throw posixError() }
+      #if canImport(Darwin)
+        guard Darwin.fsync(descriptor) == 0 else { throw posixError() }
+      #else
+        guard Glibc.fsync(descriptor) == 0 else { throw posixError() }
+      #endif
+    #endif
+  }
+
+  #if canImport(Darwin) || canImport(Glibc)
+    private func posixError() -> NSError {
+      NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+    }
+  #endif
 
   private func replaceManifestAtomically(at destination: URL, with source: URL) throws {
     #if os(Windows)

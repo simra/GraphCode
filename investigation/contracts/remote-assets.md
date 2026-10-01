@@ -192,10 +192,13 @@ graph publication instead of dropping recovery authority or accumulating unbound
 files. Whole-project deletion atomically selects a deletion tombstone before effects or
 cleanup run. The tombstone remains while any authorized journal is pending. Applied
 markers are durable before manifest compaction. Startup writes and fsyncs a replacement
-manifest with applied generations removed, atomically switches it, and only then prunes
-the exact no-longer-authorized effect journals and markers. A pre-switch failure leaves
-the old manifest and marker authoritative; a post-switch interruption leaves harmless
-unreferenced files that the next startup removes idempotently.
+manifest with applied generations removed, atomically switches it, fsyncs the committed
+file, and on POSIX systems safely opens and fsyncs its parent directory before pruning
+the exact no-longer-authorized effect journals and markers. Apple file acknowledgement
+also uses the full-sync primitive; Windows retains write-through replacement semantics.
+A failure before directory acknowledgement performs no pruning, leaving either manifest
+state recoverable with its journals and markers. A post-acknowledgement interruption
+leaves harmless unreferenced files that the next startup removes idempotently.
 
 Before each manifest switch, every carried journal is reconciled against the projected
 authoritative graph. A node incarnation is `(UUID, createdAt)`: constructive session,

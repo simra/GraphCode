@@ -3935,7 +3935,7 @@ final class RemoteAssetTests: XCTestCase {
   }
 
   func testStartupCompactionDurablySwitchesManifestBeforeExactEffectPruning() throws {
-    for faultIndex in 0..<7 {
+    for faultIndex in 0..<8 {
       let root = FileManager.default.temporaryDirectory
         .appendingPathComponent("effect-compaction-\(faultIndex)-\(UUID())", isDirectory: true)
       defer { try? FileManager.default.removeItem(at: root) }
@@ -3985,8 +3985,10 @@ final class RemoteAssetTests: XCTestCase {
       case 3:
         stage = .beforeManifestReplace
       case 4:
-        stage = .afterManifestSwitch
+        stage = .beforeDirectorySync
       case 5:
+        stage = .afterManifestSwitch
+      case 6:
         stage = .beforePruneEffectJournal(firstReceipt.generation)
       default:
         stage = .beforePruneAppliedMarker(firstReceipt.generation)
@@ -3999,14 +4001,14 @@ final class RemoteAssetTests: XCTestCase {
       XCTAssertEqual(faulted.loadPendingGraphEffects().map(\.plan), [secondPlan])
       XCTAssertTrue(failure.wasTriggered())
       XCTAssertTrue(FileManager.default.fileExists(atPath: secondEffects.path))
-      if faultIndex <= 5 {
+      if faultIndex <= 6 {
         XCTAssertTrue(FileManager.default.fileExists(atPath: firstEffects.path))
       } else {
         XCTAssertFalse(FileManager.default.fileExists(atPath: firstEffects.path))
       }
       XCTAssertTrue(FileManager.default.fileExists(atPath: firstMarker.path))
 
-      if faultIndex == 4 {
+      if faultIndex == 5 {
         try? FileManager.default.removeItem(at: firstEffects)
       }
       let restarted = ProjectPersistence(baseDirectory: root)
