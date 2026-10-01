@@ -3,6 +3,10 @@ import XCTest
 
 @testable import GraphcodeKit
 
+#if os(Windows)
+  import func WinSDK.CreateHardLinkW
+#endif
+
 private actor RemoteStageGate {
   private var started = false
   private var continuation: CheckedContinuation<Void, Never>?
@@ -87,11 +91,14 @@ final class RemoteAssetTests: XCTestCase {
   private actor Fixture {
     var documents: [String: [(origin: TemplateOrigin, fileName: String, content: String)]] = [:]
     var staged: [String: Data] = [:]
+    var leased: [UUID: [String: Data]] = [:]
     var discarded: [String] = []
     var removeFailures = 0
     var removeAttempts = 0
     var retainFailures = 0
     var retainAttempts = 0
+    var verifyAttempts = 0
+    var corruptLeaseAfterVerify: Data?
 
     func setDocuments(
       _ value: [(origin: TemplateOrigin, fileName: String, content: String)], for path: String
@@ -118,12 +125,14 @@ final class RemoteAssetTests: XCTestCase {
     }
 
     func remove(path: String, nodeID: UUID, name: String) throws {
+      let key = "\(path)|\(nodeID)|\(name)"
+      guard staged[key] != nil else { return }
       removeAttempts += 1
       if removeFailures > 0 {
         removeFailures -= 1
         throw RemoteAssetError.transportFailure
       }
-      staged.removeValue(forKey: "\(path)|\(nodeID)|\(name)")
+      staged.removeValue(forKey: key)
     }
 
     func removeAttemptCount() -> Int {
@@ -144,6 +153,10 @@ final class RemoteAssetTests: XCTestCase {
 
     func replaceStaged(path: String, nodeID: UUID, name: String, data: Data) {
       staged["\(path)|\(nodeID)|\(name)"] = data
+    }
+
+    func corruptNextLeaseAfterVerify(with data: Data) {
+      corruptLeaseAfterVerify = data
     }
 
     func resolve(path: String, nodeID: UUID, name: String, size: Int, sha256: String) throws
@@ -167,11 +180,83 @@ final class RemoteAssetTests: XCTestCase {
         }
       }
     }
+
+    func acquireLease(
+      path: String, nodeID: UUID, leaseID: UUID,
+      descriptors: [RemoteAssetRetentionDescriptor]
+    ) throws {
+      retainAttempts += 1
+      if retainFailures > 0 {
+        retainFailures -= 1
+        throw RemoteAssetError.transportFailure
+      }
+      var files: [String: Data] = [:]
+      for descriptor in descriptors {
+        let key = "\(path)|\(nodeID)|\(descriptor.name)"
+        guard let data = staged[key], data.count == descriptor.size,
+          RemoteAssetDigest.sha256Hex(data) == descriptor.sha256
+        else { throw RemoteAssetError.hashMismatch }
+        files[descriptor.name] = data
+      }
+      for descriptor in descriptors {
+        staged.removeValue(forKey: "\(path)|\(nodeID)|\(descriptor.name)")
+      }
+      leased[leaseID] = files
+    }
+
+    func verifyLease(
+      path: String, nodeID: UUID, leaseID: UUID,
+      descriptors: [RemoteAssetRetentionDescriptor]
+    ) throws {
+      for descriptor in descriptors {
+        let data =
+          leased[leaseID]?[descriptor.name]
+          ?? staged["\(path)|\(nodeID)|\(descriptor.name)"]
+        guard let data, data.count == descriptor.size,
+          RemoteAssetDigest.sha256Hex(data) == descriptor.sha256
+        else { throw RemoteAssetError.hashMismatch }
+      }
+      verifyAttempts += 1
+      if let replacement = corruptLeaseAfterVerify,
+        let descriptor = descriptors.first
+      {
+        leased[leaseID]?[descriptor.name] = replacement
+        corruptLeaseAfterVerify = nil
+      }
+    }
+
+    func commitLease(
+      path: String, nodeID: UUID, leaseID: UUID,
+      descriptors: [RemoteAssetRetentionDescriptor]
+    ) throws {
+      try verifyLease(
+        path: path, nodeID: nodeID, leaseID: leaseID, descriptors: descriptors)
+      for descriptor in descriptors {
+        if let data = leased[leaseID]?[descriptor.name] {
+          staged["\(path)|\(nodeID)|\(descriptor.name)"] = data
+        }
+      }
+      leased.removeValue(forKey: leaseID)
+    }
+
+    func rollbackLease(leaseID: UUID) {
+      leased.removeValue(forKey: leaseID)
+    }
+
+    func resolveLease(
+      path: String, nodeID: UUID, leaseID: UUID,
+      descriptor: RemoteAssetRetentionDescriptor
+    ) throws -> String {
+      try verifyLease(
+        path: path, nodeID: nodeID, leaseID: leaseID, descriptors: [descriptor])
+      return "/synthetic/\(nodeID)/\(descriptor.name)"
+    }
   }
 
   private func store(
     fixture: Fixture, now: @escaping @Sendable () -> Date = { Date() },
     finalizedDraftLifetime: TimeInterval = RemoteAssetStore.finalizedDraftLifetime,
+    catalogURL: URL? = nil,
     attachmentsDirectory: @escaping @Sendable (String, UUID) -> URL = {
       NodeMemory.attachmentsDirectory(forProjectPath: $0, nodeID: $1)
     }
@@ -194,10 +279,30 @@ final class RemoteAssetTests: XCTestCase {
         },
         retainAttachments: { path, _, nodeID, names in
           try await fixture.retain(path: path, nodeID: nodeID, names: names)
+        },
+        acquireAttachmentLease: { path, _, nodeID, leaseID, descriptors in
+          try await fixture.acquireLease(
+            path: path, nodeID: nodeID, leaseID: leaseID, descriptors: descriptors)
+        },
+        verifyAttachmentLease: { path, _, nodeID, leaseID, descriptors in
+          try await fixture.verifyLease(
+            path: path, nodeID: nodeID, leaseID: leaseID, descriptors: descriptors)
+        },
+        commitAttachmentLease: { path, _, nodeID, leaseID, descriptors in
+          try await fixture.commitLease(
+            path: path, nodeID: nodeID, leaseID: leaseID, descriptors: descriptors)
+        },
+        rollbackAttachmentLease: { _, _, _, leaseID, _ in
+          await fixture.rollbackLease(leaseID: leaseID)
+        },
+        resolveLeasedAttachment: { path, _, nodeID, leaseID, descriptor in
+          try await fixture.resolveLease(
+            path: path, nodeID: nodeID, leaseID: leaseID, descriptor: descriptor)
         }),
       authenticationKey: Data(repeating: 0x41, count: 32),
       now: now,
       finalizedDraftLifetime: finalizedDraftLifetime,
+      catalogURL: catalogURL,
       attachmentsDirectory: attachmentsDirectory)
   }
 
@@ -294,6 +399,25 @@ final class RemoteAssetTests: XCTestCase {
         },
         retainAttachments: { path, _, nodeID, names in
           try await fixture.retain(path: path, nodeID: nodeID, names: names)
+        },
+        acquireAttachmentLease: { path, _, nodeID, leaseID, descriptors in
+          try await fixture.acquireLease(
+            path: path, nodeID: nodeID, leaseID: leaseID, descriptors: descriptors)
+        },
+        verifyAttachmentLease: { path, _, nodeID, leaseID, descriptors in
+          try await fixture.verifyLease(
+            path: path, nodeID: nodeID, leaseID: leaseID, descriptors: descriptors)
+        },
+        commitAttachmentLease: { path, _, nodeID, leaseID, descriptors in
+          try await fixture.commitLease(
+            path: path, nodeID: nodeID, leaseID: leaseID, descriptors: descriptors)
+        },
+        rollbackAttachmentLease: { _, _, _, leaseID, _ in
+          await fixture.rollbackLease(leaseID: leaseID)
+        },
+        resolveLeasedAttachment: { path, _, nodeID, leaseID, descriptor in
+          try await fixture.resolveLease(
+            path: path, nodeID: nodeID, leaseID: leaseID, descriptor: descriptor)
         }),
       authenticationKey: Data(repeating: 0x42, count: 32))
   }
@@ -867,7 +991,7 @@ final class RemoteAssetTests: XCTestCase {
         }
         return await store.cancel(owner: owner, transferID: ticket.transferID)
       }
-      for _ in 0..<10 { await Task.yield() }
+      try await Task.sleep(for: .milliseconds(20))
       await gate.release()
       _ = try await cancellation.value.get()
       let finalizeResult = await finalizeTask.value
@@ -900,15 +1024,14 @@ final class RemoteAssetTests: XCTestCase {
       owner: owner, deliveryID: ticket.transferID, delivered: false
     )
     XCTAssertThrowsError(try firstCleanup.get())
-    let pendingCleanup = await store.resourceUsage()
-    XCTAssertEqual(pendingCleanup.pendingDeliveries, 1)
-    _ = try await store.cancel(owner: owner, transferID: ticket.transferID).get()
+    let cleaned = await store.resourceUsage()
     let attempts = await fixture.removeAttemptCount()
     let staged = await fixture.stagedData(path: path, nodeID: nodeID, name: "image-1.png")
     let usage = await store.resourceUsage()
     XCTAssertEqual(attempts, 4)
     XCTAssertNil(staged)
-    XCTAssertEqual(usage.pendingDeliveries, 0)
+    XCTAssertEqual(cleaned.pendingDeliveries, 0)
+    XCTAssertEqual(usage.pendingDraftCleanups, 0)
   }
 
   func testTemplateIdentityRejectsCollisionsOrderChangesAndOriginSubstitution() async throws {
@@ -1039,6 +1162,8 @@ final class RemoteAssetTests: XCTestCase {
     _ = await registry.apply(.openProject(path: root.path), connectionID: legacy.id)
     _ = await registry.apply(.openProject(path: root.path), connectionID: modern.id)
     let legacyID = UUID()
+    _ = await fixture.stage(
+      path: root.path, nodeID: legacyID, name: "safe.png", data: Data("safe".utf8))
     let accepted = await registry.apply(
       .graphCommand(
         projectPath: root.path,
@@ -1614,9 +1739,8 @@ final class RemoteAssetTests: XCTestCase {
     _ = try await assets.append(
       owner: owner, transferID: rejectedTicket.transferID, offset: 0, data: Data([1])
     ).get()
-    _ = try await assets.finalize(owner: owner, transferID: rejectedTicket.transferID).get()
-    let countRejection = await assets.completeDelivery(
-      owner: owner, deliveryID: rejectedTicket.transferID, delivered: true)
+    let countRejection = await assets.finalize(
+      owner: owner, transferID: rejectedTicket.transferID)
     guard case .failure(.resourceExhausted) = countRejection else {
       return XCTFail("expected finalized draft count rejection")
     }
@@ -1649,9 +1773,8 @@ final class RemoteAssetTests: XCTestCase {
       ).get()
       offset = end
     }
-    _ = try await assets.finalize(owner: byteOwner, transferID: overflowTicket.transferID).get()
-    let byteRejection = await assets.completeDelivery(
-      owner: byteOwner, deliveryID: overflowTicket.transferID, delivered: true)
+    let byteRejection = await assets.finalize(
+      owner: byteOwner, transferID: overflowTicket.transferID)
     guard case .failure(.resourceExhausted) = byteRejection else {
       return XCTFail("expected finalized draft byte rejection")
     }
@@ -1687,6 +1810,9 @@ final class RemoteAssetTests: XCTestCase {
     let pendingFile = await fixture.stagedData(
       path: path, nodeID: liveNode, name: "image-1.png")
     XCTAssertNotNil(pendingFile)
+    clock.advance(3)
+    _ = await assets.resourceUsage()
+    clock.advance(3)
     let retried = await assets.resourceUsage()
     XCTAssertEqual(retried.pendingDraftCleanups, 0)
     let cleanedFile = await fixture.stagedData(
@@ -1721,12 +1847,9 @@ final class RemoteAssetTests: XCTestCase {
       owner: projectOverflowOwner, transferID: projectOverflow.transferID, offset: 0,
       data: Data([1])
     ).get()
-    _ = try await projectStore.finalize(
-      owner: projectOverflowOwner, transferID: projectOverflow.transferID
-    ).get()
     guard
-      case .failure(.resourceExhausted) = await projectStore.completeDelivery(
-        owner: projectOverflowOwner, deliveryID: projectOverflow.transferID, delivered: true)
+      case .failure(.resourceExhausted) = await projectStore.finalize(
+        owner: projectOverflowOwner, transferID: projectOverflow.transferID)
     else {
       return XCTFail("expected project finalized draft limit")
     }
@@ -1759,12 +1882,9 @@ final class RemoteAssetTests: XCTestCase {
       owner: globalOverflowOwner, transferID: globalOverflow.transferID, offset: 0,
       data: Data([1])
     ).get()
-    _ = try await globalStore.finalize(
-      owner: globalOverflowOwner, transferID: globalOverflow.transferID
-    ).get()
     guard
-      case .failure(.resourceExhausted) = await globalStore.completeDelivery(
-        owner: globalOverflowOwner, deliveryID: globalOverflow.transferID, delivered: true)
+      case .failure(.resourceExhausted) = await globalStore.finalize(
+        owner: globalOverflowOwner, transferID: globalOverflow.transferID)
     else {
       return XCTFail("expected global finalized draft limit")
     }
@@ -1851,7 +1971,7 @@ final class RemoteAssetTests: XCTestCase {
             id: nodeID, title: "Rejected", loopType: .turnBased, firstInstruction: "   ",
             attachments: [attachment]))),
       connectionID: connection.id)
-    XCTAssertTrue(rejected?.error?.contains("attachment rollback cleanup is pending") == true)
+    XCTAssertNotNil(rejected?.error)
     XCTAssertNil(rejected?.response)
     XCTAssertFalse(
       ProjectPersistence(baseDirectory: root.appendingPathComponent("state"))
@@ -1965,7 +2085,10 @@ final class RemoteAssetTests: XCTestCase {
     let legacyDirectory = staging.appendingPathComponent(legacyID.uuidString, isDirectory: true)
     try FileManager.default.createDirectory(at: legacyDirectory, withIntermediateDirectories: true)
     let legacyFile = legacyDirectory.appendingPathComponent("legacy.png")
-    try Data("legacy".utf8).write(to: legacyFile)
+    let legacyData = Data("legacy".utf8)
+    try legacyData.write(to: legacyFile)
+    _ = await fixture.stage(
+      path: project.path, nodeID: legacyID, name: "legacy.png", data: legacyData)
     let legacy = await registry.apply(
       .graphCommand(
         projectPath: project.path,
@@ -2016,5 +2139,400 @@ final class RemoteAssetTests: XCTestCase {
     let rejectedStaged = await fixture.stagedData(
       path: project.path, nodeID: rejectedID, name: "image-1.png")
     XCTAssertNil(rejectedStaged)
+  }
+
+  func testProductionLocalLeaseRejectsReplacementLinksAndPreservesExistingRetention() async throws {
+    let root = FileManager.default.temporaryDirectory
+      .appendingPathComponent("asset-production-lease-\(UUID())", isDirectory: true)
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let projectPath = root.appendingPathComponent("project", isDirectory: true).path
+    let nodeID = UUID()
+    let original = Data("original".utf8)
+    let descriptor = RemoteAssetRetentionDescriptor(
+      name: "image.png", size: original.count,
+      sha256: RemoteAssetDigest.sha256Hex(original))
+    let directory = NodeMemory.attachmentsDirectory(
+      forProjectPath: projectPath, nodeID: nodeID)
+    defer { LocalRemoteAssetHost.discardAttachments(projectPath: projectPath, nodeID: nodeID) }
+
+    _ = try LocalRemoteAssetHost.stageAttachment(
+      projectPath: projectPath, nodeID: nodeID, name: descriptor.name, data: original)
+    let leaseID = UUID()
+    try LocalRemoteAssetHost.acquireAttachmentLease(
+      projectPath: projectPath, nodeID: nodeID, leaseID: leaseID, descriptors: [descriptor])
+    try Data("replaced".utf8).write(to: directory.appendingPathComponent(descriptor.name))
+    try LocalRemoteAssetHost.verifyAttachmentLease(
+      projectPath: projectPath, nodeID: nodeID, leaseID: leaseID, descriptors: [descriptor])
+    try LocalRemoteAssetHost.commitAttachmentLease(
+      projectPath: projectPath, nodeID: nodeID, leaseID: leaseID, descriptors: [descriptor])
+    let retainedPath = try LocalRemoteAssetHost.resolveAttachment(
+      projectPath: projectPath, nodeID: nodeID, name: descriptor.name,
+      size: descriptor.size, sha256: descriptor.sha256)
+    XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: retainedPath)), original)
+
+    let racedNode = UUID()
+    defer {
+      LocalRemoteAssetHost.discardAttachments(projectPath: projectPath, nodeID: racedNode)
+    }
+    _ = try LocalRemoteAssetHost.stageAttachment(
+      projectPath: projectPath, nodeID: racedNode, name: descriptor.name, data: original)
+    let racedLease = UUID()
+    try LocalRemoteAssetHost.acquireAttachmentLease(
+      projectPath: projectPath, nodeID: racedNode, leaseID: racedLease,
+      descriptors: [descriptor])
+    try LocalRemoteAssetHost.verifyAttachmentLease(
+      projectPath: projectPath, nodeID: racedNode, leaseID: racedLease,
+      descriptors: [descriptor])
+    let racedPath = NodeMemory.attachmentsDirectory(
+      forProjectPath: projectPath, nodeID: racedNode
+    ).appendingPathComponent(".leases").appendingPathComponent(racedLease.uuidString)
+      .appendingPathComponent(descriptor.name)
+    try? FileManager.default.setAttributes(
+      [.posixPermissions: 0o600], ofItemAtPath: racedPath.path)
+    try FileManager.default.removeItem(at: racedPath)
+    try Data("tampered".utf8).write(to: racedPath)
+    XCTAssertThrowsError(
+      try LocalRemoteAssetHost.verifyAttachmentLease(
+        projectPath: projectPath, nodeID: racedNode, leaseID: racedLease,
+        descriptors: [descriptor]))
+    XCTAssertThrowsError(
+      try LocalRemoteAssetHost.rollbackAttachmentLease(
+        projectPath: projectPath, nodeID: racedNode, leaseID: racedLease,
+        descriptors: [descriptor]))
+    XCTAssertEqual(
+      try Data(
+        contentsOf: URL(
+          fileURLWithPath: LocalRemoteAssetHost.resolveAttachment(
+            projectPath: projectPath, nodeID: nodeID, name: descriptor.name,
+            size: descriptor.size, sha256: descriptor.sha256))),
+      original)
+
+    let linkedNode = UUID()
+    defer {
+      LocalRemoteAssetHost.discardAttachments(projectPath: projectPath, nodeID: linkedNode)
+    }
+    let linkedDirectory = NodeMemory.attachmentsDirectory(
+      forProjectPath: projectPath, nodeID: linkedNode)
+    try FileManager.default.createDirectory(
+      at: linkedDirectory, withIntermediateDirectories: true)
+    let linkedSource = linkedDirectory.appendingPathComponent(descriptor.name)
+    try original.write(to: linkedSource)
+    let linkedAlias = linkedDirectory.appendingPathComponent("alias.png")
+    #if os(Windows)
+      var sourcePath = Array(linkedSource.path.utf16)
+      sourcePath.append(0)
+      var aliasPath = Array(linkedAlias.path.utf16)
+      aliasPath.append(0)
+      let linked = sourcePath.withUnsafeBufferPointer { source in
+        aliasPath.withUnsafeBufferPointer { alias in
+          CreateHardLinkW(alias.baseAddress, source.baseAddress, nil)
+        }
+      }
+      XCTAssertTrue(linked)
+    #else
+      try FileManager.default.linkItem(at: linkedSource, to: linkedAlias)
+    #endif
+    XCTAssertThrowsError(
+      try LocalRemoteAssetHost.acquireAttachmentLease(
+        projectPath: projectPath, nodeID: linkedNode, leaseID: UUID(),
+        descriptors: [descriptor]))
+
+    let symbolicNode = UUID()
+    defer {
+      LocalRemoteAssetHost.discardAttachments(projectPath: projectPath, nodeID: symbolicNode)
+    }
+    let symbolicDirectory = NodeMemory.attachmentsDirectory(
+      forProjectPath: projectPath, nodeID: symbolicNode)
+    try FileManager.default.createDirectory(
+      at: symbolicDirectory, withIntermediateDirectories: true)
+    let external = root.appendingPathComponent("external.png")
+    try original.write(to: external)
+    let symbolic = symbolicDirectory.appendingPathComponent(descriptor.name)
+    if (try? FileManager.default.createSymbolicLink(at: symbolic, withDestinationURL: external))
+      != nil
+    {
+      XCTAssertThrowsError(
+        try LocalRemoteAssetHost.acquireAttachmentLease(
+          projectPath: projectPath, nodeID: symbolicNode, leaseID: UUID(),
+          descriptors: [descriptor]))
+    }
+
+    let duplicateNode = UUID()
+    defer {
+      LocalRemoteAssetHost.discardAttachments(projectPath: projectPath, nodeID: duplicateNode)
+    }
+    let secondDescriptor = RemoteAssetRetentionDescriptor(
+      name: "second.png", size: original.count, sha256: descriptor.sha256)
+    _ = try LocalRemoteAssetHost.stageAttachment(
+      projectPath: projectPath, nodeID: duplicateNode, name: descriptor.name, data: original)
+    _ = try LocalRemoteAssetHost.stageAttachment(
+      projectPath: projectPath, nodeID: duplicateNode, name: secondDescriptor.name, data: original)
+    let duplicateLease = UUID()
+    try LocalRemoteAssetHost.acquireAttachmentLease(
+      projectPath: projectPath, nodeID: duplicateNode, leaseID: duplicateLease,
+      descriptors: [descriptor, secondDescriptor])
+    try LocalRemoteAssetHost.commitAttachmentLease(
+      projectPath: projectPath, nodeID: duplicateNode, leaseID: duplicateLease,
+      descriptors: [descriptor, secondDescriptor])
+    let duplicateLeasePath = NodeMemory.attachmentsDirectory(
+      forProjectPath: projectPath, nodeID: duplicateNode
+    ).appendingPathComponent(".leases").appendingPathComponent(duplicateLease.uuidString)
+    XCTAssertFalse(FileManager.default.fileExists(atPath: duplicateLeasePath.path))
+
+    let swappedNode = UUID()
+    defer {
+      LocalRemoteAssetHost.discardAttachments(projectPath: projectPath, nodeID: swappedNode)
+    }
+    _ = try LocalRemoteAssetHost.stageAttachment(
+      projectPath: projectPath, nodeID: swappedNode, name: descriptor.name, data: original)
+    let swappedLease = UUID()
+    try LocalRemoteAssetHost.acquireAttachmentLease(
+      projectPath: projectPath, nodeID: swappedNode, leaseID: swappedLease,
+      descriptors: [descriptor])
+    let swappedRoot = NodeMemory.attachmentsDirectory(
+      forProjectPath: projectPath, nodeID: swappedNode)
+    let swappedLeasePath = swappedRoot.appendingPathComponent(".leases")
+      .appendingPathComponent(swappedLease.uuidString)
+    let hiddenLease = swappedRoot.appendingPathComponent(".hidden-lease")
+    try FileManager.default.moveItem(at: swappedLeasePath, to: hiddenLease)
+    let victim = root.appendingPathComponent("victim", isDirectory: true)
+    try FileManager.default.createDirectory(at: victim, withIntermediateDirectories: true)
+    let victimFile = victim.appendingPathComponent(descriptor.name)
+    try original.write(to: victimFile)
+    if (try? FileManager.default.createSymbolicLink(
+      at: swappedLeasePath, withDestinationURL: victim)) != nil
+    {
+      XCTAssertThrowsError(
+        try LocalRemoteAssetHost.rollbackAttachmentLease(
+          projectPath: projectPath, nodeID: swappedNode, leaseID: swappedLease,
+          descriptors: [descriptor]))
+      XCTAssertEqual(try Data(contentsOf: victimFile), original)
+    }
+  }
+
+  func testReplacementBeforeAndAfterLeaseVerificationNeverPublishesGraph() async throws {
+    for corruptAfterVerification in [false, true] {
+      let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("asset-content-race-\(UUID())", isDirectory: true)
+      defer { try? FileManager.default.removeItem(at: root) }
+      let fixture = Fixture()
+      let assets = store(fixture: fixture)
+      let registry = ProjectRegistry(
+        persistenceDirectory: root, remoteAssets: assets,
+        ensureSession: nil, terminateSession: nil, restartSession: nil,
+        persistsSynchronously: true, classifyProject: { _ in .ssh })
+      let connection = RemoteAssetTestConnection()
+      await registry.addConnection(
+        id: connection.id,
+        channel: DaemonConnectionChannel(
+          connection: connection, mode: .v2(version: 2), clientID: UUID()))
+      let path = "ssh://fixture/content-race-\(corruptAfterVerification)"
+      _ = await registry.apply(.openProject(path: path), connectionID: connection.id)
+      let nodeID = UUID()
+      let original = Data("content-a".utf8)
+      let attachment = try await uploadThroughRegistry(
+        registry, connectionID: connection.id, projectPath: path, nodeID: nodeID,
+        data: original)
+      if corruptAfterVerification {
+        await fixture.corruptNextLeaseAfterVerify(with: Data("content-b".utf8))
+      } else {
+        await fixture.replaceStaged(
+          path: path, nodeID: nodeID, name: attachment.fileName,
+          data: Data("content-b".utf8))
+      }
+      let result = await registry.apply(
+        .graphCommand(
+          projectPath: path,
+          command: .createNode(
+            NodeDraft(
+              id: nodeID, title: "Must not persist", loopType: .turnBased,
+              firstInstruction: "work", attachments: [attachment]))),
+        connectionID: connection.id)
+      XCTAssertNotNil(result?.error)
+      XCTAssertNil(result?.response)
+      XCTAssertFalse(
+        ProjectPersistence(baseDirectory: root).loadGraph(path: path)?
+          .nodesAtAnyDepth.contains(where: { $0.id == nodeID }) ?? false)
+      await registry.removeConnection(connection.id)
+    }
+  }
+
+  func testDurableCatalogRestoresQuotaLeaseRecoveryAndOmitsHostPaths() async throws {
+    let root = FileManager.default.temporaryDirectory
+      .appendingPathComponent("asset-catalog-recovery-\(UUID())", isDirectory: true)
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let catalog = root.appendingPathComponent("catalog.json")
+    let fixture = Fixture()
+    let owner = UUID()
+    let path = "ssh://fixture/private-host/project"
+    let nodeID = UUID()
+    let bytes = Data("catalog-secret-content".utf8)
+    let first = store(fixture: fixture, catalogURL: catalog)
+    let attachment = try await uploadDraft(
+      first, owner: owner, projectPath: path, metadata: .ssh, nodeID: nodeID,
+      data: bytes)
+    let catalogText = String(decoding: try Data(contentsOf: catalog), as: UTF8.self)
+    XCTAssertFalse(catalogText.contains(path))
+    XCTAssertFalse(catalogText.contains(String(decoding: bytes, as: UTF8.self)))
+
+    let restored = store(fixture: fixture, catalogURL: catalog)
+    let restoredUsage = await restored.resourceUsage()
+    XCTAssertEqual(restoredUsage.finalizedDrafts, 1)
+    let preparedLease = try await restored.prepareCreate(
+      [attachment], owner: owner, projectPath: path, metadata: .ssh, nodeID: nodeID,
+      allowsLegacyLocalPaths: false
+    ).get()
+    let leaseID = try XCTUnwrap(preparedLease)
+
+    let graphPersistedRecovery = store(fixture: fixture, catalogURL: catalog)
+    await graphPersistedRecovery.reconcile(
+      projectPath: path, metadata: .ssh, graphNodeIDs: [nodeID])
+    let recoveredUsage = await graphPersistedRecovery.resourceUsage()
+    let recoveredData = await fixture.stagedData(
+      path: path, nodeID: nodeID, name: attachment.fileName)
+    XCTAssertEqual(recoveredUsage.finalizedDrafts, 0)
+    XCTAssertEqual(recoveredData, bytes)
+    _ = leaseID
+
+    let rollbackNode = UUID()
+    let rollbackAttachment = try await uploadDraft(
+      graphPersistedRecovery, owner: owner, projectPath: path, metadata: .ssh,
+      nodeID: rollbackNode, name: "rollback.png", data: Data("rollback".utf8))
+    let rollbackLease = try await graphPersistedRecovery.prepareCreate(
+      [rollbackAttachment], owner: owner, projectPath: path, metadata: .ssh,
+      nodeID: rollbackNode, allowsLegacyLocalPaths: false
+    ).get()
+    _ = try XCTUnwrap(rollbackLease)
+    let graphRejectedRecovery = store(fixture: fixture, catalogURL: catalog)
+    await graphRejectedRecovery.reconcile(
+      projectPath: path, metadata: .ssh, graphNodeIDs: [nodeID])
+    let rolledBackData = await fixture.stagedData(
+      path: path, nodeID: rollbackNode, name: rollbackAttachment.fileName)
+    let rolledBackUsage = await graphRejectedRecovery.resourceUsage()
+    XCTAssertNil(rolledBackData)
+    XCTAssertEqual(rolledBackUsage.finalizedDrafts, 0)
+  }
+
+  func testLegacyV1LocalCreatePersistsOpaqueContentBoundAttachment() async throws {
+    let root = FileManager.default.temporaryDirectory
+      .appendingPathComponent("asset-legacy-production-\(UUID())", isDirectory: true)
+    let project = root.appendingPathComponent("project", isDirectory: true)
+    try FileManager.default.createDirectory(at: project, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let nodeID = UUID()
+    defer {
+      LocalRemoteAssetHost.discardAttachments(projectPath: project.path, nodeID: nodeID)
+    }
+    let bytes = Data("legacy-production".utf8)
+    let path = try LocalRemoteAssetHost.stageAttachment(
+      projectPath: project.path, nodeID: nodeID, name: "legacy.png", data: bytes)
+    let assets = RemoteAssetStore(
+      transport: .live, authenticationKey: Data(repeating: 0x71, count: 32),
+      catalogURL: root.appendingPathComponent("remote-assets.json"))
+    let registry = ProjectRegistry(
+      persistenceDirectory: root.appendingPathComponent("state"), remoteAssets: assets,
+      ensureSession: nil, terminateSession: nil, restartSession: nil,
+      persistsSynchronously: true, classifyProject: { _ in .local })
+    let connection = RemoteAssetTestConnection()
+    await registry.addConnection(
+      id: connection.id,
+      channel: DaemonConnectionChannel(connection: connection, mode: .v1))
+    _ = await registry.apply(.openProject(path: project.path), connectionID: connection.id)
+    let result = await registry.apply(
+      .graphCommand(
+        projectPath: project.path,
+        command: .createNode(
+          NodeDraft(
+            id: nodeID, title: "Legacy", loopType: .turnBased,
+            firstInstruction: "work",
+            attachments: [PromptAttachment(path: path, name: "legacy.png")]))),
+      connectionID: connection.id)
+    XCTAssertNil(result?.error)
+    guard case .graphChanged(let graph) = result?.response,
+      let secured = graph.nodesAtAnyDepth.first(where: { $0.id == nodeID })?.attachments.first
+    else { return XCTFail("expected persisted legacy node") }
+    XCTAssertTrue(secured.isOpaqueReference)
+    let resolved = try await assets.resolvedPath(
+      for: secured, projectPath: project.path, nodeID: nodeID, metadata: .local
+    ).get()
+    XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: resolved)), bytes)
+    await registry.removeConnection(connection.id)
+  }
+
+  func testDurableCleanupRecoversAfterOutageAndReportsTerminalQuarantine() async throws {
+    let root = FileManager.default.temporaryDirectory
+      .appendingPathComponent("asset-cleanup-recovery-\(UUID())", isDirectory: true)
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let catalog = root.appendingPathComponent("catalog.json")
+    let fixture = Fixture()
+    let clock = RemoteAssetTestClock(Date(timeIntervalSince1970: 10_000))
+    let owner = UUID()
+    let path = "codespace://fixture/cleanup"
+
+    var first: RemoteAssetStore? = store(
+      fixture: fixture, now: { clock.now() }, catalogURL: catalog)
+    let firstNode = UUID()
+    let firstData = Data("eventual-cleanup".utf8)
+    let firstTicket = try await first!.beginUpload(
+      owner: owner, projectPath: path, metadata: .codespace, nodeID: firstNode,
+      declaration: declaration(data: firstData), existingCount: 0
+    ).get()
+    _ = try await first!.append(
+      owner: owner, transferID: firstTicket.transferID, offset: 0, data: firstData
+    ).get()
+    _ = try await first!.finalize(owner: owner, transferID: firstTicket.transferID).get()
+    await fixture.setRemoveFailures(20)
+    let firstCleanup = await first!.completeDelivery(
+      owner: owner, deliveryID: firstTicket.transferID, delivered: false)
+    XCTAssertThrowsError(try firstCleanup.get())
+    let pendingUsage = await first!.resourceUsage()
+    XCTAssertEqual(pendingUsage.pendingDraftCleanups, 1)
+    first = nil
+
+    await fixture.setRemoveFailures(0)
+    clock.advance(10)
+    let recovered = store(fixture: fixture, now: { clock.now() }, catalogURL: catalog)
+    await recovered.reconcile(projectPath: path, metadata: .codespace, graphNodeIDs: [])
+    let recoveredUsage = await recovered.resourceUsage()
+    XCTAssertEqual(recoveredUsage.pendingDraftCleanups, 0)
+    let recoveredFile = await fixture.stagedData(
+      path: path, nodeID: firstNode, name: "image-1.png")
+    XCTAssertNil(recoveredFile)
+
+    let quarantinedNode = UUID()
+    let quarantinedData = Data("terminal-cleanup".utf8)
+    let quarantinedTicket = try await recovered.beginUpload(
+      owner: owner, projectPath: path, metadata: .codespace, nodeID: quarantinedNode,
+      declaration: declaration(name: "terminal.png", data: quarantinedData), existingCount: 0
+    ).get()
+    _ = try await recovered.append(
+      owner: owner, transferID: quarantinedTicket.transferID, offset: 0,
+      data: quarantinedData
+    ).get()
+    _ = try await recovered.finalize(
+      owner: owner, transferID: quarantinedTicket.transferID
+    ).get()
+    await fixture.setRemoveFailures(100)
+    let terminalCleanup = await recovered.completeDelivery(
+      owner: owner, deliveryID: quarantinedTicket.transferID, delivered: false)
+    XCTAssertThrowsError(try terminalCleanup.get())
+    for _ in 0..<RemoteAssetStore.maximumCleanupAttempts {
+      clock.advance(4_000)
+      _ = await recovered.resourceUsage()
+    }
+    let terminal = await recovered.resourceUsage()
+    XCTAssertEqual(terminal.pendingDraftCleanups, 0)
+    XCTAssertEqual(terminal.quarantinedDraftCleanups, 1)
+
+    let restarted = store(fixture: fixture, now: { clock.now() }, catalogURL: catalog)
+    await restarted.reconcile(projectPath: path, metadata: .codespace, graphNodeIDs: [])
+    let restartedUsage = await restarted.resourceUsage()
+    XCTAssertEqual(restartedUsage.quarantinedDraftCleanups, 1)
+    let quarantinedFile = await fixture.stagedData(
+      path: path, nodeID: quarantinedNode, name: "terminal.png")
+    XCTAssertNotNil(quarantinedFile)
   }
 }

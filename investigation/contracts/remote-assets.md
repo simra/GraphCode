@@ -81,10 +81,12 @@ sequenceDiagram
   D->>D: commit publication only after response frame succeeds
   C->>D: createNode or nested subGraphCommand(...createNode)
   D->>D: resolve target graph; reject duplicate ID; validate references
-  D->>H: verify selected draft files and acquire a reversible draft lease
-  H-->>D: retention guaranteed
+  D->>H: move exact size+digest files into a no-replace lease namespace
+  H-->>D: durable reversible lease
+  D->>H: reverify lease at graph-commit boundary
   D->>D: apply the exact graph command
-  D->>D: finalize ownership; remove unselected draft files
+  D->>H: publish content-addressed retained ownership
+  D->>D: finalize catalog ownership; remove unselected draft files
   C->>D: attended start / unattended ensure / restart / liveness recovery
   D->>D: authorize client or trusted daemon authority
   D->>D: resolve references at the common launch-copy boundary
@@ -112,7 +114,8 @@ before each append. Every terminal path releases the same accounting without wra
 integer addition.
 
 Finalized, response-delivered drafts have a separate 15-minute lifetime and separate
-atomic reservations:
+atomic reservations. The daemon durably records the reservation before returning an
+opaque reference:
 
 | Scope                 | Drafts | Attachments | Bytes   |
 | --------------------- | ------ | ----------- | ------- |
@@ -126,6 +129,17 @@ Expiry runs independently of logical-client connection lifetime, releases accoun
 before cleanup, and removes only files recorded in the expiring draft. Failed cleanup
 remains in an explicit retry queue and cannot make an expired reference valid again.
 
+The project-scoped catalog records opaque project identity, logical owner, node and safe
+name, exact size and digest, original creation/expiry deadlines, lease state, and cleanup
+state. It does not contain attachment bytes, credentials, remote commands, or local/remote
+host paths. Writes use atomic replacement. Startup validates count/byte bounds with
+overflow-safe arithmetic, quarantines corrupt catalogs, rebuilds quota accounting exactly
+once, and preserves original deadlines. Opening a project binds its current canonical
+path to matching opaque catalog records and reconciles them against the persisted graph:
+a graph-owned lease is finalized idempotently, while a lease for an absent node is rolled
+back. Thus restart cannot reset quota, abandon a delivered draft, or strand the
+graph-persisted-before-finalize crash window.
+
 The graph persists only the authenticated opaque reference and safe display name.
 Attachment bytes never enter graph JSON, event replay, ordinary broadcasts, recents,
 errors, journals, or dial logs. Attended starts, unattended starts, restart recovery, and
@@ -137,20 +151,30 @@ separate trusted daemon authority.
 Finalize transitions atomically out of receiving before host staging begins. Cancel and
 disconnect wait for an in-flight host operation, request transport cancellation where
 supported, and remove any destination published before reference delivery. A failed
-response write rolls publication back. Cleanup is retried and remains explicitly pending
-if retries are exhausted; cancellation never reports success while a later finalize can
-publish.
+response write transfers ownership directly to the durable cleanup queue; no explicit
+cancel is required. Draft expiry, graph rejection, provisional publication failure, and
+lease rollback share that queue. Records are keyed by authoritative project, node, name,
+digest, lease, and target, so duplicate requests deduplicate. Autonomous maintenance uses
+bounded exponential backoff for at most eight attempts and seven days. The queue is
+capped at 2,048 records and 1 GiB; admission reserves cleanup capacity before publication.
+Terminal failures remain durably quarantined and are reported separately from pending
+cleanup rather than being silently dropped. Cancellation never reports success while a
+later finalize can publish.
 
 Create rejects an existing node ID before any file operation. Reference validation is
-non-destructive. The daemon then leases the exact draft and asks the authoritative host
-to verify every selected file without deleting anything. Only a successful verification
-allows the graph command to reach `GraphStore`, so retention failure cannot persist,
-replay, or broadcast a graph change. A graph rejection rolls the lease back by removing
-only files recorded in that draft. Successful creation finalizes ownership and removes
-only unselected draft files. Cleanup failures release draft accounting immediately,
-remain explicitly queued for bounded retries, and never delete pre-existing files or an
-existing node directory. Created-node files remain until normal node-memory cleanup
-removes them.
+non-destructive. Lease acquisition atomically removes the client-known mutable staging
+name and verifies regular/single-link identity plus exact size and SHA-256 in a
+lease-owned namespace. Local retained objects use a compact full-digest content key;
+SSH/Codespace use the equivalent no-replace hard-link/unlink operation. The lease is
+reverified immediately before `GraphStore`, and launch during the graph command resolves
+from that lease. Only then can persistence, replay, or broadcast occur. A graph rejection
+rolls back the lease namespace only. After graph success, the host idempotently publishes
+retained content and the catalog drops the lease; a restart between those steps completes
+publication from the graph as authority. Existing retained content is verified and never
+removed by rollback. Successful creation removes only unselected draft files. Cleanup
+failures release draft accounting only after durable cleanup ownership exists and never
+delete pre-existing files or an existing node directory. Created-node files remain until
+normal node-memory cleanup removes them.
 The registry iteratively unwraps any depth of `subGraphCommand`, resolves each addressed
 composite against the authoritative graph, and applies the same transaction to the exact
 enclosed `createNode`. A missing or non-composite address rejects before dispatch and
@@ -163,10 +187,12 @@ Unknown command/event fields retain normal Codable forward-compatibility behavio
 clients must use opaque attachment references and authenticated template asset IDs. The
 shared logical client ID is an optional field on the existing capability announcement;
 older daemons ignore it, while current daemons bind it to the authenticated peer process.
-narrow v1 local compatibility form accepts only a regular, single-link, non-reparse file
+The narrow v1 local compatibility form accepts only a regular, single-link, non-reparse file
 whose exact safe filename is already inside the authoritative project/node attachment
-directory; containment and file type are checked again at launch. Arbitrary daemon-host
-paths, traversal, remote legacy paths, and links are rejected before graph mutation. New
+directory. Before graph persistence it receives the same exact descriptor-bound lease
+and is rewritten to an authenticated opaque reference, so later launch never trusts the
+legacy filename. Arbitrary daemon-host paths, traversal, remote legacy paths, and links
+are rejected before graph mutation. New
 macOS clients fall back to the legacy local template implementation when an older daemon
 does not advertise v2 remote assets; remote access fails closed rather than reading a
 client-local URI.

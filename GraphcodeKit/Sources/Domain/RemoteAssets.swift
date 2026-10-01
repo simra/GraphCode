@@ -167,11 +167,12 @@ public struct RemoteAssetUsageSnapshot: Equatable, Sendable {
   public var finalizedAttachments: Int
   public var finalizedBytes: Int
   public var pendingDraftCleanups: Int
+  public var quarantinedDraftCleanups: Int
 
   public init(
     activeTransfers: Int, declaredBytes: Int, bufferedBytes: Int, pendingDeliveries: Int,
     finalizedDrafts: Int = 0, finalizedAttachments: Int = 0, finalizedBytes: Int = 0,
-    pendingDraftCleanups: Int = 0
+    pendingDraftCleanups: Int = 0, quarantinedDraftCleanups: Int = 0
   ) {
     self.activeTransfers = activeTransfers
     self.declaredBytes = declaredBytes
@@ -181,6 +182,7 @@ public struct RemoteAssetUsageSnapshot: Equatable, Sendable {
     self.finalizedAttachments = finalizedAttachments
     self.finalizedBytes = finalizedBytes
     self.pendingDraftCleanups = pendingDraftCleanups
+    self.quarantinedDraftCleanups = quarantinedDraftCleanups
   }
 }
 public enum RemoteAssetError: String, Error, Codable, Equatable, Sendable {
@@ -225,5 +227,22 @@ public enum RemoteAssetError: String, Error, Codable, Equatable, Sendable {
 public enum RemoteAssetDigest {
   public static func sha256Hex(_ data: Data) -> String {
     GraphcodeSHA256.digest(data).map { String(format: "%02x", $0) }.joined()
+  }
+
+  public static func pathKey(sha256: String) -> String? {
+    guard sha256.count == 64 else { return nil }
+    var bytes: [UInt8] = []
+    bytes.reserveCapacity(32)
+    var index = sha256.startIndex
+    while index < sha256.endIndex {
+      let next = sha256.index(index, offsetBy: 2)
+      guard let byte = UInt8(sha256[index..<next], radix: 16) else { return nil }
+      bytes.append(byte)
+      index = next
+    }
+    return Data(bytes).base64EncodedString()
+      .replacingOccurrences(of: "+", with: "-")
+      .replacingOccurrences(of: "/", with: "_")
+      .replacingOccurrences(of: "=", with: "")
   }
 }

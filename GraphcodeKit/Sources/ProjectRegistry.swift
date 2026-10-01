@@ -354,7 +354,7 @@ public actor ProjectRegistry {
     persistenceDirectory: URL,
     platformPaths: any PlatformPaths = CurrentPlatformPaths.value,
     replayStore: DaemonReplayStore = DaemonReplayStore(),
-    remoteAssets: RemoteAssetStore = RemoteAssetStore(),
+    remoteAssets: RemoteAssetStore? = nil,
     settingsURL: URL = GraphcodeSettingsStore.url,
     ensureSession: (@Sendable (LoopNode, String?) async -> Void)? = CLISessionBackend.ensureSession,
     terminateSession: (@Sendable (LoopNode, String?) -> Void)? =
@@ -419,7 +419,11 @@ public actor ProjectRegistry {
     self.persistsSynchronously = persistsSynchronously
     quickChatStore = QuickChatStore(baseDirectory: persistenceDirectory)
     self.replayStore = replayStore
-    self.remoteAssets = remoteAssets
+    self.remoteAssets =
+      remoteAssets
+      ?? RemoteAssetStore(
+        catalogURL: persistenceDirectory.appendingPathComponent(
+          "remote-assets/catalog.json"))
     self.settingsURL = settingsURL
     self.classifyProject = classifyProject
     self.relocationCoordinator =
@@ -563,11 +567,12 @@ public actor ProjectRegistry {
 
   public func removeConnection(_ id: UUID) async {
     let owner = remoteAssetOwner(for: id)
-    let ownerStillConnected = owner.map { departingOwner in
-      connections.keys.contains { connectionID in
-        connectionID != id && remoteAssetOwner(for: connectionID) == departingOwner
-      }
-    } ?? false
+    let ownerStillConnected =
+      owner.map { departingOwner in
+        connections.keys.contains { connectionID in
+          connectionID != id && remoteAssetOwner(for: connectionID) == departingOwner
+        }
+      } ?? false
     if let owner {
       await remoteAssets.disconnected(
         connectionID: id, owner: owner, ownerStillConnected: ownerStillConnected)
@@ -637,6 +642,20 @@ public actor ProjectRegistry {
       resolvedPath.append(contentsOf: resolved.path)
     }
     return .success(AttachmentCreateTarget(draft: draft, graphPath: resolvedPath))
+  }
+
+  private static func replacingCreateDraft(
+    in command: GraphCommand, with draft: NodeDraft
+  ) -> GraphCommand {
+    switch command {
+    case .createNode:
+      return .createNode(draft)
+    case .subGraphCommand(let nodeID, let nested):
+      return .subGraphCommand(
+        nodeID: nodeID, command: replacingCreateDraft(in: nested, with: draft))
+    default:
+      return command
+    }
   }
 
   private static func graphAddressed(
@@ -1213,6 +1232,7 @@ public actor ProjectRegistry {
           createTarget = target
         }
         var createLeaseID: UUID?
+        var commandToApply = inner
         if let target = createTarget {
           let draft = target.draft
           guard authoritativeGraph.nodesAtAnyDepth.allSatisfy({ $0.id != draft.id }) else {
@@ -1236,6 +1256,21 @@ public actor ProjectRegistry {
           {
           case .success(let leaseID):
             createLeaseID = leaseID
+            if let leaseID {
+              switch await remoteAssets.securedAttachments(
+                leaseID: leaseID, attachments: draft.attachments)
+              {
+              case .success(let attachments):
+                var securedDraft = draft
+                securedDraft.attachments = attachments
+                commandToApply = Self.replacingCreateDraft(
+                  in: inner, with: securedDraft)
+              case .failure(let failure):
+                _ = await remoteAssets.rollbackCreate(leaseID: leaseID)
+                return ProjectRegistryCommandResult(
+                  error: failure.message, errorCode: Self.wireCode(for: failure))
+              }
+            }
           case .failure(let failure):
             _ = await remoteAssets.discardDraft(
               owner: owner, projectPath: canonicalPath, metadata: metadata, nodeID: draft.id)
@@ -1246,8 +1281,16 @@ public actor ProjectRegistry {
         let v2PayloadLimit: Int? =
           if case .v2 = channel.mode { FramedMessageIO.v2MaxPayloadBytes } else { nil }
         let requester: UUID? = if case .v1 = channel.mode { connectionID } else { nil }
+        if let createLeaseID,
+          case .failure(let failure) = await remoteAssets.verifyCreateLease(
+            leaseID: createLeaseID)
+        {
+          _ = await remoteAssets.rollbackCreate(leaseID: createLeaseID)
+          return ProjectRegistryCommandResult(
+            error: failure.message, errorCode: Self.wireCode(for: failure))
+        }
         let result = await store.handle(
-          inner, from: requester,
+          commandToApply, from: requester,
           serializeCommands: true,
           broadcastErrors: broadcastErrors,
           v2PayloadLimit: v2PayloadLimit)
@@ -1503,7 +1546,8 @@ public actor ProjectRegistry {
           error: RemoteAssetError.unauthorized.message, errorCode: .remoteAssetUnauthorized)
       }
       switch await remoteAssets.append(
-        owner: owner, connectionID: connectionID, transferID: transferID, offset: offset, data: data)
+        owner: owner, connectionID: connectionID, transferID: transferID, offset: offset, data: data
+      )
       {
       case .success(let progress): response = .attachmentUploadProgress(progress)
       case .failure(let failure):
@@ -2197,6 +2241,14 @@ public actor ProjectRegistry {
     _ canonicalPath: String, for connectionID: UUID, channel: DaemonConnectionChannel
   ) async -> LoopGraph {
     let store = await store(forProjectPath: canonicalPath)
+    if canonicalPath != LoopGraphScope.globalPath {
+      let graph = await store.graph
+      let metadata =
+        graph.project.metadata ?? ProjectMetadata.inferred(fromProjectPath: canonicalPath)
+      await remoteAssets.reconcile(
+        projectPath: canonicalPath, metadata: metadata,
+        graphNodeIDs: Set(graph.nodesAtAnyDepth.map(\.id)))
+    }
     connectionProjectPaths[connectionID, default: []].insert(canonicalPath)
     let snapshot = await store.addConnection(id: connectionID, channel: channel)
     await store.setCapabilities(connectionCapabilities[connectionID] ?? [], for: connectionID)
