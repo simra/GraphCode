@@ -203,8 +203,8 @@ public actor ProjectRegistry {
   /// Connections that asked for the whole open set (`.restoreOpenProjects`) rather than
   /// one named project — see `sidebarSubscribers`.
   private var sidebarConnections: Set<UUID> = []
-  private let ensureSession: (@Sendable (LoopNode, String?) async -> Void)?
-  private let terminateSession: (@Sendable (LoopNode, String?) -> Void)?
+  private let ensureSession: (@Sendable (LoopNode, String?) async throws -> Void)?
+  private let terminateSession: (@Sendable (LoopNode, String?) async throws -> Void)?
   private let restartSession: (@Sendable (LoopNode, String?) async -> Bool)?
   private let startNodeSession:
     (@Sendable (LoopNode, String?) async -> Result<CLISessionStartOutcome, CLISessionError>)?
@@ -305,7 +305,7 @@ public actor ProjectRegistry {
   private func ensurePreparedSession(
     _ node: LoopNode,
     projectPath: String?,
-    launch: @escaping @Sendable (LoopNode, String?) async -> Void
+    launch: @escaping @Sendable (LoopNode, String?) async throws -> Void
   ) async {
     guard let projectPath,
       let token = sessionLaunchBarrier.beginLaunch(path: projectPath)
@@ -317,9 +317,67 @@ public actor ProjectRegistry {
     {
     case .success(let copy):
       guard sessionLaunchBarrier.isCurrent(token) else { return }
-      await launch(copy, projectPath)
+      do {
+        try await launch(copy, projectPath)
+      } catch {
+        await broadcast(.errorOccurred("loop session unavailable: \(error)"))
+      }
     case .failure(let failure):
       await broadcast(.errorOccurred("loop session unavailable: \(failure.message)"))
+    }
+  }
+
+  private func applyEnsureSessionEffect(
+    _ effectID: UUID,
+    node: LoopNode,
+    projectPath: String?,
+    launch: @escaping @Sendable (LoopNode, String?) async throws -> Void
+  ) async throws {
+    try Task.checkCancellation()
+    guard let projectPath,
+      let token = sessionLaunchBarrier.beginLaunch(path: projectPath)
+    else {
+      throw CLISessionError.unavailable("session launch is blocked")
+    }
+    defer { sessionLaunchBarrier.endLaunch(token) }
+    guard sessionLaunchBarrier.isCurrent(token) else {
+      throw CLISessionError.unavailable("session launch was superseded")
+    }
+    let copy: LoopNode
+    switch await preparedLaunchCopy(
+      node, projectPath: projectPath, metadata: classifyProject(projectPath), authority: .daemon)
+    {
+    case .success(let prepared):
+      copy = prepared
+    case .failure(let failure):
+      throw CLISessionError.unavailable(failure.message)
+    }
+    try Task.checkCancellation()
+    guard sessionLaunchBarrier.isCurrent(token) else {
+      throw CLISessionError.unavailable("session launch was superseded")
+    }
+    if await nodeSessionExists?(copy, projectPath) == true { return }
+    try await launch(copy, projectPath)
+    try Task.checkCancellation()
+    if let nodeSessionExists, await !nodeSessionExists(copy, projectPath) {
+      throw CLISessionError.failed(
+        "session effect \(effectID.uuidString) completed without a live session")
+    }
+  }
+
+  private func applyTerminateSessionEffect(
+    _ effectID: UUID,
+    node: LoopNode,
+    projectPath: String?,
+    terminate: @escaping @Sendable (LoopNode, String?) async throws -> Void
+  ) async throws {
+    try Task.checkCancellation()
+    if await nodeSessionExists?(node, projectPath) == false { return }
+    try await terminate(node, projectPath)
+    try Task.checkCancellation()
+    if let nodeSessionExists, await nodeSessionExists(node, projectPath) {
+      throw CLISessionError.failed(
+        "session effect \(effectID.uuidString) completed while the session remained live")
     }
   }
 
@@ -356,9 +414,12 @@ public actor ProjectRegistry {
     replayStore: DaemonReplayStore = DaemonReplayStore(),
     remoteAssets: RemoteAssetStore? = nil,
     settingsURL: URL = GraphcodeSettingsStore.url,
-    ensureSession: (@Sendable (LoopNode, String?) async -> Void)? = CLISessionBackend.ensureSession,
-    terminateSession: (@Sendable (LoopNode, String?) -> Void)? =
-      CLISessionBackend.terminateSession,
+    ensureSession: (@Sendable (LoopNode, String?) async throws -> Void)? = { node, path in
+      _ = try await CLISessionBackend.backend(for: node).startResult(node, path).get()
+    },
+    terminateSession: (@Sendable (LoopNode, String?) async throws -> Void)? = { node, path in
+      try await CLISessionBackend.backend(for: node).terminateResult(node, path).get()
+    },
     restartSession: (@Sendable (LoopNode, String?) async -> Bool)? =
       CLISessionBackend.restartSession,
     startNodeSession: (
@@ -1020,7 +1081,7 @@ public actor ProjectRegistry {
         projectPath: canonicalPath,
         operations: (graph?.nodesAtAnyDepth ?? []).flatMap { node in
           [
-            .terminateSession(node),
+            .terminateSession(effectID: UUID(), node: node),
             .removeMemory(nodeID: node.id),
             .cancelGoalPoller(nodeID: node.id),
             .cancelHeartbeat(nodeID: node.id),
@@ -1044,19 +1105,30 @@ public actor ProjectRegistry {
           .errorOccurred(
             "project attachment cleanup is durably held and will resume after restart"))
       }
-      if let store = stores[canonicalPath] {
-        await store.applyPostCommitEffects(projectEffectPlan)
-      } else {
-        await applyDeletedProjectEffects(projectEffectPlan)
+      var projectEffectError: (any Error)?
+      do {
+        if let store = stores[canonicalPath] {
+          try await store.applyPostCommitEffects(projectEffectPlan)
+        } else {
+          try await applyDeletedProjectEffects(projectEffectPlan)
+        }
+        persistence.markGraphEffectsApplied(graphReceipt)
+      } catch {
+        projectEffectError = error
       }
-      persistence.markGraphEffectsApplied(graphReceipt)
       _ = await close(canonicalPath, for: connectionID)
       persistence.forgetProject(path: canonicalPath)
       // Drop the in-memory store too, or a later reopen would resurrect the graph we
       // just deleted from the one still sitting in `stores`.
       stores.removeValue(forKey: canonicalPath)
-      response = .recentProjectsListed(authoritativeRecentProjects())
-      error = nil
+      if let projectEffectError {
+        response = nil
+        error =
+          "project graph deleted; post-commit effects remain pending: \(projectEffectError)"
+      } else {
+        response = .recentProjectsListed(authoritativeRecentProjects())
+        error = nil
+      }
 
     case .listQuickChats:
       guard let chats = try? quickChatStore.loadResult() else {
@@ -1374,8 +1446,20 @@ public actor ProjectRegistry {
           broadcastErrors: broadcastErrors,
           v2PayloadLimit: v2PayloadLimit,
           requiresDurablePersistence: createTarget != nil || Self.containsNodeDeletion(inner))
+        let committedGraph: LoopGraph?
+        let pendingEffectsError: String?
         switch result {
         case .applied(let graph):
+          committedGraph = graph
+          pendingEffectsError = nil
+        case .committedWithPendingEffects(let message, let graph):
+          committedGraph = graph
+          pendingEffectsError = message
+        case .rejected:
+          committedGraph = nil
+          pendingEffectsError = nil
+        }
+        if let graph = committedGraph {
           if let target = createTarget, let createLeaseID {
             let retainedNames = Set(target.draft.attachments.map(\.fileName))
             switch await remoteAssets.finalizeCreate(
@@ -1400,9 +1484,14 @@ public actor ProjectRegistry {
               .errorOccurred(
                 "attachment deletion cleanup is durably held and will resume after restart"))
           }
-          response = .graphChanged(graph)
-          error = nil
-        case .rejected(let message, _):
+          if let pendingEffectsError {
+            response = nil
+            error = pendingEffectsError
+          } else {
+            response = .graphChanged(graph)
+            error = nil
+          }
+        } else if case .rejected(let message, _) = result {
           if let deletionTransactionID {
             _ = await remoteAssets.cancelDeletion(transactionID: deletionTransactionID)
           }
@@ -2377,26 +2466,41 @@ public actor ProjectRegistry {
 
   private func recoverGraphPostCommitEffects() async {
     for pending in persistence.loadPendingGraphEffects() {
-      if persistence.loadGraph(path: pending.receipt.projectPath) != nil {
-        let store = await store(
-          forProjectPath: pending.receipt.projectPath, ensuringSessions: false)
-        await store.applyPostCommitEffects(pending.plan)
-      } else {
-        await applyDeletedProjectEffects(pending.plan)
+      do {
+        if persistence.loadGraph(path: pending.receipt.projectPath) != nil {
+          let store = await store(
+            forProjectPath: pending.receipt.projectPath, ensuringSessions: false)
+          try await store.applyPostCommitEffects(pending.plan)
+        } else {
+          try await applyDeletedProjectEffects(pending.plan)
+        }
+        persistence.markGraphEffectsApplied(pending.receipt)
+      } catch {
+        DaemonLog.shared.record(
+          "graph-effect-recovery-failure",
+          [
+            ("generation", pending.receipt.generation),
+            ("error-type", String(reflecting: type(of: error))),
+          ])
       }
-      persistence.markGraphEffectsApplied(pending.receipt)
     }
   }
 
-  private func applyDeletedProjectEffects(_ plan: GraphPostCommitEffectPlan) async {
+  private func applyDeletedProjectEffects(_ plan: GraphPostCommitEffectPlan) async throws {
     for operation in plan.operations {
       switch operation {
-      case .terminateSession(let node):
-        terminateSession?(node, plan.projectPath)
+      case .terminateSession(let effectID, let node):
+        if let terminateSession {
+          try await applyTerminateSessionEffect(
+            effectID, node: node, projectPath: plan.projectPath, terminate: terminateSession)
+        }
       case .removeMemory(let nodeID):
         NodeMemory.remove(projectPath: plan.projectPath, nodeID: nodeID)
-      case .ensureSession(let node):
-        await ensureSession?(node, plan.projectPath)
+      case .ensureSession(let effectID, let node):
+        if let ensureSession {
+          try await applyEnsureSessionEffect(
+            effectID, node: node, projectPath: plan.projectPath, launch: ensureSession)
+        }
       case .appendMemory(let effectID, let nodeID, let entry):
         NodeMemory.appendOnce(
           effectID: effectID, entry, projectPath: plan.projectPath, nodeID: nodeID)
@@ -2653,6 +2757,42 @@ public actor ProjectRegistry {
     } else {
       trackedEnsureSession = nil
     }
+    let trackedEnsureSessionEffect: (@Sendable (UUID, LoopNode, String?) async throws -> Void)?
+    if let launch = ensureSession {
+      trackedEnsureSessionEffect = { @Sendable [weak self] effectID, node, projectPath in
+        guard let self else { throw CancellationError() }
+        try await self.applyEnsureSessionEffect(
+          effectID, node: node, projectPath: projectPath, launch: launch)
+      }
+    } else {
+      trackedEnsureSessionEffect = nil
+    }
+    let trackedTerminateSession: (@Sendable (LoopNode, String?) -> Void)?
+    if let terminate = terminateSession {
+      trackedTerminateSession = { @Sendable node, projectPath in
+        Task {
+          do {
+            try await terminate(node, projectPath)
+          } catch {
+            DaemonLog.shared.record(
+              "session-terminate-failure",
+              [("node", node.id.uuidString), ("error-type", String(reflecting: type(of: error)))])
+          }
+        }
+      }
+    } else {
+      trackedTerminateSession = nil
+    }
+    let trackedTerminateSessionEffect: (@Sendable (UUID, LoopNode, String?) async throws -> Void)?
+    if let terminate = terminateSession {
+      trackedTerminateSessionEffect = { @Sendable [weak self] effectID, node, projectPath in
+        guard let self else { throw CancellationError() }
+        try await self.applyTerminateSessionEffect(
+          effectID, node: node, projectPath: projectPath, terminate: terminate)
+      }
+    } else {
+      trackedTerminateSessionEffect = nil
+    }
     let trackedRestartSession: (@Sendable (LoopNode, String?) async -> Bool)?
     if let restart = restartSession {
       trackedRestartSession = { @Sendable [weak self] node, projectPath in
@@ -2690,8 +2830,10 @@ public actor ProjectRegistry {
       },
       onConnectionFailure: onConnectionFailure,
       onEnsureSession: trackedEnsureSession,
+      onEnsureSessionEffect: trackedEnsureSessionEffect,
       onFindMissingProvider: findMissingProvider,
-      onTerminateSession: terminateSession,
+      onTerminateSession: trackedTerminateSession,
+      onTerminateSessionEffect: trackedTerminateSessionEffect,
       onRestartSession: trackedRestartSession,
       onEvaluatePredicate: evaluatePredicate,
       onCheckPredicate: checkPredicate,

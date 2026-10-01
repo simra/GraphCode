@@ -144,6 +144,8 @@ public enum ProjectRelocationFaultPoint: String, Sendable {
   case afterFilesystemCommit
   case beforeSupportCommit
   case afterSupportCommit
+  case beforeGenerationCleanup
+  case afterGenerationCleanup
   case beforeRollback
 }
 public final class ProjectRelocationCoordinator: @unchecked Sendable {
@@ -151,6 +153,7 @@ public final class ProjectRelocationCoordinator: @unchecked Sendable {
     enum Phase: String, Codable {
       case prepared
       case filesystemCommitted
+      case supportCommitted
     }
 
     var request: ProjectRelocationRequest
@@ -297,6 +300,12 @@ public final class ProjectRelocationCoordinator: @unchecked Sendable {
           from: plan.sourcePath, to: plan.destinationPath, graph: rewrittenGraph,
           supportSourcePath: graph.project.path)
         try fault(.afterSupportCommit)
+        committedJournal.phase = .supportCommitted
+        try writeJournal(committedJournal)
+        try fault(.beforeGenerationCleanup)
+        try persistence.cleanupRelocatedProjectPersistence(
+          from: plan.sourcePath, to: plan.destinationPath)
+        try fault(.afterGenerationCleanup)
       } catch {
         if supportCommitStarted {
           return ProjectRelocationResult(
@@ -425,7 +434,7 @@ public final class ProjectRelocationCoordinator: @unchecked Sendable {
                   operationID: journal.request.operationID,
                   disposition: .abandonedBeforeCommit,
                   detail: "source remained authoritative"))
-            case (false, true, _):
+            case (false, true, .prepared), (false, true, .filesystemCommitted):
               guard
                 try identityToken(at: journal.plan.destinationPath) == journal.plan.sourceIdentity
               else { throw ProjectRelocationError.recoveryFailed }
@@ -434,6 +443,11 @@ public final class ProjectRelocationCoordinator: @unchecked Sendable {
                 to: journal.plan.destinationPath,
                 graph: journal.graph,
                 supportSourcePath: journal.request.sourcePath)
+              var cleanupJournal = journal
+              cleanupJournal.phase = .supportCommitted
+              try writeJournal(cleanupJournal)
+              try persistence.cleanupRelocatedProjectPersistence(
+                from: journal.plan.sourcePath, to: journal.plan.destinationPath)
               let result = ProjectRelocationResult(
                 operationID: journal.request.operationID,
                 sourcePath: journal.plan.sourcePath,
@@ -450,7 +464,30 @@ public final class ProjectRelocationCoordinator: @unchecked Sendable {
                 ProjectRelocationRecoveryStatus(
                   operationID: journal.request.operationID,
                   disposition: .recovered,
-                  detail: "destination support state completed"))
+                  detail: "destination support state and source generation cleanup completed"))
+            case (false, true, .supportCommitted):
+              guard
+                try identityToken(at: journal.plan.destinationPath) == journal.plan.sourceIdentity
+              else { throw ProjectRelocationError.recoveryFailed }
+              try persistence.cleanupRelocatedProjectPersistence(
+                from: journal.plan.sourcePath, to: journal.plan.destinationPath)
+              let result = ProjectRelocationResult(
+                operationID: journal.request.operationID,
+                sourcePath: journal.plan.sourcePath,
+                destinationPath: journal.plan.destinationPath,
+                sourceIdentity: journal.plan.sourceIdentity,
+                graphRevision: journal.request.expectedGraphRevision)
+              try writeReceipt(
+                Receipt(
+                  request: journal.request,
+                  authorizedClientID: journal.authorizedClientID,
+                  result: result))
+              try archiveJournal(file, disposition: "recovered")
+              statuses.append(
+                ProjectRelocationRecoveryStatus(
+                  operationID: journal.request.operationID,
+                  disposition: .recovered,
+                  detail: "source generation cleanup completed"))
             default:
               throw ProjectRelocationError.recoveryFailed
             }
@@ -505,6 +542,8 @@ public final class ProjectRelocationCoordinator: @unchecked Sendable {
     else {
       throw ProjectRelocationError.unsafePath
     }
+    try persistence.validateProjectRelocationPersistenceKeys(
+      from: canonicalSource, to: canonicalDestination)
     guard !pathEquals(canonicalSource, canonicalDestination),
       !isNested(canonicalSource, in: canonicalDestination),
       !isNested(canonicalDestination, in: canonicalSource),

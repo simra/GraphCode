@@ -121,9 +121,11 @@ private final class RemoteAssetTestConnection: @unchecked Sendable, DaemonConnec
 
 private actor RemoteAssetLaunchRecorder {
   private var nodes: [LoopNode] = []
+  private var liveNodeIDs: Set<UUID> = []
 
   func record(_ node: LoopNode) {
     nodes.append(node)
+    liveNodeIDs.insert(node.id)
   }
 
   func values() -> [LoopNode] {
@@ -132,6 +134,90 @@ private actor RemoteAssetLaunchRecorder {
 
   func clear() {
     nodes.removeAll()
+  }
+
+  func exists(_ node: LoopNode) -> Bool {
+    liveNodeIDs.contains(node.id)
+  }
+}
+
+private actor DurableSessionEffectHarness {
+  private var live: Set<UUID> = []
+  private var launchFailures = 0
+  private var terminateFailures: [UUID: Int] = [:]
+  private var suspendsLaunch = false
+  private var launchContinuation: CheckedContinuation<Void, Never>?
+  private var suspendsTermination = false
+  private var terminationContinuation: CheckedContinuation<Void, Never>?
+  private var launches: [UUID: Int] = [:]
+  private var terminations: [UUID: Int] = [:]
+
+  func seedLive(_ nodeIDs: Set<UUID>) {
+    live = nodeIDs
+  }
+
+  func failLaunches(_ count: Int) {
+    launchFailures = count
+  }
+
+  func failTerminations(_ values: [UUID: Int]) {
+    terminateFailures = values
+  }
+
+  func suspendLaunch() {
+    suspendsLaunch = true
+  }
+
+  func releaseLaunch() {
+    suspendsLaunch = false
+    launchContinuation?.resume()
+    launchContinuation = nil
+  }
+
+  func suspendTermination() {
+    suspendsTermination = true
+  }
+
+  func releaseTermination() {
+    suspendsTermination = false
+    terminationContinuation?.resume()
+    terminationContinuation = nil
+  }
+
+  func launch(_ node: LoopNode) async throws {
+    launches[node.id, default: 0] += 1
+    if suspendsLaunch {
+      await withCheckedContinuation { launchContinuation = $0 }
+    }
+    if launchFailures > 0 {
+      launchFailures -= 1
+      throw CLISessionError.unavailable("synthetic launch outage")
+    }
+    live.insert(node.id)
+  }
+
+  func terminate(_ node: LoopNode) async throws {
+    terminations[node.id, default: 0] += 1
+    if suspendsTermination {
+      await withCheckedContinuation { terminationContinuation = $0 }
+    }
+    if let remaining = terminateFailures[node.id], remaining > 0 {
+      terminateFailures[node.id] = remaining - 1
+      throw CancellationError()
+    }
+    live.remove(node.id)
+  }
+
+  func exists(_ node: LoopNode) -> Bool {
+    live.contains(node.id)
+  }
+
+  func launchAttempts(_ nodeID: UUID) -> Int {
+    launches[nodeID, default: 0]
+  }
+
+  func terminateAttempts(_ nodeID: UUID) -> Int {
+    terminations[nodeID, default: 0]
   }
 }
 
@@ -1377,6 +1463,7 @@ final class RemoteAssetTests: XCTestCase {
         await restarts.record(node)
         return true
       },
+      nodeSessionExists: { node, _ in await ensureStarts.exists(node) },
       persistsSynchronously: true,
       classifyProject: { _ in .ssh })
     let remoteConnection = RemoteAssetTestConnection()
@@ -1437,6 +1524,7 @@ final class RemoteAssetTests: XCTestCase {
       ensureSession: { node, _ in await recoveryStarts.record(node) },
       terminateSession: nil,
       restartSession: nil,
+      nodeSessionExists: { node, _ in await recoveryStarts.exists(node) },
       persistsSynchronously: true,
       classifyProject: { _ in .ssh })
     let recoveryConnection = RemoteAssetTestConnection()
@@ -2805,6 +2893,231 @@ final class RemoteAssetTests: XCTestCase {
     XCTAssertEqual(Set(recorder.snapshot().removed), [parentID, childID])
   }
 
+  func testDurableLaunchEffectsAwaitAndRetryForLocalAndRemoteProjects() async throws {
+    for (index, path, metadata) in [
+      (
+        0, FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).path,
+        ProjectMetadata.local
+      ),
+      (1, "ssh://fixture.example/durable-session-effects", ProjectMetadata.ssh),
+    ] {
+      if metadata.location == .local {
+        try FileManager.default.createDirectory(atPath: path, withIntermediateDirectories: true)
+      }
+      defer {
+        if metadata.location == .local {
+          try? FileManager.default.removeItem(atPath: path)
+        }
+      }
+      let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("durable-session-\(index)-\(UUID())", isDirectory: true)
+      defer { try? FileManager.default.removeItem(at: root) }
+      let harness = DurableSessionEffectHarness()
+      await harness.failLaunches(1)
+      await harness.suspendLaunch()
+      var registry: ProjectRegistry? = ProjectRegistry(
+        persistenceDirectory: root,
+        ensureSession: { node, _ in try await harness.launch(node) },
+        terminateSession: { node, _ in try await harness.terminate(node) },
+        nodeSessionExists: { node, _ in await harness.exists(node) },
+        classifyProject: { _ in metadata })
+      let connection = RemoteAssetTestConnection()
+      await registry!.addConnection(
+        id: connection.id,
+        channel: DaemonConnectionChannel(connection: connection, mode: .v2(version: 2)))
+      _ = await registry!.apply(.openProject(path: path), connectionID: connection.id)
+      let nodeID = UUID()
+      let create = Task {
+        await registry!.apply(
+          .graphCommand(
+            projectPath: path,
+            command: .createNode(
+              NodeDraft(
+                id: nodeID, title: "Durable", loopType: .timeBased,
+                triggerPrompt: "/loop 1h Work"))),
+          connectionID: connection.id)
+      }
+      for _ in 0..<200 where await harness.launchAttempts(nodeID) == 0 {
+        try await Task.sleep(for: .milliseconds(10))
+      }
+      let suspendedLaunchAttempts = await harness.launchAttempts(nodeID)
+      XCTAssertEqual(suspendedLaunchAttempts, 1)
+      XCTAssertEqual(ProjectPersistence(baseDirectory: root).loadPendingGraphEffects().count, 1)
+      await harness.releaseLaunch()
+      let failed = await create.value
+      XCTAssertTrue(failed?.error?.contains("post-commit effects remain pending") == true)
+      XCTAssertEqual(ProjectPersistence(baseDirectory: root).loadPendingGraphEffects().count, 1)
+      registry = nil
+
+      registry = ProjectRegistry(
+        persistenceDirectory: root,
+        ensureSession: { node, _ in try await harness.launch(node) },
+        terminateSession: { node, _ in try await harness.terminate(node) },
+        nodeSessionExists: { node, _ in await harness.exists(node) },
+        classifyProject: { _ in metadata })
+      for _ in 0..<200
+      where !ProjectPersistence(baseDirectory: root).loadPendingGraphEffects().isEmpty {
+        try await Task.sleep(for: .milliseconds(10))
+      }
+      let recoveredExists = await harness.exists(LoopNode(id: nodeID, title: "Durable"))
+      let recoveredLaunchAttempts = await harness.launchAttempts(nodeID)
+      XCTAssertTrue(recoveredExists)
+      XCTAssertEqual(recoveredLaunchAttempts, 2)
+      XCTAssertTrue(ProjectPersistence(baseDirectory: root).loadPendingGraphEffects().isEmpty)
+      registry = nil
+    }
+  }
+
+  func testCrashBeforeSessionEffectsRetriesPartialTerminationWithoutDuplicateKills()
+    async throws
+  {
+    for (index, path, metadata) in [
+      (
+        0, FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).path,
+        ProjectMetadata.local
+      ),
+      (1, "ssh://fixture.example/partial-termination", ProjectMetadata.ssh),
+    ] {
+      let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("durable-termination-\(index)-\(UUID())", isDirectory: true)
+      defer { try? FileManager.default.removeItem(at: root) }
+      let first = LoopNode(id: UUID(), title: "First", loopType: .turnBased)
+      let second = LoopNode(id: UUID(), title: "Second", loopType: .turnBased)
+      let persistence = ProjectPersistence(baseDirectory: root)
+      try persistence.saveGraphAcknowledged(
+        LoopGraph(
+          project: ProjectRef(path: path, name: "Project", metadata: metadata),
+          nodes: [first, second]))
+      let plan = GraphPostCommitEffectPlan(
+        projectPath: path,
+        operations: [
+          .terminateSession(effectID: UUID(), node: first),
+          .removeMemory(nodeID: first.id),
+          .terminateSession(effectID: UUID(), node: second),
+          .removeMemory(nodeID: second.id),
+        ])
+      _ = try persistence.deleteGraphAcknowledged(path: path, effectPlan: plan)
+
+      let harness = DurableSessionEffectHarness()
+      await harness.seedLive([first.id, second.id])
+      await harness.failTerminations([second.id: 1])
+      await harness.suspendTermination()
+      var registry: ProjectRegistry? = ProjectRegistry(
+        persistenceDirectory: root,
+        ensureSession: nil,
+        terminateSession: { node, _ in try await harness.terminate(node) },
+        nodeSessionExists: { node, _ in await harness.exists(node) },
+        classifyProject: { _ in metadata })
+      for _ in 0..<200 where await harness.terminateAttempts(first.id) == 0 {
+        try await Task.sleep(for: .milliseconds(10))
+      }
+      XCTAssertEqual(persistence.loadPendingGraphEffects().count, 1)
+      await harness.releaseTermination()
+      for _ in 0..<200 where await harness.terminateAttempts(second.id) == 0 {
+        try await Task.sleep(for: .milliseconds(10))
+      }
+      let firstPassFirstAttempts = await harness.terminateAttempts(first.id)
+      let firstPassSecondAttempts = await harness.terminateAttempts(second.id)
+      XCTAssertEqual(firstPassFirstAttempts, 1)
+      XCTAssertEqual(firstPassSecondAttempts, 1)
+      XCTAssertEqual(persistence.loadPendingGraphEffects().count, 1)
+      registry = nil
+
+      registry = ProjectRegistry(
+        persistenceDirectory: root,
+        ensureSession: nil,
+        terminateSession: { node, _ in try await harness.terminate(node) },
+        nodeSessionExists: { node, _ in await harness.exists(node) },
+        classifyProject: { _ in metadata })
+      for _ in 0..<200 where !persistence.loadPendingGraphEffects().isEmpty {
+        try await Task.sleep(for: .milliseconds(10))
+      }
+      let recoveredFirstAttempts = await harness.terminateAttempts(first.id)
+      let recoveredSecondAttempts = await harness.terminateAttempts(second.id)
+      let firstExists = await harness.exists(first)
+      let secondExists = await harness.exists(second)
+      XCTAssertEqual(recoveredFirstAttempts, 1)
+      XCTAssertEqual(recoveredSecondAttempts, 2)
+      XCTAssertFalse(firstExists)
+      XCTAssertFalse(secondExists)
+      XCTAssertTrue(persistence.loadPendingGraphEffects().isEmpty)
+      registry = nil
+      _ = registry
+    }
+  }
+
+  func testCommittedCreateFinalizesAttachmentAndBroadcastsWhenSessionEffectFails() async throws {
+    let root = FileManager.default.temporaryDirectory
+      .appendingPathComponent("committed-effect-failure-\(UUID())", isDirectory: true)
+    let project = root.appendingPathComponent("project", isDirectory: true)
+    let state = root.appendingPathComponent("state", isDirectory: true)
+    try FileManager.default.createDirectory(at: project, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let fixture = Fixture()
+    let assets = store(fixture: fixture)
+    let replay = DaemonReplayStore()
+    let harness = DurableSessionEffectHarness()
+    await harness.failLaunches(1)
+    var registry: ProjectRegistry? = ProjectRegistry(
+      persistenceDirectory: state, replayStore: replay, remoteAssets: assets,
+      ensureSession: { node, _ in try await harness.launch(node) },
+      terminateSession: { node, _ in try await harness.terminate(node) },
+      nodeSessionExists: { node, _ in await harness.exists(node) },
+      classifyProject: { _ in .local })
+    let clientID = UUID()
+    let connection = RemoteAssetTestConnection()
+    await registry!.addConnection(
+      id: connection.id,
+      channel: DaemonConnectionChannel(
+        connection: connection, mode: .v2(version: 2), clientID: clientID,
+        replayStore: replay))
+    _ = await registry!.apply(.openProject(path: project.path), connectionID: connection.id)
+    let replayBefore = (try? replay.replay(clientID: clientID, after: 0).count) ?? 0
+    let framesBefore = connection.sentFrames().count
+    let nodeID = UUID()
+    let bytes = Data("retained through pending session effect".utf8)
+    let attachment = try await uploadThroughRegistry(
+      registry!, connectionID: connection.id, projectPath: project.path, nodeID: nodeID,
+      data: bytes)
+    let result = await registry!.apply(
+      .graphCommand(
+        projectPath: project.path,
+        command: .createNode(
+          NodeDraft(
+            id: nodeID, title: "Durable", loopType: .timeBased,
+            triggerPrompt: "/loop 1h Work", attachments: [attachment]))),
+      connectionID: connection.id)
+    XCTAssertNil(result?.response)
+    XCTAssertTrue(result?.error?.contains("post-commit effects remain pending") == true)
+    XCTAssertTrue(
+      ProjectPersistence(baseDirectory: state).loadGraph(path: project.path)?
+        .nodesAtAnyDepth.contains(where: { $0.id == nodeID }) ?? false)
+    let retained = await fixture.stagedData(
+      path: project.path, nodeID: nodeID, name: attachment.fileName)
+    let usage = await assets.resourceUsage()
+    XCTAssertEqual(retained, bytes)
+    XCTAssertEqual(usage.finalizedDrafts, 0)
+    XCTAssertGreaterThan(connection.sentFrames().count, framesBefore)
+    XCTAssertGreaterThan(
+      (try? replay.replay(clientID: clientID, after: 0).count) ?? 0,
+      replayBefore)
+    XCTAssertEqual(ProjectPersistence(baseDirectory: state).loadPendingGraphEffects().count, 1)
+
+    registry = nil
+    registry = ProjectRegistry(
+      persistenceDirectory: state, replayStore: replay, remoteAssets: assets,
+      ensureSession: { node, _ in try await harness.launch(node) },
+      terminateSession: { node, _ in try await harness.terminate(node) },
+      nodeSessionExists: { node, _ in await harness.exists(node) },
+      classifyProject: { _ in .local })
+    for _ in 0..<200
+    where !ProjectPersistence(baseDirectory: state).loadPendingGraphEffects().isEmpty {
+      try await Task.sleep(for: .milliseconds(10))
+    }
+    XCTAssertTrue(ProjectPersistence(baseDirectory: state).loadPendingGraphEffects().isEmpty)
+    registry = nil
+  }
+
   func testGraphAndMailroomGenerationSwitchIsCoherentAcrossEveryFaultBoundary() throws {
     let root = FileManager.default.temporaryDirectory
       .appendingPathComponent("graph-generation-\(UUID())", isDirectory: true)
@@ -2825,7 +3138,7 @@ final class RemoteAssetTests: XCTestCase {
     newGraph.mailroom = [newPost]
     let effectPlan = GraphPostCommitEffectPlan(
       projectPath: path,
-      operations: [.ensureSession(newNode)])
+      operations: [.ensureSession(effectID: UUID(), node: newNode)])
     let failure = RemoteAssetStageFailure()
     let persistence = ProjectPersistence(
       baseDirectory: root, platformPaths: CurrentPlatformPaths.value,
@@ -2856,6 +3169,24 @@ final class RemoteAssetTests: XCTestCase {
       effectPlan)
   }
 
+  func testLegacySessionEffectJournalDecodesWithStableNodeBoundIdentity() throws {
+    let node = LoopNode(id: UUID(), title: "Legacy", loopType: .timeBased)
+    let nodeJSON = String(decoding: try JSONEncoder().encode(node), as: UTF8.self)
+    let operation = try JSONDecoder().decode(
+      GraphPostCommitEffectPlan.Operation.self,
+      from: Data(#"{"ensureSession":{"_0":\#(nodeJSON)}}"#.utf8))
+    guard case .ensureSession(let effectID, let decoded) = operation else {
+      return XCTFail("expected legacy ensure effect")
+    }
+    XCTAssertEqual(effectID, node.id)
+    XCTAssertEqual(decoded, node)
+    XCTAssertEqual(
+      try JSONDecoder().decode(
+        GraphPostCommitEffectPlan.Operation.self,
+        from: JSONEncoder().encode(operation)),
+      operation)
+  }
+
   func testProjectDeletePostCommitEffectsRecoverWithoutGraphRecentsOrOpenState() async throws {
     let root = FileManager.default.temporaryDirectory
       .appendingPathComponent("graph-effect-recovery-\(UUID())", isDirectory: true)
@@ -2868,7 +3199,7 @@ final class RemoteAssetTests: XCTestCase {
     let plan = GraphPostCommitEffectPlan(
       projectPath: path,
       operations: [
-        .terminateSession(node), .removeMemory(nodeID: node.id),
+        .terminateSession(effectID: UUID(), node: node), .removeMemory(nodeID: node.id),
         .cancelGoalPoller(nodeID: node.id), .cancelHeartbeat(nodeID: node.id),
       ])
     _ = try persistence.deleteGraphAcknowledged(path: path, effectPlan: plan)
@@ -2882,6 +3213,9 @@ final class RemoteAssetTests: XCTestCase {
       ensureSession: nil,
       terminateSession: { node, _ in recorder.terminate(node) },
       restartSession: nil,
+      nodeSessionExists: { node, _ in
+        !recorder.snapshot().terminated.contains(node.id)
+      },
       classifyProject: { _ in .ssh })
     for _ in 0..<100
     where recorder.snapshot().terminated.isEmpty

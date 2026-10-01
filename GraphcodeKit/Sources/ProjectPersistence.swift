@@ -654,6 +654,7 @@ public struct ProjectPersistence: Sendable {
     graph: LoopGraph,
     supportSourcePath: String? = nil
   ) throws {
+    try validateProjectRelocationPersistenceKeys(from: sourcePath, to: destinationPath)
     var rewritten = graph
     let project = ProjectRef(
       path: destinationPath,
@@ -684,16 +685,75 @@ public struct ProjectPersistence: Sendable {
     try LoopHistoryStore(baseDirectory: projectsDirectory.deletingLastPathComponent())
       .relocateProject(from: sourcePath, to: destinationPath)
 
-    for url in [
-      manifestURL(forProjectPath: sourcePath),
-      fileURL(forProjectPath: sourcePath),
-      mailroomURL(forProjectPath: sourcePath),
-      legacyFileURL(forProjectPath: sourcePath),
-      legacyMailroomURL(forProjectPath: sourcePath),
-    ] where FileManager.default.fileExists(atPath: url.path) {
-      try FileManager.default.removeItem(at: url)
+  }
+
+  public func validateProjectRelocationPersistenceKeys(
+    from sourcePath: String, to destinationPath: String
+  ) throws {
+    guard
+      platformPaths.persistenceKey(forProjectPath: sourcePath)
+        != platformPaths.persistenceKey(forProjectPath: destinationPath)
+    else {
+      throw ProjectRelocationError.destinationCollision
     }
-    Self.roomDigests.forget(mailroomURL(forProjectPath: sourcePath).path)
+  }
+
+  public func cleanupRelocatedProjectPersistence(
+    from sourcePath: String, to destinationPath: String
+  ) throws {
+    try Self.withGenerationLock {
+      try validateProjectRelocationPersistenceKeys(from: sourcePath, to: destinationPath)
+      for (url, maximumBytes) in [
+        (manifestURL(forProjectPath: sourcePath), 4_096),
+        (fileURL(forProjectPath: sourcePath), 64 * 1_024 * 1_024),
+        (mailroomURL(forProjectPath: sourcePath), 64 * 1_024 * 1_024),
+        (legacyFileURL(forProjectPath: sourcePath), 64 * 1_024 * 1_024),
+        (legacyMailroomURL(forProjectPath: sourcePath), 64 * 1_024 * 1_024),
+      ] {
+        try removeRelocationFileIfPresent(url, maximumBytes: maximumBytes)
+      }
+      try removeRelocationGenerationDirectoryIfPresent(
+        generationDirectory(forProjectPath: sourcePath))
+      Self.roomDigests.forget(mailroomURL(forProjectPath: sourcePath).path)
+    }
+  }
+
+  private func removeRelocationFileIfPresent(_ url: URL, maximumBytes: Int) throws {
+    guard FileManager.default.fileExists(atPath: url.path) else { return }
+    _ = try SafeLocalFile.read(url, maximumBytes: maximumBytes)
+    try FileManager.default.removeItem(at: url)
+  }
+
+  private func removeRelocationGenerationDirectoryIfPresent(_ directory: URL) throws {
+    guard FileManager.default.fileExists(atPath: directory.path) else { return }
+    try SafeLocalFile.validateDirectory(directory)
+    let files = try FileManager.default.contentsOfDirectory(
+      at: directory,
+      includingPropertiesForKeys: [.isRegularFileKey, .isSymbolicLinkKey],
+      options: [])
+    guard files.count <= 4_096 else { throw ProjectRelocationError.recoveryFailed }
+    for file in files {
+      guard file.deletingLastPathComponent().standardizedFileURL == directory.standardizedFileURL,
+        let values = try? file.resourceValues(
+          forKeys: [.isRegularFileKey, .isSymbolicLinkKey]),
+        values.isRegularFile == true, values.isSymbolicLink != true,
+        isGenerationFileName(file.lastPathComponent)
+      else {
+        throw ProjectRelocationError.recoveryFailed
+      }
+      _ = try SafeLocalFile.read(file, maximumBytes: 64 * 1_024 * 1_024)
+      try FileManager.default.removeItem(at: file)
+    }
+    try FileManager.default.removeItem(at: directory)
+  }
+
+  private func isGenerationFileName(_ name: String) -> Bool {
+    guard let separator = name.firstIndex(of: "."),
+      UUID(uuidString: String(name[..<separator])) != nil
+    else { return false }
+    let suffix = String(name[separator...])
+    return suffix == ".graph.json" || suffix == ".mailroom.json"
+      || suffix == ".effects.json" || suffix == ".effects-applied"
   }
 
   public func preflightProjectRelocationDestination(_ destinationPath: String) throws {

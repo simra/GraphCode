@@ -32,19 +32,136 @@ import MailroomKit
 
 public enum GraphStoreCommandResult: Equatable, Sendable {
   case applied(graph: LoopGraph)
+  case committedWithPendingEffects(message: String, graph: LoopGraph)
   case rejected(message: String, graph: LoopGraph)
 }
 
 public struct GraphPostCommitEffectPlan: Codable, Equatable, Sendable {
   public enum Operation: Codable, Equatable, Sendable {
-    case ensureSession(LoopNode)
-    case terminateSession(LoopNode)
+    case ensureSession(effectID: UUID, node: LoopNode)
+    case terminateSession(effectID: UUID, node: LoopNode)
     case appendMemory(effectID: UUID, nodeID: UUID, entry: String)
     case removeMemory(nodeID: UUID)
     case armGoalPoller(LoopNode)
     case cancelGoalPoller(nodeID: UUID)
     case armHeartbeat(LoopNode)
     case cancelHeartbeat(nodeID: UUID)
+
+    private struct DynamicKey: CodingKey {
+      var stringValue: String
+      var intValue: Int? { nil }
+
+      init?(stringValue: String) { self.stringValue = stringValue }
+      init?(intValue: Int) { return nil }
+    }
+
+    private struct SessionPayload: Codable {
+      var effectID: UUID?
+      var node: LoopNode?
+      var legacyNode: LoopNode?
+
+      private enum CodingKeys: String, CodingKey {
+        case effectID, node
+        case legacyNode = "_0"
+      }
+    }
+
+    private struct NodePayload: Codable {
+      var node: LoopNode?
+      var legacyNode: LoopNode?
+
+      private enum CodingKeys: String, CodingKey {
+        case node
+        case legacyNode = "_0"
+      }
+    }
+
+    private struct MemoryPayload: Codable {
+      var effectID: UUID
+      var nodeID: UUID
+      var entry: String
+    }
+
+    private struct NodeIDPayload: Codable {
+      var nodeID: UUID
+    }
+
+    public init(from decoder: Decoder) throws {
+      let values = try decoder.container(keyedBy: DynamicKey.self)
+      guard values.allKeys.count == 1, let key = values.allKeys.first else {
+        throw DecodingError.dataCorrupted(
+          .init(codingPath: decoder.codingPath, debugDescription: "invalid effect operation"))
+      }
+      switch key.stringValue {
+      case "ensureSession", "terminateSession":
+        let payload = try values.decode(SessionPayload.self, forKey: key)
+        guard let node = payload.node ?? payload.legacyNode else {
+          throw DecodingError.dataCorruptedError(
+            forKey: key, in: values, debugDescription: "missing session node")
+        }
+        let effectID = payload.effectID ?? node.id
+        self =
+          key.stringValue == "ensureSession"
+          ? .ensureSession(effectID: effectID, node: node)
+          : .terminateSession(effectID: effectID, node: node)
+      case "appendMemory":
+        let payload = try values.decode(MemoryPayload.self, forKey: key)
+        self = .appendMemory(
+          effectID: payload.effectID, nodeID: payload.nodeID, entry: payload.entry)
+      case "removeMemory":
+        self = .removeMemory(
+          nodeID: try values.decode(NodeIDPayload.self, forKey: key).nodeID)
+      case "armGoalPoller", "armHeartbeat":
+        let payload = try values.decode(NodePayload.self, forKey: key)
+        guard let node = payload.node ?? payload.legacyNode else {
+          throw DecodingError.dataCorruptedError(
+            forKey: key, in: values, debugDescription: "missing recurrence node")
+        }
+        self = key.stringValue == "armGoalPoller" ? .armGoalPoller(node) : .armHeartbeat(node)
+      case "cancelGoalPoller":
+        self = .cancelGoalPoller(
+          nodeID: try values.decode(NodeIDPayload.self, forKey: key).nodeID)
+      case "cancelHeartbeat":
+        self = .cancelHeartbeat(
+          nodeID: try values.decode(NodeIDPayload.self, forKey: key).nodeID)
+      default:
+        throw DecodingError.dataCorruptedError(
+          forKey: key, in: values, debugDescription: "unknown effect operation")
+      }
+    }
+
+    public func encode(to encoder: Encoder) throws {
+      var values = encoder.container(keyedBy: DynamicKey.self)
+      func key(_ value: String) -> DynamicKey {
+        DynamicKey(stringValue: value)!
+      }
+      switch self {
+      case .ensureSession(let effectID, let node):
+        try values.encode(
+          SessionPayload(effectID: effectID, node: node, legacyNode: nil),
+          forKey: key("ensureSession"))
+      case .terminateSession(let effectID, let node):
+        try values.encode(
+          SessionPayload(effectID: effectID, node: node, legacyNode: nil),
+          forKey: key("terminateSession"))
+      case .appendMemory(let effectID, let nodeID, let entry):
+        try values.encode(
+          MemoryPayload(effectID: effectID, nodeID: nodeID, entry: entry),
+          forKey: key("appendMemory"))
+      case .removeMemory(let nodeID):
+        try values.encode(NodeIDPayload(nodeID: nodeID), forKey: key("removeMemory"))
+      case .armGoalPoller(let node):
+        try values.encode(
+          NodePayload(node: node, legacyNode: nil), forKey: key("armGoalPoller"))
+      case .cancelGoalPoller(let nodeID):
+        try values.encode(NodeIDPayload(nodeID: nodeID), forKey: key("cancelGoalPoller"))
+      case .armHeartbeat(let node):
+        try values.encode(
+          NodePayload(node: node, legacyNode: nil), forKey: key("armHeartbeat"))
+      case .cancelHeartbeat(let nodeID):
+        try values.encode(NodeIDPayload(nodeID: nodeID), forKey: key("cancelHeartbeat"))
+      }
+    }
   }
 
   public var id: UUID
@@ -82,6 +199,8 @@ public actor GraphStore {
   private let onConnectionFailure: (@Sendable (UUID) -> Void)?
   private let onEnsureSession: (@Sendable (LoopNode, String?) -> Void)?
   private let onTerminateSession: (@Sendable (LoopNode, String?) -> Void)?
+  private let onEnsureSessionEffect: (@Sendable (UUID, LoopNode, String?) async throws -> Void)?
+  private let onTerminateSessionEffect: (@Sendable (UUID, LoopNode, String?) async throws -> Void)?
   /// Kills a loop's session and, for an unattended loop, relaunches it on the same
   /// transcript. Awaited, unlike the two above: the answer is whether the old session
   /// is confirmed gone, and `restartNode` must not say so until it is.
@@ -356,8 +475,14 @@ public actor GraphStore {
     onGraphEvent: (@Sendable (DaemonEvent) -> [UUID: DaemonWireEnvelope])? = nil,
     onConnectionFailure: (@Sendable (UUID) -> Void)? = nil,
     onEnsureSession: (@Sendable (LoopNode, String?) -> Void)? = nil,
+    onEnsureSessionEffect: (
+      @Sendable (UUID, LoopNode, String?) async throws -> Void
+    )? = nil,
     onFindMissingProvider: (@Sendable (LoopNode, String?) async -> LaunchFailure?)? = nil,
     onTerminateSession: (@Sendable (LoopNode, String?) -> Void)? = nil,
+    onTerminateSessionEffect: (
+      @Sendable (UUID, LoopNode, String?) async throws -> Void
+    )? = nil,
     onRestartSession: (@Sendable (LoopNode, String?) async -> Bool)? = nil,
     onEvaluatePredicate: (@Sendable (ShellPredicate) async -> Bool)? = nil,
     onCheckPredicate: (@Sendable (ShellPredicate) async -> PredicateOutcome?)? = nil,
@@ -406,8 +531,10 @@ public actor GraphStore {
     self.onGraphEvent = onGraphEvent
     self.onConnectionFailure = onConnectionFailure
     self.onEnsureSession = onEnsureSession
+    self.onEnsureSessionEffect = onEnsureSessionEffect
     self.onFindMissingProvider = onFindMissingProvider
     self.onTerminateSession = onTerminateSession
+    self.onTerminateSessionEffect = onTerminateSessionEffect
     self.onRestartSession = onRestartSession
     self.onEvaluatePredicate = onEvaluatePredicate
     self.onCheckPredicate = onCheckPredicate
@@ -1283,7 +1410,17 @@ public actor GraphStore {
     }
     graph = projected
     enforceRootProjectInvariant()
-    await applyPostCommitEffects(effects)
+    do {
+      try await applyPostCommitEffects(effects)
+    } catch {
+      let message = "graph committed; post-commit effects remain pending: \(error)"
+      if let broadcastError = await broadcast(alreadyPersisted: true) {
+        return .committedWithPendingEffects(
+          message: "\(message); graph broadcast failed: \(broadcastError)",
+          graph: graph)
+      }
+      return .committedWithPendingEffects(message: message, graph: graph)
+    }
     onDurableEffectsApplied?(receipt)
     if let error = await broadcast(alreadyPersisted: true) {
       return .rejected(message: error, graph: graph)
@@ -1315,7 +1452,7 @@ public actor GraphStore {
                 : "")))
       }
       if topLevelAdded.contains(node.id), node.runsUnattended {
-        operations.append(.ensureSession(node))
+        operations.append(.ensureSession(effectID: UUID(), node: node))
       }
       if topLevelAdded.contains(node.id) || nestedRecurrenceIsLive(node.id, in: after.nodes) {
         if node.loopType == .goalBased { operations.append(.armGoalPoller(node)) }
@@ -1323,7 +1460,7 @@ public actor GraphStore {
       }
     }
     for node in removed {
-      operations.append(.terminateSession(node))
+      operations.append(.terminateSession(effectID: UUID(), node: node))
       operations.append(.removeMemory(nodeID: node.id))
       operations.append(.cancelGoalPoller(nodeID: node.id))
       operations.append(.cancelHeartbeat(nodeID: node.id))
@@ -1344,14 +1481,22 @@ public actor GraphStore {
     return false
   }
 
-  public func applyPostCommitEffects(_ plan: GraphPostCommitEffectPlan) async {
+  public func applyPostCommitEffects(_ plan: GraphPostCommitEffectPlan) async throws {
     guard plan.projectPath == graph.project.path else { return }
     for operation in plan.operations {
       switch operation {
-      case .ensureSession(let node):
-        ensureSession(node)
-      case .terminateSession(let node):
-        terminateSession(node)
+      case .ensureSession(let effectID, let node):
+        if let onEnsureSessionEffect {
+          try await onEnsureSessionEffect(effectID, node, graph.project.path)
+        } else {
+          ensureSession(node)
+        }
+      case .terminateSession(let effectID, let node):
+        if let onTerminateSessionEffect {
+          try await onTerminateSessionEffect(effectID, node, graph.project.path)
+        } else {
+          terminateSession(node)
+        }
       case .appendMemory(let effectID, let nodeID, let entry):
         if let onAppendMemoryOnce {
           onAppendMemoryOnce(effectID, nodeID, entry)
