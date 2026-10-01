@@ -33,6 +33,16 @@ public struct RemoteAssetHostTransport: Sendable {
     @Sendable (
       _ projectPath: String, _ metadata: ProjectMetadata, _ nodeID: UUID, _ name: String
     ) async throws -> Void
+  public var removeStagedAttachment:
+    @Sendable (
+      _ projectPath: String, _ metadata: ProjectMetadata, _ nodeID: UUID,
+      _ descriptor: RemoteAssetRetentionDescriptor
+    ) async throws -> Void
+  public var removeRetainedAttachment:
+    @Sendable (
+      _ projectPath: String, _ metadata: ProjectMetadata, _ nodeID: UUID,
+      _ descriptor: RemoteAssetRetentionDescriptor
+    ) async throws -> Void
   public var resolveAttachment:
     @Sendable (
       _ projectPath: String, _ metadata: ProjectMetadata, _ nodeID: UUID, _ name: String,
@@ -85,6 +95,20 @@ public struct RemoteAssetHostTransport: Sendable {
       @escaping @Sendable (
         _ projectPath: String, _ metadata: ProjectMetadata, _ nodeID: UUID, _ name: String
       ) async throws -> Void = { _, _, _, _ in throw RemoteAssetError.transportFailure },
+    removeStagedAttachment:
+      (
+        @Sendable (
+          _ projectPath: String, _ metadata: ProjectMetadata, _ nodeID: UUID,
+          _ descriptor: RemoteAssetRetentionDescriptor
+        ) async throws -> Void
+      )? = nil,
+    removeRetainedAttachment:
+      (
+        @Sendable (
+          _ projectPath: String, _ metadata: ProjectMetadata, _ nodeID: UUID,
+          _ descriptor: RemoteAssetRetentionDescriptor
+        ) async throws -> Void
+      )? = nil,
     resolveAttachment:
       @escaping @Sendable (
         _ projectPath: String, _ metadata: ProjectMetadata, _ nodeID: UUID, _ name: String,
@@ -134,6 +158,14 @@ public struct RemoteAssetHostTransport: Sendable {
     self.stageAttachment = stageAttachment
     self.discardAttachments = discardAttachments
     self.removeAttachment = removeAttachment
+    self.removeStagedAttachment =
+      removeStagedAttachment
+      ?? { projectPath, metadata, nodeID, descriptor in
+        try await removeAttachment(projectPath, metadata, nodeID, descriptor.name)
+      }
+    self.removeRetainedAttachment =
+      removeRetainedAttachment
+      ?? { _, _, _, _ in throw RemoteAssetError.transportFailure }
     self.resolveAttachment = resolveAttachment
     self.retainAttachments = retainAttachments
     self.acquireAttachmentLease =
@@ -208,6 +240,28 @@ public struct RemoteAssetHostTransport: Sendable {
       case .ssh, .codespace:
         try await SSHRemoteAssetHost.removeAttachment(
           projectPath: projectPath, locationKind: metadata.location, nodeID: nodeID, name: name)
+      }
+    },
+    removeStagedAttachment: { projectPath, metadata, nodeID, descriptor in
+      switch metadata.location {
+      case .local:
+        try LocalRemoteAssetHost.removeStagedAttachment(
+          projectPath: projectPath, nodeID: nodeID, descriptor: descriptor)
+      case .ssh, .codespace:
+        try await SSHRemoteAssetHost.removeDescriptorBoundAttachment(
+          projectPath: projectPath, locationKind: metadata.location, nodeID: nodeID,
+          descriptor: descriptor, retained: false)
+      }
+    },
+    removeRetainedAttachment: { projectPath, metadata, nodeID, descriptor in
+      switch metadata.location {
+      case .local:
+        try LocalRemoteAssetHost.removeRetainedAttachment(
+          projectPath: projectPath, nodeID: nodeID, descriptor: descriptor)
+      case .ssh, .codespace:
+        try await SSHRemoteAssetHost.removeDescriptorBoundAttachment(
+          projectPath: projectPath, locationKind: metadata.location, nodeID: nodeID,
+          descriptor: descriptor, retained: true)
       }
     },
     resolveAttachment: { projectPath, metadata, nodeID, name, size, sha256 in
@@ -313,6 +367,9 @@ public actor RemoteAssetStore {
   public static let maximumCleanupBytes = 1024 * 1024 * 1024
   public static let cleanupLifetime: TimeInterval = 7 * 24 * 60 * 60
   public static let maximumCleanupAttempts = 8
+  public static let maximumCatalogBytes = 8 * 1024 * 1024
+  public static let maximumCatalogQuarantineFiles = 8
+  public static let maximumCatalogQuarantineBytes = 32 * 1024 * 1024
 
   private struct Transfer: Sendable {
     var owner: UUID
@@ -453,9 +510,11 @@ public actor RemoteAssetStore {
   private enum CleanupTarget: String, Codable, Sendable {
     case staged
     case lease
+    case retained
   }
 
   private enum CleanupStatus: String, Codable, Sendable {
+    case held
     case pending
     case quarantined
   }
@@ -466,6 +525,7 @@ public actor RemoteAssetStore {
     var projectIdentity: String
     var descriptor: RemoteAssetRetentionDescriptor
     var leaseID: UUID?
+    var transactionID: UUID?
     var target: CleanupTarget
     var attempts: Int
     var nextAttemptAt: Date
@@ -474,13 +534,15 @@ public actor RemoteAssetStore {
     var lastError: String?
 
     private enum CodingKeys: String, CodingKey {
-      case key, projectIdentity, metadata, nodeID, descriptor, leaseID, target, attempts
+      case key, projectIdentity, metadata, nodeID, descriptor, leaseID, transactionID, target,
+        attempts
       case nextAttemptAt, deadline, status, lastError
     }
 
     init(
       key: String, context: AttachmentTransferContext, projectIdentity: String,
-      descriptor: RemoteAssetRetentionDescriptor, leaseID: UUID?, target: CleanupTarget,
+      descriptor: RemoteAssetRetentionDescriptor, leaseID: UUID?, transactionID: UUID? = nil,
+      target: CleanupTarget,
       attempts: Int, nextAttemptAt: Date, deadline: Date, status: CleanupStatus,
       lastError: String?
     ) {
@@ -489,6 +551,7 @@ public actor RemoteAssetStore {
       self.projectIdentity = projectIdentity
       self.descriptor = descriptor
       self.leaseID = leaseID
+      self.transactionID = transactionID
       self.target = target
       self.attempts = attempts
       self.nextAttemptAt = nextAttemptAt
@@ -506,6 +569,7 @@ public actor RemoteAssetStore {
       context = AttachmentTransferContext(projectPath: "", metadata: metadata, nodeID: nodeID)
       descriptor = try values.decode(RemoteAssetRetentionDescriptor.self, forKey: .descriptor)
       leaseID = try values.decodeIfPresent(UUID.self, forKey: .leaseID)
+      transactionID = try values.decodeIfPresent(UUID.self, forKey: .transactionID)
       target = try values.decode(CleanupTarget.self, forKey: .target)
       attempts = try values.decode(Int.self, forKey: .attempts)
       nextAttemptAt = try values.decode(Date.self, forKey: .nextAttemptAt)
@@ -522,6 +586,7 @@ public actor RemoteAssetStore {
       try values.encode(context.nodeID, forKey: .nodeID)
       try values.encode(descriptor, forKey: .descriptor)
       try values.encodeIfPresent(leaseID, forKey: .leaseID)
+      try values.encodeIfPresent(transactionID, forKey: .transactionID)
       try values.encode(target, forKey: .target)
       try values.encode(attempts, forKey: .attempts)
       try values.encode(nextAttemptAt, forKey: .nextAttemptAt)
@@ -1314,13 +1379,167 @@ public actor RemoteAssetStore {
   public func discardNode(
     projectPath: String, metadata: ProjectMetadata, nodeID: UUID
   ) async {
-    let key = nodeKey(projectPath: projectPath, metadata: metadata, nodeID: nodeID)
-    if let draft = drafts.removeValue(forKey: key) {
-      releaseFinalizedDraft(draft, project: projectKey(projectPath, metadata))
+    _ = await prepareDeletion(
+      projectPath: projectPath, metadata: metadata, nodes: [], explicitNodeIDs: [nodeID]
+    )
+    .flatMap { transactionID in
+      guard let transactionID else { return .success(()) }
+      return activateDeletion(transactionID: transactionID)
+    }
+  }
+
+  public func prepareDeletion(
+    projectPath: String, metadata: ProjectMetadata, nodes: [LoopNode],
+    explicitNodeIDs: Set<UUID> = [], includeProjectState: Bool = false
+  ) async -> Result<UUID?, RemoteAssetError> {
+    await maintainFinalizedDrafts()
+    let identity = RemoteAssetIdentity.project(projectPath, metadata)
+    let nodeIDs = explicitNodeIDs.union(nodes.map(\.id))
+    let transactionID = UUID()
+    var candidates:
+      [(AttachmentTransferContext, RemoteAssetRetentionDescriptor, UUID?, CleanupTarget)] = []
+    for node in nodes {
+      for attachment in node.attachments {
+        let descriptor: RemoteAssetRetentionDescriptor?
+        if attachment.isOpaqueReference,
+          let payload = try? decodeReference(attachment.path),
+          payload.projectIdentity == identity, payload.nodeID == node.id,
+          payload.name == attachment.fileName
+        {
+          descriptor = RemoteAssetRetentionDescriptor(
+            name: payload.name, size: payload.size, sha256: payload.sha256)
+        } else if metadata.location == .local {
+          descriptor = legacyRetentionDescriptor(
+            attachment, projectPath: projectPath, nodeID: node.id)
+        } else {
+          descriptor = nil
+        }
+        guard let descriptor else { continue }
+        candidates.append(
+          (
+            AttachmentTransferContext(
+              projectPath: projectPath, metadata: metadata, nodeID: node.id),
+            descriptor, nil, .retained
+          ))
+      }
+    }
+    for draft in drafts.values
+    where draft.projectIdentity == identity
+      && (includeProjectState || nodeIDs.contains(draft.nodeID))
+    {
+      let leasedNames = Set(
+        draft.leaseID.flatMap { draftLeases[$0]?.descriptors.map(\.name) } ?? [])
+      for descriptor in draft.files.values where !leasedNames.contains(descriptor.name) {
+        candidates.append(
+          (
+            AttachmentTransferContext(
+              projectPath: projectPath, metadata: metadata, nodeID: draft.nodeID),
+            descriptor, nil, .staged
+          ))
+      }
+    }
+    for (leaseID, lease) in draftLeases
+    where lease.projectIdentity == identity
+      && (includeProjectState || nodeIDs.contains(lease.nodeID))
+    {
+      for descriptor in lease.descriptors {
+        candidates.append(
+          (
+            AttachmentTransferContext(
+              projectPath: projectPath, metadata: metadata, nodeID: lease.nodeID),
+            descriptor, leaseID, .lease
+          ))
+      }
+    }
+    let additions = candidates.filter { context, descriptor, leaseID, target in
+      cleanupQueue[
+        cleanupKey(
+          projectIdentity: identity, nodeID: context.nodeID, descriptor: descriptor,
+          leaseID: leaseID, target: target)] == nil
+    }
+    let additionalBytes = additions.reduce(0) { partial, candidate in
+      let value = partial.addingReportingOverflow(candidate.1.size)
+      return value.overflow ? Int.max : value.partialValue
+    }
+    guard
+      cleanupCapacityAvailable(
+        addingCount: additions.count, addingBytes: additionalBytes)
+    else { return .failure(.resourceExhausted) }
+    guard !additions.isEmpty else { return .success(nil) }
+    let previous = cleanupQueue
+    let current = now()
+    for (context, descriptor, leaseID, target) in additions {
+      let key = cleanupKey(
+        projectIdentity: identity, nodeID: context.nodeID, descriptor: descriptor,
+        leaseID: leaseID, target: target)
+      cleanupQueue[key] = CleanupRecord(
+        key: key, context: context, projectIdentity: identity, descriptor: descriptor,
+        leaseID: leaseID, transactionID: transactionID, target: target,
+        attempts: 0, nextAttemptAt: current,
+        deadline: current.addingTimeInterval(Self.cleanupLifetime), status: .held,
+        lastError: nil)
+    }
+    guard persistCatalog() else {
+      cleanupQueue = previous
+      return .failure(.transportFailure)
+    }
+    return .success(transactionID)
+  }
+
+  public func activateDeletion(transactionID: UUID) -> Result<Void, RemoteAssetError> {
+    let keys = cleanupQueue.compactMap {
+      $0.value.transactionID == transactionID && $0.value.status == .held ? $0.key : nil
+    }
+    guard !keys.isEmpty else { return .success(()) }
+    let previousQueue = cleanupQueue
+    let previousDrafts = drafts
+    let previousLeases = draftLeases
+    let previousOwnerUsage = ownerDraftUsage
+    let previousProjectUsage = projectDraftUsage
+    let previousGlobalUsage = globalDraftUsage
+    let affectedNodes = Set(keys.compactMap { cleanupQueue[$0]?.context.nodeID })
+    let affectedIdentities = Set(keys.compactMap { cleanupQueue[$0]?.projectIdentity })
+    for key in keys {
+      cleanupQueue[key]?.status = .pending
+      cleanupQueue[key]?.transactionID = nil
+    }
+    for key in drafts.keys {
+      guard let draft = drafts[key], affectedIdentities.contains(draft.projectIdentity),
+        affectedNodes.contains(draft.nodeID)
+      else { continue }
+      drafts.removeValue(forKey: key)
+      releaseFinalizedDraft(draft, project: draft.projectIdentity)
       if let leaseID = draft.leaseID { draftLeases.removeValue(forKey: leaseID) }
     }
-    await transport.discardAttachments(projectPath, metadata, nodeID)
+    for leaseID in draftLeases.keys {
+      guard let lease = draftLeases[leaseID], affectedIdentities.contains(lease.projectIdentity),
+        affectedNodes.contains(lease.nodeID)
+      else { continue }
+      draftLeases.removeValue(forKey: leaseID)
+    }
+    guard persistCatalog() else {
+      cleanupQueue = previousQueue
+      drafts = previousDrafts
+      draftLeases = previousLeases
+      ownerDraftUsage = previousOwnerUsage
+      projectDraftUsage = previousProjectUsage
+      globalDraftUsage = previousGlobalUsage
+      return .failure(.transportFailure)
+    }
     scheduleDraftExpiry()
+    return .success(())
+  }
+
+  public func cancelDeletion(transactionID: UUID) -> Result<Void, RemoteAssetError> {
+    let previous = cleanupQueue
+    cleanupQueue = cleanupQueue.filter {
+      !($0.value.transactionID == transactionID && $0.value.status == .held)
+    }
+    guard persistCatalog() else {
+      cleanupQueue = previous
+      return .failure(.transportFailure)
+    }
+    return .success(())
   }
 
   public func reconcile(
@@ -1333,9 +1552,25 @@ public actor RemoteAssetStore {
     }
     for key in cleanupQueue.keys where cleanupQueue[key]?.projectIdentity == identity {
       cleanupQueue[key]?.context.projectPath = projectPath
+      if cleanupQueue[key]?.lastError == "project identity is unresolved" {
+        cleanupQueue[key]?.status = .pending
+        cleanupQueue[key]?.attempts = 0
+        cleanupQueue[key]?.nextAttemptAt = now()
+        cleanupQueue[key]?.lastError = nil
+      }
     }
     for key in drafts.keys where drafts[key]?.projectIdentity == identity {
       drafts[key]?.projectPath = projectPath
+    }
+    let deletionTransactions = Set<UUID>(
+      cleanupQueue.values.compactMap { record in
+        guard record.projectIdentity == identity, record.status == .held,
+          !graphNodeIDs.contains(record.context.nodeID), let transactionID = record.transactionID
+        else { return nil }
+        return transactionID
+      })
+    for transactionID in deletionTransactions {
+      _ = activateDeletion(transactionID: transactionID)
     }
     let leases = draftLeases.filter {
       $0.value.projectIdentity == identity
@@ -1367,8 +1602,14 @@ public actor RemoteAssetStore {
       finalizedDrafts: globalDraftUsage.drafts,
       finalizedAttachments: globalDraftUsage.attachments,
       finalizedBytes: globalDraftUsage.bytes,
-      pendingDraftCleanups: cleanupQueue.values.filter { $0.status == .pending }.count,
+      pendingDraftCleanups: cleanupQueue.values.filter {
+        $0.status == .pending || $0.status == .held
+      }.count,
       quarantinedDraftCleanups: cleanupQueue.values.filter { $0.status == .quarantined }.count)
+  }
+
+  public func maintainRecoveredState() async {
+    await maintainFinalizedDrafts()
   }
 
   private var allTransfers: [Transfer] {
@@ -1379,15 +1620,28 @@ public actor RemoteAssetStore {
   private func maintainFinalizedDrafts() async {
     let current = now()
     let due = cleanupQueue.values.filter {
-      $0.status == .pending && !$0.context.projectPath.isEmpty && $0.nextAttemptAt <= current
+      $0.status == .pending && $0.nextAttemptAt <= current
     }
     for record in due {
+      guard !record.context.projectPath.isEmpty else {
+        var unresolved = record
+        unresolved.attempts += 1
+        unresolved.lastError = "project identity is unresolved"
+        if unresolved.attempts >= Self.maximumCleanupAttempts || current >= unresolved.deadline {
+          unresolved.status = .quarantined
+        } else {
+          unresolved.nextAttemptAt = current.addingTimeInterval(
+            min(3_600, pow(2, Double(min(unresolved.attempts, 10)))))
+        }
+        cleanupQueue[record.key] = unresolved
+        continue
+      }
       do {
         switch record.target {
         case .staged:
-          try await transport.removeAttachment(
+          try await transport.removeStagedAttachment(
             record.context.projectPath, record.context.metadata, record.context.nodeID,
-            record.descriptor.name)
+            record.descriptor)
         case .lease:
           guard let leaseID = record.leaseID else {
             throw RemoteAssetError.invalidReference
@@ -1395,6 +1649,10 @@ public actor RemoteAssetStore {
           try await transport.rollbackAttachmentLease(
             record.context.projectPath, record.context.metadata, record.context.nodeID, leaseID,
             [record.descriptor])
+        case .retained:
+          try await transport.removeRetainedAttachment(
+            record.context.projectPath, record.context.metadata, record.context.nodeID,
+            record.descriptor)
         }
         cleanupQueue.removeValue(forKey: record.key)
       } catch {
@@ -1461,7 +1719,7 @@ public actor RemoteAssetStore {
     draftExpiryTask?.cancel()
     let expiry = drafts.values.filter { $0.leaseID == nil }.map(\.expiresAt).min()
     let cleanup = cleanupQueue.values.filter {
-      $0.status == .pending && !$0.context.projectPath.isEmpty
+      $0.status == .pending
     }.map(\.nextAttemptAt).min()
     let pendingDeliveryNames = Set(
       pendingDeliveries.values.map {
@@ -1717,6 +1975,7 @@ public actor RemoteAssetStore {
     let catalog = DurableCatalog(
       version: 1, drafts: drafts, leases: draftLeases, cleanup: cleanupQueue)
     guard let data = try? JSONEncoder().encode(catalog) else { return false }
+    guard data.count <= Self.maximumCatalogBytes else { return false }
     do {
       try FileManager.default.createDirectory(
         at: catalogURL.deletingLastPathComponent(), withIntermediateDirectories: true)
@@ -1733,7 +1992,12 @@ public actor RemoteAssetStore {
       return empty
     }
     do {
-      let data = try Data(contentsOf: catalogURL)
+      let values = try catalogURL.resourceValues(
+        forKeys: [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey])
+      guard values.isRegularFile == true, values.isSymbolicLink != true,
+        let fileSize = values.fileSize, fileSize >= 0, fileSize <= maximumCatalogBytes
+      else { throw RemoteAssetError.invalidReference }
+      let data = try SafeLocalFile.read(catalogURL, maximumBytes: maximumCatalogBytes)
       let catalog = try JSONDecoder().decode(DurableCatalog.self, from: data)
       var cleanupBytes = 0
       var draftBytes = 0
@@ -1745,7 +2009,12 @@ public actor RemoteAssetStore {
         catalog.leases.count <= maximumCleanupRecords
       else { throw RemoteAssetError.invalidReference }
       for record in catalog.cleanup.values {
-        guard valid(record.descriptor),
+        guard record.projectIdentity.count == 64,
+          record.projectIdentity.allSatisfy(\.isHexDigit),
+          valid(record.descriptor),
+          record.attempts >= 0, record.attempts <= maximumCleanupAttempts,
+          record.nextAttemptAt <= record.deadline,
+          (record.status == .held) == (record.transactionID != nil),
           record.key
             == cleanupKey(
               projectIdentity: record.projectIdentity, nodeID: record.context.nodeID,
@@ -1818,25 +2087,70 @@ public actor RemoteAssetStore {
     let stem = catalogURL.deletingPathExtension().lastPathComponent + ".corrupt-"
     let quarantine = directory.appendingPathComponent(
       "\(stem)\(UUID().uuidString).json")
-    try? FileManager.default.moveItem(at: catalogURL, to: quarantine)
+    #if os(Windows)
+      if let stable = try? StableProjectDirectory(path: catalogURL.path) {
+        try? stable.rename(to: quarantine.path)
+      }
+    #else
+      try? FileManager.default.moveItem(at: catalogURL, to: quarantine)
+    #endif
     guard
       let candidates = try? FileManager.default.contentsOfDirectory(
-        at: directory, includingPropertiesForKeys: [.contentModificationDateKey],
+        at: directory,
+        includingPropertiesForKeys: [
+          .contentModificationDateKey, .fileSizeKey, .isRegularFileKey, .isSymbolicLinkKey,
+        ],
         options: [.skipsHiddenFiles]
       )
-      .filter({ $0.lastPathComponent.hasPrefix(stem) })
+      .filter({
+        guard $0.lastPathComponent.hasPrefix(stem),
+          let values = try? $0.resourceValues(
+            forKeys: [.isRegularFileKey, .isSymbolicLinkKey])
+        else { return false }
+        return values.isRegularFile == true && values.isSymbolicLink != true
+      })
       .sorted(by: {
         let lhsValues = try? $0.resourceValues(forKeys: [.contentModificationDateKey])
         let rhsValues = try? $1.resourceValues(forKeys: [.contentModificationDateKey])
         let lhs = lhsValues?.contentModificationDate ?? .distantPast
         let rhs = rhsValues?.contentModificationDate ?? .distantPast
         return lhs > rhs
-      }),
-      candidates.count > 8
+      })
     else { return }
-    for candidate in candidates.dropFirst(8) {
-      try? FileManager.default.removeItem(at: candidate)
+    var retainedCount = 0
+    var retainedBytes = 0
+    for candidate in candidates {
+      let size =
+        (try? candidate.resourceValues(forKeys: [.fileSizeKey]).fileSize)
+        ?? maximumCatalogQuarantineBytes
+      let sum = retainedBytes.addingReportingOverflow(max(0, size))
+      let keep =
+        retainedCount < maximumCatalogQuarantineFiles && !sum.overflow
+        && sum.partialValue <= maximumCatalogQuarantineBytes
+      if keep {
+        retainedCount += 1
+        retainedBytes = sum.partialValue
+      } else {
+        securelyRemoveQuarantineFile(candidate)
+      }
     }
+  }
+
+  private static func securelyRemoveQuarantineFile(_ url: URL) {
+    #if os(Windows)
+      guard let stable = try? StableProjectDirectory(path: url.path) else { return }
+      let deleting = url.deletingLastPathComponent()
+        .appendingPathComponent(".catalog-delete-\(UUID().uuidString)")
+      guard (try? stable.rename(to: deleting.path)) != nil else { return }
+      try? FileManager.default.removeItem(at: deleting)
+    #else
+      guard
+        let values = try? url.resourceValues(
+          forKeys: [.isRegularFileKey, .isSymbolicLinkKey]),
+        values.isRegularFile == true, values.isSymbolicLink != true
+      else { return }
+      try? FileManager.default.removeItem(at: url)
+    #endif
   }
 
   private static func valid(_ descriptor: RemoteAssetRetentionDescriptor) -> Bool {
@@ -2229,6 +2543,23 @@ enum LocalRemoteAssetHost {
     }
   }
 
+  static func removeStagedAttachment(
+    projectPath: String, nodeID: UUID, descriptor: RemoteAssetRetentionDescriptor
+  ) throws {
+    let directory = NodeMemory.attachmentsDirectory(forProjectPath: projectPath, nodeID: nodeID)
+    try removeDescriptorBound(
+      directory: directory, name: descriptor.name, descriptor: descriptor)
+  }
+
+  static func removeRetainedAttachment(
+    projectPath: String, nodeID: UUID, descriptor: RemoteAssetRetentionDescriptor
+  ) throws {
+    let directory = NodeMemory.attachmentsDirectory(forProjectPath: projectPath, nodeID: nodeID)
+      .appendingPathComponent(".retained", isDirectory: true)
+    let name = RemoteAssetDigest.pathKey(sha256: descriptor.sha256) ?? descriptor.sha256
+    try removeDescriptorBound(directory: directory, name: name, descriptor: descriptor)
+  }
+
   static func resolveAttachment(
     projectPath: String, nodeID: UUID, name: String, size: Int, sha256: String
   ) throws -> String {
@@ -2374,6 +2705,114 @@ enum LocalRemoteAssetHost {
     let key = RemoteAssetDigest.pathKey(sha256: descriptor.sha256) ?? descriptor.sha256
     return directory.appendingPathComponent(".retained", isDirectory: true)
       .appendingPathComponent(key)
+  }
+
+  private static func removeDescriptorBound(
+    directory: URL, name: String, descriptor: RemoteAssetRetentionDescriptor
+  ) throws {
+    guard AttachmentUploadDeclaration.isSafeName(name) else {
+      throw RemoteAssetError.invalidReference
+    }
+    let candidate = directory.appendingPathComponent(name)
+    let cleanupKey = RemoteAssetDigest.pathKey(sha256: descriptor.sha256) ?? descriptor.sha256
+    let quarantineName = ".cleanup-\(cleanupKey)"
+    let quarantine = directory.appendingPathComponent(quarantineName)
+    #if os(Windows)
+      let stable: StableProjectDirectory
+      if FileManager.default.fileExists(atPath: quarantine.path) {
+        stable = try StableProjectDirectory(path: quarantine.path)
+      } else {
+        guard FileManager.default.fileExists(atPath: candidate.path) else { return }
+        stable = try StableProjectDirectory(path: candidate.path)
+        try stable.rename(to: quarantine.path)
+      }
+      do {
+        try stable.verify(path: quarantine.path)
+        try verify(quarantine, descriptor: descriptor)
+        try stable.verify(path: quarantine.path)
+        try FileManager.default.removeItem(at: quarantine)
+      } catch {
+        throw error
+      }
+    #else
+      let parent = directory.path.withCString { path in
+        #if canImport(Darwin)
+          Darwin.open(path, O_RDONLY | O_NOFOLLOW | O_DIRECTORY)
+        #else
+          Glibc.open(path, O_RDONLY | O_NOFOLLOW | O_DIRECTORY)
+        #endif
+      }
+      guard parent >= 0 else {
+        if !FileManager.default.fileExists(atPath: directory.path) { return }
+        throw RemoteAssetError.unsafeFile
+      }
+      defer {
+        #if canImport(Darwin)
+          _ = Darwin.close(parent)
+        #else
+          _ = Glibc.close(parent)
+        #endif
+      }
+      let existingQuarantine =
+        quarantineName.withCString { value in
+          #if canImport(Darwin)
+            Darwin.faccessat(parent, value, F_OK, AT_SYMLINK_NOFOLLOW)
+          #else
+            Glibc.faccessat(parent, value, F_OK, AT_SYMLINK_NOFOLLOW)
+          #endif
+        } == 0
+      if !existingQuarantine {
+        let renamed = name.withCString { source in
+          quarantineName.withCString { destination in
+            #if canImport(Darwin)
+              Darwin.renameat(parent, source, parent, destination)
+            #else
+              Glibc.renameat(parent, source, parent, destination)
+            #endif
+          }
+        }
+        if renamed != 0 {
+          #if canImport(Darwin)
+            guard Darwin.errno == ENOENT else { throw RemoteAssetError.unsafeFile }
+          #else
+            guard Glibc.errno == ENOENT else { throw RemoteAssetError.unsafeFile }
+          #endif
+          return
+        }
+      }
+      let file = quarantineName.withCString { value in
+        #if canImport(Darwin)
+          Darwin.openat(parent, value, O_RDONLY | O_NOFOLLOW)
+        #else
+          Glibc.openat(parent, value, O_RDONLY | O_NOFOLLOW)
+        #endif
+      }
+      guard file >= 0 else { throw RemoteAssetError.unsafeFile }
+      defer {
+        #if canImport(Darwin)
+          _ = Darwin.close(file)
+        #else
+          _ = Glibc.close(file)
+        #endif
+      }
+      var status = stat()
+      guard fstat(file, &status) == 0, (status.st_mode & mode_t(S_IFMT)) == mode_t(S_IFREG),
+        status.st_nlink == 1, status.st_size == descriptor.size
+      else { throw RemoteAssetError.hashMismatch }
+      let handle = FileHandle(fileDescriptor: file, closeOnDealloc: false)
+      let data = try handle.readToEnd() ?? Data()
+      guard data.count == descriptor.size,
+        RemoteAssetDigest.sha256Hex(data) == descriptor.sha256
+      else { throw RemoteAssetError.hashMismatch }
+      let removed = quarantineName.withCString { value in
+        #if canImport(Darwin)
+          Darwin.unlinkat(parent, value, 0)
+        #else
+          Glibc.unlinkat(parent, value, 0)
+        #endif
+      }
+      guard removed == 0 else { throw RemoteAssetError.unsafeFile }
+    #endif
   }
 
   private static func removeLeaseDirectory(
@@ -2609,6 +3048,55 @@ private enum SSHRemoteAssetHost {
       input: nil, maximumOutputBytes: 1024)
   }
 
+  static func removeDescriptorBoundAttachment(
+    projectPath: String, locationKind: ProjectLocationKind, nodeID: UUID,
+    descriptor: RemoteAssetRetentionDescriptor, retained: Bool
+  ) async throws {
+    guard let location = RemoteProjectLocation.parse(projectPath: projectPath) else {
+      throw RemoteAssetError.unauthorized
+    }
+    let identity = RemoteAssetIdentity.project(projectPath, locationKind)
+    let cleanupKey = RemoteAssetDigest.pathKey(sha256: descriptor.sha256) ?? descriptor.sha256
+    let cleanupName = ".cleanup-\(cleanupKey)"
+    let script = """
+      import base64,hashlib,os,stat,sys
+      ident,node,name,size,digest,retained,cleanup=sys.argv[1],sys.argv[2],sys.argv[3],int(sys.argv[4]),sys.argv[5],sys.argv[6]=="1",sys.argv[7]
+      root=os.path.expanduser(os.path.join("~/.graphcode/staging",ident,node))
+      parent=os.path.join(root,".retained") if retained else root
+      target=base64.urlsafe_b64encode(bytes.fromhex(digest)).decode("ascii").rstrip("=") if retained else name
+      try:
+       parent_fd=os.open(parent,os.O_RDONLY|getattr(os,"O_NOFOLLOW",0)|getattr(os,"O_DIRECTORY",0))
+      except FileNotFoundError: raise SystemExit(0)
+      except OSError: raise SystemExit(2)
+      try:
+       try: os.stat(cleanup,dir_fd=parent_fd,follow_symlinks=False)
+       except FileNotFoundError:
+        try: os.rename(target,cleanup,src_dir_fd=parent_fd,dst_dir_fd=parent_fd)
+        except FileNotFoundError: raise SystemExit(0)
+       fd=-1
+       try:
+        fd=os.open(cleanup,os.O_RDONLY|getattr(os,"O_NOFOLLOW",0),dir_fd=parent_fd)
+        s=os.fstat(fd)
+        if not stat.S_ISREG(s.st_mode) or stat.S_ISLNK(s.st_mode) or s.st_nlink != 1 or s.st_size != size: raise SystemExit(3)
+        h=hashlib.sha256()
+        while True:
+         b=os.read(fd,65536)
+         if not b: break
+         h.update(b)
+        if h.hexdigest()!=digest: raise SystemExit(4)
+       finally:
+        if fd>=0: os.close(fd)
+       os.unlink(cleanup,dir_fd=parent_fd)
+      finally: os.close(parent_fd)
+      """
+    _ = try await run(
+      location: location, script: script,
+      arguments: [
+        identity, nodeID.uuidString, descriptor.name, String(descriptor.size),
+        descriptor.sha256, retained ? "1" : "0", cleanupName,
+      ], input: nil, maximumOutputBytes: 1024)
+  }
+
   static func resolveAttachment(
     projectPath: String, locationKind: ProjectLocationKind, nodeID: UUID, name: String, size: Int,
     sha256: String
@@ -2820,8 +3308,11 @@ private enum SSHRemoteAssetHost {
        name=retained_name(item)
        try:
         checked_at(retained_fd,name,item)
-        checked_at(lease_fd,item["name"],item)
-        os.unlink(item["name"],dir_fd=lease_fd)
+        try:
+         checked_at(lease_fd,item["name"],item)
+         os.unlink(item["name"],dir_fd=lease_fd)
+        except SystemExit as e:
+         if e.code != 5: raise
         continue
        except SystemExit as e:
         if e.code != 5: raise

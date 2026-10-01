@@ -85,6 +85,8 @@ sequenceDiagram
   H-->>D: durable reversible lease
   D->>H: reverify lease at graph-commit boundary
   D->>D: apply the exact graph command
+  D->>H: atomically persist and acknowledge the exact graph snapshot
+  D->>D: append replay and broadcast graph success
   D->>H: publish content-addressed retained ownership
   D->>D: finalize catalog ownership; remove unselected draft files
   C->>D: attended start / unattended ensure / restart / liveness recovery
@@ -132,13 +134,18 @@ remains in an explicit retry queue and cannot make an expired reference valid ag
 The project-scoped catalog records opaque project identity, logical owner, node and safe
 name, exact size and digest, original creation/expiry deadlines, lease state, and cleanup
 state. It does not contain attachment bytes, credentials, remote commands, or local/remote
-host paths. Writes use atomic replacement. Startup validates count/byte bounds with
-overflow-safe arithmetic, quarantines corrupt catalogs, rebuilds quota accounting exactly
-once, and preserves original deadlines. Opening a project binds its current canonical
-path to matching opaque catalog records and reconciles them against the persisted graph:
-a graph-owned lease is finalized idempotently, while a lease for an absent node is rolled
-back. Thus restart cannot reset quota, abandon a delivered draft, or strand the
-graph-persisted-before-finalize crash window.
+host paths. Writes use atomic replacement. Catalog input is rejected before reading when
+it is not a regular no-follow file or exceeds 8 MiB, and decoding and schema validation
+remain bounded. Corrupt input is quarantined under stable identity with caps of eight
+files and 32 MiB; excess and link-like entries are rejected without broad deletion.
+Startup validates count/byte bounds with overflow-safe arithmetic, quarantines corrupt
+catalogs, rebuilds quota accounting exactly once, and preserves original deadlines. It
+discovers persisted, open, and recent graphs without waiting for a client to reopen the
+project, binds current canonical paths to matching opaque catalog records, and reconciles
+them against the persisted graph. A graph-owned lease is finalized idempotently, while a
+lease for an absent node is rolled back. Unresolved opaque project identities remain in
+the bounded retry/quarantine lifecycle. Thus restart cannot reset quota, abandon a
+delivered draft, or strand the graph-persisted-before-finalize crash window.
 
 The graph persists only the authenticated opaque reference and safe display name.
 Attachment bytes never enter graph JSON, event replay, ordinary broadcasts, recents,
@@ -167,14 +174,33 @@ name and verifies regular/single-link identity plus exact size and SHA-256 in a
 lease-owned namespace. Local retained objects use a compact full-digest content key;
 SSH/Codespace use the equivalent no-replace hard-link/unlink operation. The lease is
 reverified immediately before `GraphStore`, and launch during the graph command resolves
-from that lease. Only then can persistence, replay, or broadcast occur. A graph rejection
-rolls back the lease namespace only. After graph success, the host idempotently publishes
-retained content and the catalog drops the lease; a restart between those steps completes
-publication from the graph as authority. Existing retained content is verified and never
-removed by rollback. Successful creation removes only unselected draft files. Cleanup
-failures release draft accounting only after durable cleanup ownership exists and never
-delete pre-existing files or an existing node directory. Created-node files remain until
-normal node-memory cleanup removes them.
+from that lease. `GraphStore` must receive an acknowledged atomic save of the exact graph
+snapshot before replay, broadcast, or lease publication. Save failure restores the
+pre-command graph and rolls back only the draft-owned lease. After durable graph success,
+the host idempotently publishes retained content and the catalog drops the lease; a
+restart between those steps completes publication from the persisted graph as authority.
+Existing retained content is verified and never removed by rollback. Successful creation
+removes only unselected draft files. Cleanup failures release draft accounting only after
+durable cleanup ownership exists and never delete pre-existing files or an existing node
+directory.
+
+Every graph mutation is previewed to compute the complete before/after node-ID removal
+delta across arbitrarily nested subgraphs and spawned descendants. Descriptor-bound
+cleanup ownership for every removed node is durably recorded in a held transaction before
+mutation. The exact deletion graph is then durably saved; only after acknowledgement does
+the transaction become eligible for cleanup. Save failure cancels the held transaction,
+restores the graph, and leaves assets intact. Whole-project deletion follows the same
+ordering by durably deleting the graph before activating cleanup or terminating project
+state. Startup atomically activates complete held transactions whose nodes are absent
+from the authoritative persisted graph.
+
+Deletion opens a stable parent, no-follow verifies the exact safe name, size, SHA-256, and
+identity, and moves the candidate to a deterministic private cleanup name before unlink.
+Missing content is success. Descriptor mismatch remains quarantined and reported; it is
+never deleted or mistaken for the superseded object. SSH/Codespace perform the equivalent
+directory-relative operations. Remote commit is idempotent: a verified retained object
+with an absent lease source is already committed, while simultaneous retained and lease
+copies are both verified before only the lease source is removed.
 The registry iteratively unwraps any depth of `subGraphCommand`, resolves each addressed
 composite against the authoritative graph, and applies the same transaction to the exact
 enclosed `createNode`. A missing or non-composite address rejects before dispatch and

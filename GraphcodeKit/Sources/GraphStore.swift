@@ -52,6 +52,7 @@ public actor GraphStore {
   // Tests observe actual queue admission instead of guessing with sleeps.
   var queuedCommandSequence: UInt64 { nextCommandID }
   private let onGraphChanged: (@Sendable (LoopGraph) -> Void)?
+  private let onDurableGraphChanged: (@Sendable (LoopGraph) async throws -> Void)?
   private let onGraphEvent: (@Sendable (DaemonEvent) -> [UUID: DaemonWireEnvelope])?
   private let onConnectionFailure: (@Sendable (UUID) -> Void)?
   private let onEnsureSession: (@Sendable (LoopNode, String?) -> Void)?
@@ -322,6 +323,7 @@ public actor GraphStore {
     authoritativeProject: ProjectRef? = nil,
     deliveryDeadline: Duration = .seconds(45),
     onGraphChanged: (@Sendable (LoopGraph) -> Void)? = nil,
+    onDurableGraphChanged: (@Sendable (LoopGraph) async throws -> Void)? = nil,
     onGraphEvent: (@Sendable (DaemonEvent) -> [UUID: DaemonWireEnvelope])? = nil,
     onConnectionFailure: (@Sendable (UUID) -> Void)? = nil,
     onEnsureSession: (@Sendable (LoopNode, String?) -> Void)? = nil,
@@ -369,6 +371,7 @@ public actor GraphStore {
       preservingCurrentDisplayName: subGraphDepth > 0)
     self.subGraphDepth = subGraphDepth
     self.onGraphChanged = onGraphChanged
+    self.onDurableGraphChanged = onDurableGraphChanged
     self.onGraphEvent = onGraphEvent
     self.onConnectionFailure = onConnectionFailure
     self.onEnsureSession = onEnsureSession
@@ -824,7 +827,8 @@ public actor GraphStore {
     from connectionID: UUID? = nil,
     serializeCommands: Bool = true,
     broadcastErrors: Bool = true,
-    v2PayloadLimit: Int? = nil
+    v2PayloadLimit: Int? = nil,
+    requiresDurablePersistence: Bool = false
   ) async -> GraphStoreCommandResult {
     guard !relocationLease else {
       return .rejected(message: "project relocation is in progress", graph: graph)
@@ -837,7 +841,8 @@ public actor GraphStore {
       || (serializeCommands && !Self.allowsDrainRecoveryWhileHandling(command))
     guard serializes else {
       return await applyCommand(
-        command, from: connectionID, broadcastErrors: broadcastErrors)
+        command, from: connectionID, broadcastErrors: broadcastErrors,
+        requiresDurablePersistence: requiresDurablePersistence)
     }
     let previous = commandTail
     let commandID = nextCommandID
@@ -860,7 +865,8 @@ public actor GraphStore {
         }
       }
       return await self.applyCommand(
-        command, from: connectionID, broadcastErrors: broadcastErrors)
+        command, from: connectionID, broadcastErrors: broadcastErrors,
+        requiresDurablePersistence: requiresDurablePersistence)
     }
     commandTail = operation
     commandTailID = commandID
@@ -895,6 +901,11 @@ public actor GraphStore {
     return await shadow.handle(command, broadcastErrors: broadcastErrors)
   }
 
+  public func previewGraphChange(_ command: GraphCommand) async -> GraphStoreCommandResult {
+    let routed = routeIntoSubGraph(command) ?? command
+    return await preview(routed, broadcastErrors: false)
+  }
+
   private static func v2GraphChangeFits(_ graph: LoopGraph, limit: Int) -> Bool {
     guard limit >= 0 else { return false }
     let event = DaemonEvent.graphChanged(graph)
@@ -911,9 +922,11 @@ public actor GraphStore {
   private func applyCommand(
     _ command: GraphCommand,
     from connectionID: UUID? = nil,
-    broadcastErrors: Bool = true
+    broadcastErrors: Bool = true,
+    requiresDurablePersistence: Bool = false
   ) async -> GraphStoreCommandResult {
     enforceRootProjectInvariant()
+    let graphBeforeCommand = graph
     switch command {
     case .createNode(var draft):
       draft.subGraph = draft.subGraph?.enforcingRootProject(
@@ -1194,8 +1207,14 @@ public actor GraphStore {
     // before anyone is told what the graph looks like. Cycle re-entries run before
     // hand-off deliveries because a re-entry *queues* one; nudges last, since an
     // update's memory record must exist before its session is told to go look.
-    let errors = await drainAndBroadcast(broadcastErrors: broadcastErrors)
+    let errors = await drainAndBroadcast(
+      broadcastErrors: broadcastErrors,
+      requiresDurablePersistence: requiresDurablePersistence)
     if let error = errors.first {
+      if requiresDurablePersistence {
+        graph = graphBeforeCommand
+        enforceRootProjectInvariant()
+      }
       return .rejected(message: error, graph: graph)
     }
     return .applied(graph: graph)
@@ -4349,7 +4368,10 @@ public actor GraphStore {
   /// The same settle-then-tell sequence `handle` ends with, for the paths that mutate
   /// outside a command — goal polling resolves nodes and fires edges too, and an edge
   /// fired from a poll must not wait for the next unrelated command to be delivered.
-  private func drainAndBroadcast(broadcastErrors: Bool = true) async -> [String] {
+  private func drainAndBroadcast(
+    broadcastErrors: Bool = true,
+    requiresDurablePersistence: Bool = false
+  ) async -> [String] {
     releaseHeldCompletions()
     let errors = await drainPendingErrors(broadcastErrors: broadcastErrors)
     await drainPendingMessages()
@@ -4358,7 +4380,11 @@ public actor GraphStore {
     await drainPendingNudges()
     await drainPendingFollowUps()
     if errors.isEmpty {
-      await broadcast()
+      if let persistenceError = await broadcast(
+        requiresDurablePersistence: requiresDurablePersistence)
+      {
+        return [persistenceError]
+      }
     }
     return errors
   }
@@ -4554,10 +4580,21 @@ public actor GraphStore {
 
   // MARK: - Broadcast
 
-  private func broadcast() async {
+  private func broadcast(requiresDurablePersistence: Bool = false) async -> String? {
     let started = Date()
     enforceRootProjectInvariant()
-    onGraphChanged?(graph)
+    if requiresDurablePersistence {
+      guard let onDurableGraphChanged else {
+        return "graph persistence acknowledgement is unavailable"
+      }
+      do {
+        try await onDurableGraphChanged(graph)
+      } catch {
+        return "graph persistence failed: \(error)"
+      }
+    } else {
+      onGraphChanged?(graph)
+    }
     DaemonLog.shared.record(
       "persist",
       DaemonRequestContext.fields + [
@@ -4580,6 +4617,7 @@ public actor GraphStore {
         ("recipients", String(intended)), ("accepted", String(accepted)),
         ("ms", DaemonLog.milliseconds(Date().timeIntervalSince(started))),
       ])
+    return nil
   }
 
   /// The half of `broadcast` that tells clients, without the half that writes to disk.

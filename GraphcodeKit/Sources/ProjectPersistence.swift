@@ -15,16 +15,25 @@ public struct ProjectPersistence: Sendable {
   private let recentProjectsFile: URL
   private let openProjectsFile: URL
   private let platformPaths: any PlatformPaths
+  private let beforeGraphWrite: @Sendable (LoopGraph) throws -> Void
+  private let beforeGraphDelete: @Sendable (String) throws -> Void
 
   public init(baseDirectory: URL) {
     self.init(baseDirectory: baseDirectory, platformPaths: CurrentPlatformPaths.value)
   }
 
-  public init(baseDirectory: URL, platformPaths: any PlatformPaths) {
+  public init(
+    baseDirectory: URL,
+    platformPaths: any PlatformPaths,
+    beforeGraphWrite: @escaping @Sendable (LoopGraph) throws -> Void = { _ in },
+    beforeGraphDelete: @escaping @Sendable (String) throws -> Void = { _ in }
+  ) {
     projectsDirectory = baseDirectory.appendingPathComponent("projects", isDirectory: true)
     recentProjectsFile = baseDirectory.appendingPathComponent("recent-projects.json")
     openProjectsFile = baseDirectory.appendingPathComponent("open-projects.json")
     self.platformPaths = platformPaths
+    self.beforeGraphWrite = beforeGraphWrite
+    self.beforeGraphDelete = beforeGraphDelete
     try? FileManager.default.createDirectory(
       at: projectsDirectory, withIntermediateDirectories: true)
   }
@@ -81,40 +90,91 @@ public struct ProjectPersistence: Sendable {
   /// while the graph changes on every memo, state tick and cursor move — the same
   /// argument #293 made for the wire, applied to the file.
   public func saveGraph(_ graph: LoopGraph) {
+    try? saveGraphAcknowledged(graph)
+  }
+
+  /// Saves the complete restorable graph and returns only after the graph file has been
+  /// atomically replaced. Unlike the compatibility `saveGraph` entry point, failures
+  /// are surfaced to callers that must not publish or perform irreversible follow-up
+  /// work until persistence is known to have succeeded.
+  public func saveGraphAcknowledged(_ graph: LoopGraph) throws {
     var slim = graph
     slim.mailroom = []
-    guard let data = try? JSONEncoder().encode(slim) else { return }
-    do {
-      try data.write(to: fileURL(forProjectPath: graph.project.path), options: .atomic)
-    } catch {
-      return
-    }
-    removeLegacyGraphIfMatching(path: graph.project.path)
+    let data = try JSONEncoder().encode(slim)
     let roomURL = mailroomURL(forProjectPath: graph.project.path)
     let digest = MailroomDigest(of: graph.mailroom)
-    guard
-      !Self.roomDigests.matches(digest, for: roomURL.path)
-        || !FileManager.default.fileExists(atPath: roomURL.path)
-    else { return }
-    if graph.mailroom.isEmpty {
-      do {
-        try FileManager.default.removeItem(at: roomURL)
-      } catch  where !FileManager.default.fileExists(atPath: roomURL.path) {
-        Self.roomDigests.set(digest, for: roomURL.path)
-      } catch {
-        return
+    if !Self.roomDigests.matches(digest, for: roomURL.path)
+      || !FileManager.default.fileExists(atPath: roomURL.path)
+    {
+      if graph.mailroom.isEmpty {
+        if FileManager.default.fileExists(atPath: roomURL.path) {
+          try FileManager.default.removeItem(at: roomURL)
+        }
+      } else {
+        try JSONEncoder().encode(graph.mailroom).write(to: roomURL, options: .atomic)
       }
-    } else if let room = try? JSONEncoder().encode(graph.mailroom) {
-      do {
-        try room.write(to: roomURL, options: .atomic)
-      } catch {
-        return
-      }
-    } else {
-      return
+      Self.roomDigests.set(digest, for: roomURL.path)
     }
-    Self.roomDigests.set(digest, for: roomURL.path)
-    try? FileManager.default.removeItem(at: legacyMailroomURL(forProjectPath: graph.project.path))
+    try beforeGraphWrite(graph)
+    try data.write(to: fileURL(forProjectPath: graph.project.path), options: .atomic)
+    removeLegacyGraphIfMatching(path: graph.project.path)
+    if FileManager.default.fileExists(
+      atPath: legacyMailroomURL(forProjectPath: graph.project.path)
+        .path)
+    {
+      do {
+        try FileManager.default.removeItem(
+          at: legacyMailroomURL(forProjectPath: graph.project.path))
+      } catch {
+        // The current graph and room are already durable. A stale compatibility file
+        // cannot override them and is safe to remove on a later save.
+      }
+    }
+  }
+
+  /// Deletes the authoritative graph first. Only failures before that unlink are
+  /// surfaced; stale sidecars are non-authoritative and are removed best-effort after
+  /// the graph is gone. Therefore every thrown error leaves the complete graph
+  /// restorable, while every success makes deletion authoritative.
+  public func deleteGraphAcknowledged(path: String) throws {
+    try beforeGraphDelete(path)
+    let graphURL = fileURL(forProjectPath: path)
+    if FileManager.default.fileExists(atPath: graphURL.path) {
+      try FileManager.default.removeItem(at: graphURL)
+    }
+    for url in [
+      mailroomURL(forProjectPath: path),
+      legacyFileURL(forProjectPath: path),
+      legacyMailroomURL(forProjectPath: path),
+    ] where FileManager.default.fileExists(atPath: url.path) {
+      try? FileManager.default.removeItem(at: url)
+    }
+    Self.roomDigests.forget(mailroomURL(forProjectPath: path).path)
+  }
+
+  public func loadStoredGraphs() -> [LoopGraph] {
+    guard
+      let files = try? FileManager.default.contentsOfDirectory(
+        at: projectsDirectory, includingPropertiesForKeys: [.isRegularFileKey, .isSymbolicLinkKey],
+        options: [.skipsHiddenFiles])
+    else { return [] }
+    return files.compactMap { url in
+      guard url.pathExtension == "json", !Self.isSidecarFileName(url.lastPathComponent),
+        let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey]),
+        values.isRegularFile == true, values.isSymbolicLink != true,
+        let data = try? SafeLocalFile.read(url, maximumBytes: 64 * 1_024 * 1_024),
+        let graph = try? JSONDecoder().decode(LoopGraph.self, from: data)
+      else { return nil }
+      return decodeGraph(data: data, projectPath: graph.project.path)
+    }
+  }
+
+  /// Throws away a project's loops for good — the "Delete Loops…" half of the sidebar's
+  /// context menu, which is why it's separate from `forgetProject`. Only ever touches
+  /// graphcode's own file under `~/.graphcode`; the project folder itself is never
+  /// written to, deleted from, or otherwise modified.
+  public func deleteGraph(path: String) {
+    try? deleteGraphAcknowledged(path: path)
   }
 
   /// What the room last written for each project looked like, so an unchanged room is
@@ -148,21 +208,6 @@ public struct ProjectPersistence: Sendable {
       defer { lock.unlock() }
       digests.removeValue(forKey: path)
     }
-  }
-
-  /// Throws away a project's loops for good — the "Delete Loops…" half of the sidebar's
-  /// context menu, which is why it's separate from `forgetProject`. Only ever touches
-  /// graphcode's own file under `~/.graphcode`; the project folder itself is never
-  /// written to, deleted from, or otherwise modified.
-  public func deleteGraph(path: String) {
-    try? FileManager.default.removeItem(at: fileURL(forProjectPath: path))
-    try? FileManager.default.removeItem(at: mailroomURL(forProjectPath: path))
-    try? FileManager.default.removeItem(at: legacyFileURL(forProjectPath: path))
-    try? FileManager.default.removeItem(at: legacyMailroomURL(forProjectPath: path))
-    // The digest cache is keyed by path and outlives the file. Left behind, a project
-    // re-created at the same path whose room happens to match the deleted one would be
-    // judged unchanged and never written.
-    Self.roomDigests.forget(mailroomURL(forProjectPath: path).path)
   }
 
   /// Filenames are versioned hashes of the canonical project path. A path-derived filename

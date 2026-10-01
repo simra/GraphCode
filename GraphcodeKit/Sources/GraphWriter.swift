@@ -9,16 +9,27 @@ import Foundation
 /// against a 0.003 s socket round trip, with the variance coming from the filesystem.
 ///
 /// A save is handed here and the actor returns. One serial queue writes; consecutive
-/// saves of the same project collapse to the newest snapshot (the graph is a value and
-/// the file is a whole, so nothing older has anything left to say), which turns a burst
-/// of memos into one write. `flush` waits for everything queued — what the daemon calls
-/// on its way out, and what a test calls before reading the file back.
+/// unacknowledged saves of the same project collapse to the newest snapshot (the graph
+/// is a value and the file is a whole, so nothing older has anything left to say), which
+/// turns a burst of memos into one write. Acknowledged saves are ordering barriers and
+/// cannot be replaced by later snapshots. `flush` waits for everything queued — what the
+/// daemon calls on its way out, and what a test calls before reading the file back.
 public final class GraphWriter: @unchecked Sendable {
+  public enum Failure: Error, Equatable, Sendable {
+    case persistenceFailed(String)
+    case relocationInProgress
+  }
+
+  private struct PendingWrite {
+    var graph: LoopGraph
+    var acknowledgements: [@Sendable (Result<Void, Failure>) -> Void]
+  }
+
   private let persistence: ProjectPersistence
   private let beforeWrite: @Sendable (LoopGraph) -> Void
   private let queue = DispatchQueue(label: "dev.graphcode.graphcoded.persist", qos: .utility)
   private let lock = NSLock()
-  private var pending: [String: LoopGraph] = [:]
+  private var pending: [String: [PendingWrite]] = [:]
   private var relocationBlockedPaths: Set<String> = []
   private var scheduled = false
 
@@ -37,12 +48,56 @@ public final class GraphWriter: @unchecked Sendable {
       lock.unlock()
       return
     }
-    pending[graph.project.path] = graph
+    if var writes = pending[graph.project.path], var existing = writes.last,
+      existing.acknowledgements.isEmpty
+    {
+      existing.graph = graph
+      writes[writes.count - 1] = existing
+      pending[graph.project.path] = writes
+    } else {
+      pending[graph.project.path, default: []].append(
+        PendingWrite(graph: graph, acknowledgements: []))
+    }
     let drainNeeded = !scheduled
     scheduled = true
     lock.unlock()
     guard drainNeeded else { return }
     queue.async { [self] in drain() }
+  }
+
+  /// Queues a graph and resumes only after the serial writer has atomically persisted
+  /// it. Every acknowledgement attached to a coalesced write observes that write's
+  /// success or failure.
+  public func saveAcknowledged(_ graph: LoopGraph) async throws {
+    try await withCheckedThrowingContinuation {
+      (continuation: CheckedContinuation<Void, any Error>) in
+      lock.lock()
+      guard !relocationBlockedPaths.contains(graph.project.path) else {
+        lock.unlock()
+        continuation.resume(throwing: Failure.relocationInProgress)
+        return
+      }
+      let acknowledge: @Sendable (Result<Void, Failure>) -> Void = { result in
+        continuation.resume(with: result)
+      }
+      if var writes = pending[graph.project.path], var existing = writes.last,
+        existing.acknowledgements.isEmpty
+      {
+        existing.graph = graph
+        existing.acknowledgements.append(acknowledge)
+        writes[writes.count - 1] = existing
+        pending[graph.project.path] = writes
+      } else {
+        pending[graph.project.path, default: []].append(
+          PendingWrite(graph: graph, acknowledgements: [acknowledge]))
+      }
+      let drainNeeded = !scheduled
+      scheduled = true
+      lock.unlock()
+      if drainNeeded {
+        queue.async { [self] in drain() }
+      }
+    }
   }
 
   /// The newest snapshot of a project — the one still queued, if there is one, else
@@ -53,7 +108,7 @@ public final class GraphWriter: @unchecked Sendable {
   /// and leave the rest running.
   public func load(path: String) -> LoopGraph? {
     lock.lock()
-    let queued = pending[path]
+    let queued = pending[path]?.last?.graph
     lock.unlock()
     if let queued { return queued }
     return persistence.loadGraph(path: path)
@@ -75,9 +130,37 @@ public final class GraphWriter: @unchecked Sendable {
   public func forget(path: String) {
     queue.sync {
       lock.lock()
-      pending.removeValue(forKey: path)
+      let abandoned = pending.removeValue(forKey: path)
       lock.unlock()
+      for write in abandoned ?? [] {
+        for acknowledge in write.acknowledgements {
+          acknowledge(.failure(.persistenceFailed("graph was deleted before its save completed")))
+        }
+      }
     }
+  }
+
+  public func deleteAcknowledged(path: String) throws {
+    lock.lock()
+    relocationBlockedPaths.insert(path)
+    lock.unlock()
+    do {
+      try queue.sync {
+        drain()
+        try persistence.deleteGraphAcknowledged(path: path)
+      }
+    } catch {
+      lock.lock()
+      relocationBlockedPaths.remove(path)
+      lock.unlock()
+      throw error
+    }
+  }
+
+  public func allowWritesAfterDeletion(path: String) {
+    lock.lock()
+    relocationBlockedPaths.remove(path)
+    lock.unlock()
   }
 
   /// Blocks new old-path saves and returns only after every save accepted before the
@@ -104,15 +187,35 @@ public final class GraphWriter: @unchecked Sendable {
   private func drain() {
     while true {
       lock.lock()
-      guard let (_, graph) = pending.first else {
+      guard let (path, writes) = pending.first, let write = writes.first else {
         scheduled = false
         lock.unlock()
         return
       }
-      pending.removeValue(forKey: graph.project.path)
+      if writes.count == 1 {
+        pending.removeValue(forKey: path)
+      } else {
+        pending[path] = Array(writes.dropFirst())
+      }
       lock.unlock()
-      beforeWrite(graph)
-      persistence.saveGraph(graph)
+      beforeWrite(write.graph)
+      do {
+        try persistence.saveGraphAcknowledged(write.graph)
+        for acknowledge in write.acknowledgements { acknowledge(.success(())) }
+      } catch {
+        let failure = Failure.persistenceFailed(String(describing: error))
+        for acknowledge in write.acknowledgements { acknowledge(.failure(failure)) }
+        if !write.acknowledgements.isEmpty {
+          lock.lock()
+          let invalidated = pending.removeValue(forKey: path) ?? []
+          lock.unlock()
+          for pendingWrite in invalidated {
+            for acknowledge in pendingWrite.acknowledgements {
+              acknowledge(.failure(failure))
+            }
+          }
+        }
+      }
     }
   }
 }

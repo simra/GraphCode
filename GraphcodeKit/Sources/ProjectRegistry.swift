@@ -408,13 +408,16 @@ public actor ProjectRegistry {
     quickChatExists: (@Sendable (LoopNode, String?) async -> Bool)? = nil,
     enumerateQuickChatSessions: (@Sendable () async -> [UUID])? = nil,
     relocationCoordinator: ProjectRelocationCoordinator? = nil,
+    beforeGraphWrite: @escaping @Sendable (LoopGraph) throws -> Void = { _ in },
+    beforeGraphDelete: @escaping @Sendable (String) throws -> Void = { _ in },
     classifyProject: @escaping @Sendable (String) -> ProjectMetadata = {
       ProjectMetadata.inferred(fromProjectPath: $0)
     }
   ) {
     self.platformPaths = platformPaths
     persistence = ProjectPersistence(
-      baseDirectory: persistenceDirectory, platformPaths: platformPaths)
+      baseDirectory: persistenceDirectory, platformPaths: platformPaths,
+      beforeGraphWrite: beforeGraphWrite, beforeGraphDelete: beforeGraphDelete)
     writer = GraphWriter(persistence: persistence)
     self.persistsSynchronously = persistsSynchronously
     quickChatStore = QuickChatStore(baseDirectory: persistenceDirectory)
@@ -502,6 +505,9 @@ public actor ProjectRegistry {
           ("disposition", status.disposition.rawValue),
           ("detail", status.detail),
         ])
+    }
+    Task { [weak self] in
+      await self?.recoverRemoteAssetsAtStartup()
     }
   }
 
@@ -655,6 +661,17 @@ public actor ProjectRegistry {
         nodeID: nodeID, command: replacingCreateDraft(in: nested, with: draft))
     default:
       return command
+    }
+  }
+
+  private static func containsNodeDeletion(_ command: GraphCommand) -> Bool {
+    switch command {
+    case .deleteNode:
+      return true
+    case .subGraphCommand(_, let nested):
+      return containsNodeDeletion(nested)
+    default:
+      return false
     }
   }
 
@@ -973,16 +990,44 @@ public actor ProjectRegistry {
       guard !isProjectRelocating(canonicalPath) else {
         return ProjectRegistryCommandResult(error: "project relocation is in progress")
       }
-      _ = await close(canonicalPath, for: connectionID)
-      persistence.forgetProject(path: canonicalPath)
-      // The graph is the only handle on every loop's detached session, so its deletion
-      // has to end them first — dropping it with the sessions alive left every agent in
-      // the project running forever with nothing pointing at it. Read from the resident
-      // store when there is one, else straight from disk: going through
+      // The graph is the only handle on every loop's detached session, so capture it
+      // before durable deletion and end those sessions only after the graph file is
+      // acknowledged absent. Read from the resident store when there is one, else
+      // straight from disk: going through
       // `store(forProjectPath:)` would run its load-time `ensureUnattendedSessions`,
       // *starting* sessions on the way to killing them. Memory goes with each loop, the
       // same as single-node deletion.
       let graph = await stores[canonicalPath]?.graph ?? writer.load(path: canonicalPath)
+      let metadata = graph?.project.metadata ?? classifyProject(canonicalPath)
+      let deletionTransactionID: UUID?
+      switch await remoteAssets.prepareDeletion(
+        projectPath: canonicalPath, metadata: metadata,
+        nodes: graph?.nodesAtAnyDepth ?? [], includeProjectState: true)
+      {
+      case .success(let transactionID):
+        deletionTransactionID = transactionID
+      case .failure(let failure):
+        return ProjectRegistryCommandResult(
+          error: failure.message, errorCode: Self.wireCode(for: failure))
+      }
+      do {
+        try writer.deleteAcknowledged(path: canonicalPath)
+      } catch {
+        if let deletionTransactionID {
+          _ = await remoteAssets.cancelDeletion(transactionID: deletionTransactionID)
+        }
+        return ProjectRegistryCommandResult(error: "graph deletion persistence failed: \(error)")
+      }
+      if let deletionTransactionID,
+        case .failure = await remoteAssets.activateDeletion(
+          transactionID: deletionTransactionID)
+      {
+        await broadcast(
+          .errorOccurred(
+            "project attachment cleanup is durably held and will resume after restart"))
+      }
+      _ = await close(canonicalPath, for: connectionID)
+      persistence.forgetProject(path: canonicalPath)
       for node in graph?.nodesAtAnyDepth ?? [] {
         terminateSession?(node, canonicalPath)
         NodeMemory.remove(projectPath: canonicalPath, nodeID: node.id)
@@ -990,10 +1035,6 @@ public actor ProjectRegistry {
       // Drop the in-memory store too, or a later reopen would resurrect the graph we
       // just deleted from the one still sitting in `stores`.
       stores.removeValue(forKey: canonicalPath)
-      // Before the file goes, so a save still in the writer's queue cannot land after the
-      // delete and put the graph back.
-      writer.forget(path: canonicalPath)
-      persistence.deleteGraph(path: canonicalPath)
       response = .recentProjectsListed(authoritativeRecentProjects())
       error = nil
 
@@ -1217,41 +1258,59 @@ public actor ProjectRegistry {
             errorCode: .remoteAssetUnauthorized)
         }
         let authoritativeGraph = await store.graph
+        let projectMetadata =
+          authoritativeGraph.project.metadata
+          ?? ProjectMetadata.inferred(fromProjectPath: canonicalPath)
         let createTarget: AttachmentCreateTarget?
         switch Self.attachmentCreateTarget(in: inner, graph: authoritativeGraph) {
         case .failure(let failure):
-          let metadata =
-            authoritativeGraph.project.metadata
-            ?? ProjectMetadata.inferred(fromProjectPath: canonicalPath)
           let owner = remoteAssetOwner(for: connectionID) ?? connectionID
           _ = await remoteAssets.discardDraft(
-            owner: owner, projectPath: canonicalPath, metadata: metadata,
+            owner: owner, projectPath: canonicalPath, metadata: projectMetadata,
             nodeID: failure.draft.id)
           return ProjectRegistryCommandResult(error: failure.message)
         case .success(let target):
           createTarget = target
         }
         var createLeaseID: UUID?
+        var deletionTransactionID: UUID?
         var commandToApply = inner
+        if Self.containsNodeDeletion(inner) {
+          let preview = await store.previewGraphChange(inner)
+          guard case .applied(let projectedGraph) = preview else {
+            if case .rejected(let message, _) = preview {
+              return ProjectRegistryCommandResult(error: message)
+            }
+            return ProjectRegistryCommandResult(error: "node deletion could not be previewed")
+          }
+          let surviving = Set(projectedGraph.nodesAtAnyDepth.map(\.id))
+          let removed = authoritativeGraph.nodesAtAnyDepth.filter { !surviving.contains($0.id) }
+          switch await remoteAssets.prepareDeletion(
+            projectPath: canonicalPath, metadata: projectMetadata, nodes: removed)
+          {
+          case .success(let transactionID):
+            deletionTransactionID = transactionID
+          case .failure(let failure):
+            return ProjectRegistryCommandResult(
+              error: failure.message, errorCode: Self.wireCode(for: failure))
+          }
+        }
         if let target = createTarget {
           let draft = target.draft
           guard authoritativeGraph.nodesAtAnyDepth.allSatisfy({ $0.id != draft.id }) else {
             return ProjectRegistryCommandResult(
               error: "node creation refused: a node with that id already exists")
           }
-          let metadata =
-            authoritativeGraph.project.metadata
-            ?? ProjectMetadata.inferred(fromProjectPath: canonicalPath)
           let allowsLegacyLocalPaths: Bool
           if case .v1 = channel.mode {
-            allowsLegacyLocalPaths = metadata.location == .local
+            allowsLegacyLocalPaths = projectMetadata.location == .local
           } else {
             allowsLegacyLocalPaths = false
           }
           let owner = remoteAssetOwner(for: connectionID) ?? connectionID
           switch await remoteAssets.prepareCreate(
             draft.attachments, owner: owner, projectPath: canonicalPath,
-            metadata: metadata, nodeID: draft.id,
+            metadata: projectMetadata, nodeID: draft.id,
             allowsLegacyLocalPaths: allowsLegacyLocalPaths)
           {
           case .success(let leaseID):
@@ -1273,7 +1332,7 @@ public actor ProjectRegistry {
             }
           case .failure(let failure):
             _ = await remoteAssets.discardDraft(
-              owner: owner, projectPath: canonicalPath, metadata: metadata, nodeID: draft.id)
+              owner: owner, projectPath: canonicalPath, metadata: projectMetadata, nodeID: draft.id)
             return ProjectRegistryCommandResult(
               error: failure.message, errorCode: Self.wireCode(for: failure))
           }
@@ -1293,7 +1352,8 @@ public actor ProjectRegistry {
           commandToApply, from: requester,
           serializeCommands: true,
           broadcastErrors: broadcastErrors,
-          v2PayloadLimit: v2PayloadLimit)
+          v2PayloadLimit: v2PayloadLimit,
+          requiresDurablePersistence: createTarget != nil || Self.containsNodeDeletion(inner))
         switch result {
         case .applied(let graph):
           if let target = createTarget, let createLeaseID {
@@ -1312,15 +1372,20 @@ public actor ProjectRegistry {
                 .errorOccurred("attachment ownership finalization failed: \(failure.message)"))
             }
           }
-          if case .deleteNode(let nodeID) = inner,
-            let metadata = authoritativeGraph.project.metadata
+          if let deletionTransactionID,
+            case .failure = await remoteAssets.activateDeletion(
+              transactionID: deletionTransactionID)
           {
-            await remoteAssets.discardNode(
-              projectPath: canonicalPath, metadata: metadata, nodeID: nodeID)
+            await broadcast(
+              .errorOccurred(
+                "attachment deletion cleanup is durably held and will resume after restart"))
           }
           response = .graphChanged(graph)
           error = nil
         case .rejected(let message, _):
+          if let deletionTransactionID {
+            _ = await remoteAssets.cancelDeletion(transactionID: deletionTransactionID)
+          }
           if let createLeaseID {
             if case .failure = await remoteAssets.rollbackCreate(leaseID: createLeaseID) {
               error = "\(message); attachment rollback cleanup is pending"
@@ -2268,6 +2333,28 @@ public actor ProjectRegistry {
     return snapshot
   }
 
+  private func recoverRemoteAssetsAtStartup() async {
+    var projects: [String: (ProjectMetadata, Set<UUID>)] = [:]
+    for graph in persistence.loadStoredGraphs()
+    where graph.project.path != LoopGraphScope.globalPath {
+      let metadata = graph.project.metadata ?? classifyProject(graph.project.path)
+      projects[graph.project.path] = (metadata, Set(graph.nodesAtAnyDepth.map(\.id)))
+    }
+    for project in persistence.loadRecentProjects()
+    where project.path != LoopGraphScope.globalPath && projects[project.path] == nil {
+      projects[project.path] = (project.metadata ?? classifyProject(project.path), [])
+    }
+    for path in persistence.loadOpenProjects()
+    where path != LoopGraphScope.globalPath && projects[path] == nil {
+      projects[path] = (classifyProject(path), [])
+    }
+    for (path, value) in projects {
+      await remoteAssets.reconcile(
+        projectPath: path, metadata: value.0, graphNodeIDs: value.1)
+    }
+    await remoteAssets.maintainRecoveredState()
+  }
+
   /// Joins every attached sidebar client to a project one of *them* — or the CLI, or a
   /// plugin driving it — just added to the open set, so it arrives as an ordinary
   /// `.graphChanged` snapshot.
@@ -2476,6 +2563,7 @@ public actor ProjectRegistry {
   private func store(forProjectPath path: String, ensuringSessions: Bool = true) async -> GraphStore
   {
     if let existing = stores[path] { return existing }
+    writer.allowWritesAfterDeletion(path: path)
     let persistedGraph = writer.load(path: path)
     let metadata = classifyProject(path)
     let reference = ProjectRef(
@@ -2534,6 +2622,10 @@ public actor ProjectRegistry {
         // Every state change is a chance for the last running loop to have stopped, or
         // the first to have started — see `refreshAwakeAssertion`.
         Task { await self?.refreshAwakeAssertion() }
+      },
+      onDurableGraphChanged: { [weak self, writer] updatedGraph in
+        try await writer.saveAcknowledged(updatedGraph)
+        await self?.refreshAwakeAssertion()
       },
       onGraphEvent: { event in
         guard case .graphChanged(let updatedGraph) = event else { return [:] }
