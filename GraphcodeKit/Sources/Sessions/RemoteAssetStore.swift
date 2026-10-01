@@ -141,6 +141,16 @@ public actor RemoteAssetStore {
   public static let maximumBufferedBytesPerOwner = 32 * 1024 * 1024
   public static let maximumBufferedBytesPerProject = 128 * 1024 * 1024
   public static let maximumBufferedBytesGlobal = 256 * 1024 * 1024
+  public static let finalizedDraftLifetime: TimeInterval = 15 * 60
+  public static let maximumFinalizedDraftsPerOwner = 64
+  public static let maximumFinalizedDraftsPerProject = 256
+  public static let maximumFinalizedDraftsGlobal = 512
+  public static let maximumFinalizedAttachmentsPerOwner = 128
+  public static let maximumFinalizedAttachmentsPerProject = 512
+  public static let maximumFinalizedAttachmentsGlobal = 1024
+  public static let maximumFinalizedBytesPerOwner = 64 * 1024 * 1024
+  public static let maximumFinalizedBytesPerProject = 256 * 1024 * 1024
+  public static let maximumFinalizedBytesGlobal = 512 * 1024 * 1024
 
   private struct Transfer: Sendable {
     var owner: UUID
@@ -172,7 +182,27 @@ public actor RemoteAssetStore {
 
   private struct DraftState: Sendable {
     var owner: UUID
-    var names: Set<String>
+    var files: [String: Int]
+    var createdAt: Date
+    var expiresAt: Date
+    var leaseID: UUID?
+  }
+
+  private struct DraftUsage: Sendable {
+    var drafts = 0
+    var attachments = 0
+    var bytes = 0
+  }
+
+  private struct DraftLease: Sendable {
+    var key: String
+    var owner: UUID
+  }
+
+  private struct DraftCleanup: Sendable {
+    var owner: UUID
+    var context: AttachmentTransferContext
+    var files: Set<String>
   }
 
   private struct ReferencePayload: Codable, Equatable, Sendable {
@@ -204,6 +234,7 @@ public actor RemoteAssetStore {
   private let transport: RemoteAssetHostTransport
   private let authenticationKey: Data?
   private let now: @Sendable () -> Date
+  private let draftLifetime: TimeInterval
   private let attachmentsDirectory: @Sendable (String, UUID) -> URL
   private var transfers: [UUID: Transfer] = [:]
   private var finalizations: [UUID: Finalization] = [:]
@@ -211,6 +242,12 @@ public actor RemoteAssetStore {
   private var cancellationOutcomes: [UUID: Bool] = [:]
   private var cleanupPending: [UUID: Transfer] = [:]
   private var drafts: [String: DraftState] = [:]
+  private var draftLeases: [UUID: DraftLease] = [:]
+  private var draftCleanupPending: [UUID: DraftCleanup] = [:]
+  private var ownerDraftUsage: [UUID: DraftUsage] = [:]
+  private var projectDraftUsage: [String: DraftUsage] = [:]
+  private var globalDraftUsage = DraftUsage()
+  private var draftExpiryTask: Task<Void, Never>?
   private var ownerUsage: [UUID: Usage] = [:]
   private var projectUsage: [String: Usage] = [:]
   private var globalUsage = Usage()
@@ -219,6 +256,7 @@ public actor RemoteAssetStore {
     transport: RemoteAssetHostTransport = .live,
     authenticationKey: Data? = nil,
     now: @escaping @Sendable () -> Date = { Date() },
+    finalizedDraftLifetime: TimeInterval = RemoteAssetStore.finalizedDraftLifetime,
     attachmentsDirectory: @escaping @Sendable (String, UUID) -> URL = {
       NodeMemory.attachmentsDirectory(forProjectPath: $0, nodeID: $1)
     }
@@ -226,6 +264,7 @@ public actor RemoteAssetStore {
     self.transport = transport
     self.authenticationKey = authenticationKey ?? Self.loadAuthenticationKey()
     self.now = now
+    draftLifetime = max(0, finalizedDraftLifetime)
     self.attachmentsDirectory = attachmentsDirectory
   }
 
@@ -309,7 +348,8 @@ public actor RemoteAssetStore {
     nodeID: UUID,
     declaration: AttachmentUploadDeclaration,
     existingCount: Int
-  ) -> Result<AttachmentUploadTicket, RemoteAssetError> {
+  ) async -> Result<AttachmentUploadTicket, RemoteAssetError> {
+    await maintainFinalizedDrafts()
     expireTransfers()
     guard metadata.capabilities.attachments else { return .failure(.unsupported) }
     do {
@@ -321,7 +361,7 @@ public actor RemoteAssetStore {
           && $0.nodeID == nodeID
       }.count
       guard
-        existingCount + activeCount + (drafts[key]?.names.count ?? 0)
+        existingCount + activeCount + (drafts[key]?.files.count ?? 0)
           < AttachmentUploadDeclaration.maximumFilesPerNode
       else { return .failure(.tooManyAttachments) }
       guard
@@ -387,6 +427,7 @@ public actor RemoteAssetStore {
   public func finalize(
     owner: UUID, connectionID: UUID? = nil, transferID: UUID
   ) async -> Result<PromptAttachment, RemoteAssetError> {
+    await maintainFinalizedDrafts()
     expireTransfers()
     guard let transfer = transfers[transferID], transfer.owner == owner,
       connectionID.map({ $0 == transfer.connectionID }) ?? true
@@ -448,6 +489,7 @@ public actor RemoteAssetStore {
   public func completeDelivery(
     owner: UUID, connectionID: UUID? = nil, deliveryID: UUID, delivered: Bool
   ) async -> Result<Void, RemoteAssetError> {
+    await maintainFinalizedDrafts()
     guard let pending = pendingDeliveries[deliveryID], pending.transfer.owner == owner,
       connectionID.map({ $0 == pending.transfer.connectionID }) ?? true
     else { return .failure(.unknownTransfer) }
@@ -456,13 +498,35 @@ public actor RemoteAssetStore {
       let key = nodeKey(
         projectPath: pending.transfer.projectPath, metadata: pending.transfer.metadata,
         nodeID: pending.transfer.nodeID)
-      var draft = drafts[key] ?? DraftState(owner: owner, names: [])
+      let createdAt = now()
+      var draft =
+        drafts[key]
+        ?? DraftState(
+          owner: owner, files: [:], createdAt: createdAt,
+          expiresAt: createdAt.addingTimeInterval(draftLifetime), leaseID: nil)
       guard draft.owner == owner else {
         _ = await removePublished(pending.transfer)
         return .failure(.unauthorized)
       }
-      draft.names.insert(pending.transfer.declaration.name)
+      guard draft.leaseID == nil, draft.files[pending.transfer.declaration.name] == nil else {
+        _ = await removePublished(pending.transfer)
+        return .failure(.invalidReference)
+      }
+      let project = projectKey(pending.transfer.projectPath, pending.transfer.metadata)
+      guard
+        reserveFinalizedDraft(
+          owner: owner, project: project, createsDraft: drafts[key] == nil,
+          bytes: pending.transfer.declaration.size)
+      else {
+        guard await removePublished(pending.transfer) else {
+          cleanupPending[deliveryID] = pending.transfer
+          return .failure(.transportFailure)
+        }
+        return .failure(.resourceExhausted)
+      }
+      draft.files[pending.transfer.declaration.name] = pending.transfer.declaration.size
       drafts[key] = draft
+      scheduleDraftExpiry()
     } else {
       guard await removePublished(pending.transfer) else {
         cleanupPending[deliveryID] = pending.transfer
@@ -475,6 +539,7 @@ public actor RemoteAssetStore {
   public func cancel(
     owner: UUID, connectionID: UUID? = nil, transferID: UUID
   ) async -> Result<Void, RemoteAssetError> {
+    await maintainFinalizedDrafts()
     if let transfer = transfers[transferID], transfer.owner == owner,
       connectionID.map({ $0 == transfer.connectionID }) ?? true
     {
@@ -523,6 +588,7 @@ public actor RemoteAssetStore {
   }
 
   public func disconnected(connectionID: UUID, owner: UUID, ownerStillConnected: Bool) async {
+    await maintainFinalizedDrafts()
     let ids = Set(
       transfers.filter { $0.value.connectionID == connectionID }.map(\.key)
         + finalizations.filter { $0.value.transfer.connectionID == connectionID }.map(\.key)
@@ -535,14 +601,9 @@ public actor RemoteAssetStore {
       _ = await cancel(owner: owner, connectionID: connectionID, transferID: id)
     }
     guard !ownerStillConnected else { return }
-    let draftKeys = drafts.filter { $0.value.owner == owner }.map(\.key)
+    let draftKeys = drafts.filter { $0.value.owner == owner && $0.value.leaseID == nil }.map(\.key)
     for key in draftKeys {
-      guard let draft = drafts.removeValue(forKey: key),
-        let context = parseDraftKey(key)
-      else { continue }
-      _ = draft
-      await transport.discardAttachments(
-        context.projectPath, context.metadata, context.nodeID)
+      _ = await abandonDraft(key: key)
     }
   }
 
@@ -551,6 +612,16 @@ public actor RemoteAssetStore {
   }
 
   public func validateForCreate(
+    _ attachments: [PromptAttachment], owner: UUID, projectPath: String,
+    metadata: ProjectMetadata, nodeID: UUID, allowsLegacyLocalPaths: Bool
+  ) async -> Result<Void, RemoteAssetError> {
+    await maintainFinalizedDrafts()
+    return validateCreateReferences(
+      attachments, owner: owner, projectPath: projectPath, metadata: metadata, nodeID: nodeID,
+      allowsLegacyLocalPaths: allowsLegacyLocalPaths)
+  }
+
+  private func validateCreateReferences(
     _ attachments: [PromptAttachment], owner: UUID, projectPath: String,
     metadata: ProjectMetadata, nodeID: UUID, allowsLegacyLocalPaths: Bool
   ) -> Result<Void, RemoteAssetError> {
@@ -565,12 +636,14 @@ public actor RemoteAssetStore {
       })
     else { return .failure(.invalidReference) }
     if let draft = drafts[key], draft.owner != owner { return .failure(.unauthorized) }
+    if drafts[key]?.leaseID != nil { return .failure(.invalidReference) }
     for attachment in attachments {
       if attachment.isOpaqueReference {
         guard let payload = try? decodeReference(attachment.path),
           payload.projectIdentity == RemoteAssetIdentity.project(projectPath, metadata),
           payload.nodeID == nodeID, payload.name == attachment.fileName,
-          payload.draftOwner == owner
+          payload.draftOwner == owner,
+          drafts[key]?.files[payload.name] == payload.size
         else { return .failure(.invalidReference) }
       } else {
         guard allowsLegacyLocalPaths,
@@ -608,53 +681,294 @@ public actor RemoteAssetStore {
     }
   }
 
+  public func prepareCreate(
+    _ attachments: [PromptAttachment], owner: UUID, projectPath: String,
+    metadata: ProjectMetadata, nodeID: UUID, allowsLegacyLocalPaths: Bool
+  ) async -> Result<UUID?, RemoteAssetError> {
+    await maintainFinalizedDrafts()
+    switch validateCreateReferences(
+      attachments, owner: owner, projectPath: projectPath, metadata: metadata, nodeID: nodeID,
+      allowsLegacyLocalPaths: allowsLegacyLocalPaths)
+    {
+    case .failure(let error):
+      return .failure(error)
+    case .success:
+      break
+    }
+    let key = nodeKey(projectPath: projectPath, metadata: metadata, nodeID: nodeID)
+    guard var draft = drafts[key] else { return .success(nil) }
+    guard draft.owner == owner, draft.leaseID == nil else { return .failure(.unauthorized) }
+    let selectedDraftNames = Set(
+      attachments.filter(\.isOpaqueReference).map(\.fileName))
+    let leaseID = UUID()
+    draft.leaseID = leaseID
+    drafts[key] = draft
+    draftLeases[leaseID] = DraftLease(key: key, owner: owner)
+    let names = Set(attachments.map(\.fileName))
+    do {
+      try await transport.retainAttachments(projectPath, metadata, nodeID, names)
+      guard drafts[key]?.leaseID == leaseID, selectedDraftNames.isSubset(of: Set(draft.files.keys))
+      else {
+        _ = await abandonDraft(key: key, leaseID: leaseID)
+        return .failure(.invalidReference)
+      }
+      return .success(leaseID)
+    } catch let error as RemoteAssetError {
+      _ = await abandonDraft(key: key, leaseID: leaseID)
+      return .failure(error)
+    } catch {
+      _ = await abandonDraft(key: key, leaseID: leaseID)
+      return .failure(.transportFailure)
+    }
+  }
+
+  public func finalizeCreate(
+    leaseID: UUID, retainedNames: Set<String>
+  ) async -> Result<Bool, RemoteAssetError> {
+    guard let lease = draftLeases.removeValue(forKey: leaseID),
+      let draft = drafts.removeValue(forKey: lease.key),
+      draft.owner == lease.owner, draft.leaseID == leaseID,
+      let context = parseDraftKey(lease.key)
+    else { return .failure(.invalidReference) }
+    releaseFinalizedDraft(draft, project: projectKey(context.projectPath, context.metadata))
+    let unselected = Set(draft.files.keys).subtracting(retainedNames)
+    let deferred = !(await removeDraftFiles(
+      owner: draft.owner, context: context, files: unselected))
+    scheduleDraftExpiry()
+    return .success(deferred)
+  }
+
   public func commitCreate(
     _ attachments: [PromptAttachment], owner: UUID, projectPath: String,
     metadata: ProjectMetadata, nodeID: UUID
   ) async -> Result<Void, RemoteAssetError> {
-    let key = nodeKey(projectPath: projectPath, metadata: metadata, nodeID: nodeID)
-    if let draft = drafts[key], draft.owner != owner { return .failure(.unauthorized) }
-    let names = Set(attachments.map(\.fileName))
-    do {
-      try await transport.retainAttachments(projectPath, metadata, nodeID, names)
-      drafts.removeValue(forKey: key)
-      return .success(())
-    } catch let error as RemoteAssetError {
+    switch await prepareCreate(
+      attachments, owner: owner, projectPath: projectPath, metadata: metadata, nodeID: nodeID,
+      allowsLegacyLocalPaths: metadata.location == .local)
+    {
+    case .failure(let error):
       return .failure(error)
-    } catch {
-      return .failure(.transportFailure)
+    case .success(nil):
+      return .success(())
+    case .success(let leaseID?):
+      switch await finalizeCreate(
+        leaseID: leaseID, retainedNames: Set(attachments.map(\.fileName)))
+      {
+      case .success:
+        return .success(())
+      case .failure(let error):
+        return .failure(error)
+      }
     }
+  }
+
+  public func rollbackCreate(leaseID: UUID) async -> Result<Void, RemoteAssetError> {
+    guard let lease = draftLeases[leaseID] else { return .success(()) }
+    return await abandonDraft(key: lease.key, leaseID: leaseID)
+      ? .success(())
+      : .failure(.transportFailure)
   }
 
   public func discardDraft(
     owner: UUID, projectPath: String, metadata: ProjectMetadata, nodeID: UUID
   ) async -> Result<Void, RemoteAssetError> {
+    await maintainFinalizedDrafts()
     let key = nodeKey(projectPath: projectPath, metadata: metadata, nodeID: nodeID)
     guard let draft = drafts[key] else { return .success(()) }
     guard draft.owner == owner else { return .failure(.unauthorized) }
-    drafts.removeValue(forKey: key)
-    await transport.discardAttachments(projectPath, metadata, nodeID)
-    return .success(())
+    guard draft.leaseID == nil else { return .failure(.invalidReference) }
+    return await abandonDraft(key: key) ? .success(()) : .failure(.transportFailure)
   }
 
   public func discardNode(
     projectPath: String, metadata: ProjectMetadata, nodeID: UUID
   ) async {
-    drafts.removeValue(
-      forKey: nodeKey(projectPath: projectPath, metadata: metadata, nodeID: nodeID))
+    let key = nodeKey(projectPath: projectPath, metadata: metadata, nodeID: nodeID)
+    if let draft = drafts.removeValue(forKey: key) {
+      releaseFinalizedDraft(draft, project: projectKey(projectPath, metadata))
+      if let leaseID = draft.leaseID { draftLeases.removeValue(forKey: leaseID) }
+    }
     await transport.discardAttachments(projectPath, metadata, nodeID)
+    scheduleDraftExpiry()
   }
 
-  public func resourceUsage() -> RemoteAssetUsageSnapshot {
-    RemoteAssetUsageSnapshot(
+  public func resourceUsage() async -> RemoteAssetUsageSnapshot {
+    await maintainFinalizedDrafts()
+    return RemoteAssetUsageSnapshot(
       activeTransfers: globalUsage.count, declaredBytes: globalUsage.declaredBytes,
       bufferedBytes: globalUsage.bufferedBytes,
-      pendingDeliveries: pendingDeliveries.count + cleanupPending.count)
+      pendingDeliveries: pendingDeliveries.count + cleanupPending.count,
+      finalizedDrafts: globalDraftUsage.drafts,
+      finalizedAttachments: globalDraftUsage.attachments,
+      finalizedBytes: globalDraftUsage.bytes,
+      pendingDraftCleanups: draftCleanupPending.count)
   }
 
   private var allTransfers: [Transfer] {
     Array(transfers.values) + finalizations.values.map(\.transfer)
       + pendingDeliveries.values.map(\.transfer)
+  }
+
+  private func maintainFinalizedDrafts() async {
+    let pending = draftCleanupPending
+    for (id, cleanup) in pending {
+      var remaining: Set<String> = []
+      for name in cleanup.files {
+        if !(await removeDraftFile(context: cleanup.context, name: name)) {
+          remaining.insert(name)
+        }
+      }
+      if remaining.isEmpty {
+        draftCleanupPending.removeValue(forKey: id)
+      } else {
+        draftCleanupPending[id]?.files = remaining
+      }
+    }
+
+    let current = now()
+    let expired = drafts.filter { $0.value.leaseID == nil && $0.value.expiresAt <= current }.map(\.key)
+    for key in expired {
+      _ = await abandonDraft(key: key)
+    }
+    scheduleDraftExpiry()
+  }
+
+  private func scheduleDraftExpiry() {
+    draftExpiryTask?.cancel()
+    let expiry = drafts.values.filter { $0.leaseID == nil }.map(\.expiresAt).min()
+    guard expiry != nil || !draftCleanupPending.isEmpty else {
+      draftExpiryTask = nil
+      return
+    }
+    let delay: TimeInterval
+    if !draftCleanupPending.isEmpty {
+      delay = min(max(0, expiry?.timeIntervalSince(now()) ?? 30), 30)
+    } else {
+      delay = max(0, expiry!.timeIntervalSince(now()))
+    }
+    draftExpiryTask = Task { [weak self] in
+      let nanoseconds = UInt64(min(delay, 24 * 60 * 60) * 1_000_000_000)
+      if nanoseconds > 0 {
+        try? await Task.sleep(nanoseconds: nanoseconds)
+      }
+      guard !Task.isCancelled else { return }
+      await self?.maintainFinalizedDrafts()
+    }
+  }
+
+  private func reserveFinalizedDraft(
+    owner: UUID, project: String, createsDraft: Bool, bytes: Int
+  ) -> Bool {
+    let ownerValue = ownerDraftUsage[owner] ?? DraftUsage()
+    let projectValue = projectDraftUsage[project] ?? DraftUsage()
+    let draftDelta = createsDraft ? 1 : 0
+    guard
+      canAdd(ownerValue.drafts, draftDelta, limit: Self.maximumFinalizedDraftsPerOwner),
+      canAdd(projectValue.drafts, draftDelta, limit: Self.maximumFinalizedDraftsPerProject),
+      canAdd(globalDraftUsage.drafts, draftDelta, limit: Self.maximumFinalizedDraftsGlobal),
+      canAdd(
+        ownerValue.attachments, 1, limit: Self.maximumFinalizedAttachmentsPerOwner),
+      canAdd(
+        projectValue.attachments, 1, limit: Self.maximumFinalizedAttachmentsPerProject),
+      canAdd(
+        globalDraftUsage.attachments, 1, limit: Self.maximumFinalizedAttachmentsGlobal),
+      canAdd(ownerValue.bytes, bytes, limit: Self.maximumFinalizedBytesPerOwner),
+      canAdd(projectValue.bytes, bytes, limit: Self.maximumFinalizedBytesPerProject),
+      canAdd(globalDraftUsage.bytes, bytes, limit: Self.maximumFinalizedBytesGlobal)
+    else { return false }
+    ownerDraftUsage[owner] = adding(
+      ownerValue, drafts: draftDelta, attachments: 1, bytes: bytes)
+    projectDraftUsage[project] = adding(
+      projectValue, drafts: draftDelta, attachments: 1, bytes: bytes)
+    globalDraftUsage = adding(
+      globalDraftUsage, drafts: draftDelta, attachments: 1, bytes: bytes)
+    return true
+  }
+
+  private func releaseFinalizedDraft(_ draft: DraftState, project: String) {
+    let bytes = draft.files.values.reduce(0) { partial, value in
+      partial.addingReportingOverflow(value).overflow ? Int.max : partial + value
+    }
+    ownerDraftUsage[draft.owner] = subtracting(
+      ownerDraftUsage[draft.owner] ?? DraftUsage(), drafts: 1,
+      attachments: draft.files.count, bytes: bytes)
+    projectDraftUsage[project] = subtracting(
+      projectDraftUsage[project] ?? DraftUsage(), drafts: 1,
+      attachments: draft.files.count, bytes: bytes)
+    globalDraftUsage = subtracting(
+      globalDraftUsage, drafts: 1, attachments: draft.files.count, bytes: bytes)
+    if let usage = ownerDraftUsage[draft.owner], isEmpty(usage) {
+      ownerDraftUsage.removeValue(forKey: draft.owner)
+    }
+    if let usage = projectDraftUsage[project], isEmpty(usage) {
+      projectDraftUsage.removeValue(forKey: project)
+    }
+  }
+
+  private func abandonDraft(key: String, leaseID: UUID? = nil) async -> Bool {
+    guard let draft = drafts[key],
+      leaseID == nil || draft.leaseID == leaseID,
+      let context = parseDraftKey(key)
+    else { return true }
+    drafts.removeValue(forKey: key)
+    if let activeLease = draft.leaseID {
+      draftLeases.removeValue(forKey: activeLease)
+    }
+    releaseFinalizedDraft(draft, project: projectKey(context.projectPath, context.metadata))
+    let removed = await removeDraftFiles(
+      owner: draft.owner, context: context, files: Set(draft.files.keys))
+    scheduleDraftExpiry()
+    return removed
+  }
+
+  private func removeDraftFiles(
+    owner: UUID, context: AttachmentTransferContext, files: Set<String>
+  ) async -> Bool {
+    var remaining: Set<String> = []
+    for name in files {
+      if !(await removeDraftFile(context: context, name: name)) {
+        remaining.insert(name)
+      }
+    }
+    guard !remaining.isEmpty else { return true }
+    draftCleanupPending[UUID()] = DraftCleanup(
+      owner: owner, context: context, files: remaining)
+    scheduleDraftExpiry()
+    return false
+  }
+
+  private func removeDraftFile(context: AttachmentTransferContext, name: String) async -> Bool {
+    for attempt in 0..<3 {
+      do {
+        try await transport.removeAttachment(
+          context.projectPath, context.metadata, context.nodeID, name)
+        return true
+      } catch {
+        if attempt < 2 { await Task.yield() }
+      }
+    }
+    return false
+  }
+
+  private func adding(
+    _ usage: DraftUsage, drafts: Int, attachments: Int, bytes: Int
+  ) -> DraftUsage {
+    DraftUsage(
+      drafts: usage.drafts + drafts, attachments: usage.attachments + attachments,
+      bytes: usage.bytes + bytes)
+  }
+
+  private func subtracting(
+    _ usage: DraftUsage, drafts: Int, attachments: Int, bytes: Int
+  ) -> DraftUsage {
+    DraftUsage(
+      drafts: max(0, usage.drafts - drafts),
+      attachments: max(0, usage.attachments - attachments),
+      bytes: max(0, usage.bytes - bytes))
+  }
+
+  private func isEmpty(_ usage: DraftUsage) -> Bool {
+    usage.drafts == 0 && usage.attachments == 0 && usage.bytes == 0
   }
 
   private func templateCandidates(
@@ -1033,15 +1347,18 @@ enum LocalRemoteAssetHost {
 
   static func retainAttachments(projectPath: String, nodeID: UUID, names: Set<String>) throws {
     let directory = NodeMemory.attachmentsDirectory(forProjectPath: projectPath, nodeID: nodeID)
-    guard FileManager.default.fileExists(atPath: directory.path) else { return }
+    guard FileManager.default.fileExists(atPath: directory.path) else {
+      if names.isEmpty { return }
+      throw RemoteAssetError.missing
+    }
     try SafeLocalFile.validateDirectory(directory)
-    let entries = try FileManager.default.contentsOfDirectory(
-      at: directory,
-      includingPropertiesForKeys: [.isRegularFileKey, .isSymbolicLinkKey],
-      options: [])
-    for entry in entries where !names.contains(entry.lastPathComponent) {
-      _ = try SafeLocalFile.read(entry, maximumBytes: AttachmentUploadDeclaration.maximumFileBytes)
-      try FileManager.default.removeItem(at: entry)
+    for name in names {
+      guard AttachmentUploadDeclaration.isSafeName(name) else {
+        throw RemoteAssetError.invalidReference
+      }
+      _ = try SafeLocalFile.read(
+        directory.appendingPathComponent(name),
+        maximumBytes: AttachmentUploadDeclaration.maximumFileBytes)
     }
   }
 }
@@ -1233,14 +1550,12 @@ private enum SSHRemoteAssetHost {
       ident,node=sys.argv[1],sys.argv[2]
       allowed=set(json.load(sys.stdin))
       root=os.path.expanduser(os.path.join("~/.graphcode/staging",ident,node))
-      if not os.path.lexists(root): raise SystemExit(0)
+      if not os.path.lexists(root): raise SystemExit(0 if not allowed else 2)
       rs=os.lstat(root)
       if not stat.S_ISDIR(rs.st_mode) or stat.S_ISLNK(rs.st_mode): raise SystemExit(2)
-      for name in os.listdir(root):
+      for name in allowed:
        p=os.path.join(root,name); s=os.lstat(p)
-       if name in allowed: continue
        if not stat.S_ISREG(s.st_mode) or stat.S_ISLNK(s.st_mode) or s.st_nlink != 1: raise SystemExit(3)
-       os.unlink(p)
       """
     _ = try await run(
       location: location, script: script, arguments: [identity, nodeID.uuidString],

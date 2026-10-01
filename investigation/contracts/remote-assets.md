@@ -81,7 +81,10 @@ sequenceDiagram
   D->>D: commit publication only after response frame succeeds
   C->>D: createNode or nested subGraphCommand(...createNode)
   D->>D: resolve target graph; reject duplicate ID; validate references
-  D->>D: create node, then retain selected draft files
+  D->>H: verify selected draft files and acquire a reversible draft lease
+  H-->>D: retention guaranteed
+  D->>D: apply the exact graph command
+  D->>D: finalize ownership; remove unselected draft files
   C->>D: attended start / unattended ensure / restart / liveness recovery
   D->>D: authorize client or trusted daemon authority
   D->>D: resolve references at the common launch-copy boundary
@@ -108,6 +111,21 @@ Count and declared-byte reservations are atomic at begin; buffered bytes are res
 before each append. Every terminal path releases the same accounting without wrapping
 integer addition.
 
+Finalized, response-delivered drafts have a separate 15-minute lifetime and separate
+atomic reservations:
+
+| Scope                 | Drafts | Attachments | Bytes   |
+| --------------------- | ------ | ----------- | ------- |
+| Logical owner         | 64     | 128         | 64 MiB  |
+| Authoritative project | 256    | 512         | 256 MiB |
+| Daemon                | 512    | 1024        | 512 MiB |
+
+The lifetime starts when the first attachment is delivered for a node. Additional
+uploads and passive sockets do not extend it. There is no protocol refresh operation.
+Expiry runs independently of logical-client connection lifetime, releases accounting
+before cleanup, and removes only files recorded in the expiring draft. Failed cleanup
+remains in an explicit retry queue and cannot make an expired reference valid again.
+
 The graph persists only the authenticated opaque reference and safe display name.
 Attachment bytes never enter graph JSON, event replay, ordinary broadcasts, recents,
 errors, journals, or dial logs. Attended starts, unattended starts, restart recovery, and
@@ -124,9 +142,15 @@ if retries are exhausted; cancellation never reports success while a later final
 publish.
 
 Create rejects an existing node ID before any file operation. Reference validation is
-non-destructive, and unselected draft files are removed only after successful node
-creation. Failure cleanup is owner-bound to draft files and cannot delete an existing
-node directory. Created-node files remain until normal node-memory cleanup removes them.
+non-destructive. The daemon then leases the exact draft and asks the authoritative host
+to verify every selected file without deleting anything. Only a successful verification
+allows the graph command to reach `GraphStore`, so retention failure cannot persist,
+replay, or broadcast a graph change. A graph rejection rolls the lease back by removing
+only files recorded in that draft. Successful creation finalizes ownership and removes
+only unselected draft files. Cleanup failures release draft accounting immediately,
+remain explicitly queued for bounded retries, and never delete pre-existing files or an
+existing node directory. Created-node files remain until normal node-memory cleanup
+removes them.
 The registry iteratively unwraps any depth of `subGraphCommand`, resolves each addressed
 composite against the authoritative graph, and applies the same transaction to the exact
 enclosed `createNode`. A missing or non-composite address rejects before dispatch and

@@ -1212,6 +1212,7 @@ public actor ProjectRegistry {
         case .success(let target):
           createTarget = target
         }
+        var createLeaseID: UUID?
         if let target = createTarget {
           let draft = target.draft
           guard authoritativeGraph.nodesAtAnyDepth.allSatisfy({ $0.id != draft.id }) else {
@@ -1228,11 +1229,14 @@ public actor ProjectRegistry {
             allowsLegacyLocalPaths = false
           }
           let owner = remoteAssetOwner(for: connectionID) ?? connectionID
-          if case .failure(let failure) = await remoteAssets.validateForCreate(
+          switch await remoteAssets.prepareCreate(
             draft.attachments, owner: owner, projectPath: canonicalPath,
             metadata: metadata, nodeID: draft.id,
             allowsLegacyLocalPaths: allowsLegacyLocalPaths)
           {
+          case .success(let leaseID):
+            createLeaseID = leaseID
+          case .failure(let failure):
             _ = await remoteAssets.discardDraft(
               owner: owner, projectPath: canonicalPath, metadata: metadata, nodeID: draft.id)
             return ProjectRegistryCommandResult(
@@ -1249,18 +1253,20 @@ public actor ProjectRegistry {
           v2PayloadLimit: v2PayloadLimit)
         switch result {
         case .applied(let graph):
-          if let target = createTarget {
-            let draft = target.draft
-            let metadata =
-              authoritativeGraph.project.metadata
-              ?? ProjectMetadata.inferred(fromProjectPath: canonicalPath)
-            let owner = remoteAssetOwner(for: connectionID) ?? connectionID
-            if case .failure(let failure) = await remoteAssets.commitCreate(
-              draft.attachments, owner: owner, projectPath: canonicalPath,
-              metadata: metadata, nodeID: draft.id)
+          if let target = createTarget, let createLeaseID {
+            let retainedNames = Set(target.draft.attachments.map(\.fileName))
+            switch await remoteAssets.finalizeCreate(
+              leaseID: createLeaseID, retainedNames: retainedNames)
             {
+            case .success(let cleanupDeferred):
+              if cleanupDeferred {
+                await broadcast(
+                  .errorOccurred(
+                    "attachment draft cleanup is pending and will be retried automatically"))
+              }
+            case .failure(let failure):
               await broadcast(
-                .errorOccurred("attachment staging cleanup failed: \(failure.message)"))
+                .errorOccurred("attachment ownership finalization failed: \(failure.message)"))
             }
           }
           if case .deleteNode(let nodeID) = inner,
@@ -1272,7 +1278,13 @@ public actor ProjectRegistry {
           response = .graphChanged(graph)
           error = nil
         case .rejected(let message, _):
-          if let target = createTarget {
+          if let createLeaseID {
+            if case .failure = await remoteAssets.rollbackCreate(leaseID: createLeaseID) {
+              error = "\(message); attachment rollback cleanup is pending"
+            } else {
+              error = message
+            }
+          } else if let target = createTarget {
             let draft = target.draft
             let metadata =
               authoritativeGraph.project.metadata
@@ -1280,8 +1292,10 @@ public actor ProjectRegistry {
             let owner = remoteAssetOwner(for: connectionID) ?? connectionID
             _ = await remoteAssets.discardDraft(
               owner: owner, projectPath: canonicalPath, metadata: metadata, nodeID: draft.id)
+            error = message
+          } else {
+            error = message
           }
-          error = message
         }
       case .refused(let reason):
         error = reason

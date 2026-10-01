@@ -163,14 +163,24 @@ public struct RemoteAssetUsageSnapshot: Equatable, Sendable {
   public var declaredBytes: Int
   public var bufferedBytes: Int
   public var pendingDeliveries: Int
+  public var finalizedDrafts: Int
+  public var finalizedAttachments: Int
+  public var finalizedBytes: Int
+  public var pendingDraftCleanups: Int
 
   public init(
-    activeTransfers: Int, declaredBytes: Int, bufferedBytes: Int, pendingDeliveries: Int
+    activeTransfers: Int, declaredBytes: Int, bufferedBytes: Int, pendingDeliveries: Int,
+    finalizedDrafts: Int = 0, finalizedAttachments: Int = 0, finalizedBytes: Int = 0,
+    pendingDraftCleanups: Int = 0
   ) {
     self.activeTransfers = activeTransfers
     self.declaredBytes = declaredBytes
     self.bufferedBytes = bufferedBytes
     self.pendingDeliveries = pendingDeliveries
+    self.finalizedDrafts = finalizedDrafts
+    self.finalizedAttachments = finalizedAttachments
+    self.finalizedBytes = finalizedBytes
+    self.pendingDraftCleanups = pendingDraftCleanups
   }
 }
 public enum RemoteAssetError: String, Error, Codable, Equatable, Sendable {
