@@ -95,6 +95,30 @@ private final class RemoteAssetStageFailure: @unchecked Sendable {
   }
 }
 
+private final class EffectCompactionFailure: @unchecked Sendable {
+  private let lock = NSLock()
+  private let target: EffectCompactionStage
+  private var triggered = false
+
+  init(target: EffectCompactionStage) {
+    self.target = target
+  }
+
+  func check(_ stage: EffectCompactionStage) throws {
+    if lock.withLock({
+      guard stage == target else { return false }
+      triggered = true
+      return true
+    }) {
+      throw CocoaError(.fileWriteUnknown)
+    }
+  }
+
+  func wasTriggered() -> Bool {
+    lock.withLock { triggered }
+  }
+}
+
 private final class RemoteAssetTestConnection: @unchecked Sendable, DaemonConnection {
   let id = UUID()
   let endpoint: DaemonEndpoint = .namedPipe("\\\\.\\pipe\\graphcode-remote-assets-test")
@@ -3907,6 +3931,96 @@ final class RemoteAssetTests: XCTestCase {
       XCTAssertEqual(
         ProjectPersistence(baseDirectory: root).loadPendingGraphEffects().map(\.plan),
         [plan])
+    }
+  }
+
+  func testStartupCompactionDurablySwitchesManifestBeforeExactEffectPruning() throws {
+    for faultIndex in 0..<7 {
+      let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("effect-compaction-\(faultIndex)-\(UUID())", isDirectory: true)
+      defer { try? FileManager.default.removeItem(at: root) }
+      let path = "C:\\synthetic\\effect-compaction-\(faultIndex)"
+      let firstNode = LoopNode(id: UUID(), title: "G1", loopType: .turnBased)
+      let secondNode = LoopNode(id: UUID(), title: "G2", loopType: .turnBased)
+      let firstPlan = GraphPostCommitEffectPlan(
+        projectPath: path,
+        operations: [.terminateSession(effectID: UUID(), node: firstNode)],
+        nodeIncarnations: [firstNode.id: firstNode.createdAt])
+      let secondPlan = GraphPostCommitEffectPlan(
+        projectPath: path,
+        operations: [.terminateSession(effectID: UUID(), node: secondNode)],
+        nodeIncarnations: [secondNode.id: secondNode.createdAt])
+      let persistence = ProjectPersistence(baseDirectory: root)
+      var graph = LoopGraph(
+        project: ProjectRef(path: path, name: "Compaction"),
+        nodes: [firstNode, secondNode])
+      try persistence.saveGraphAcknowledged(graph)
+      graph.nodes.remove(id: firstNode.id)
+      let firstReceipt = try persistence.saveGraphAcknowledged(
+        graph, effectPlan: firstPlan)
+      graph.nodes.remove(id: secondNode.id)
+      let secondReceipt = try persistence.saveGraphAcknowledged(
+        graph, effectPlan: secondPlan)
+
+      let key = CurrentPlatformPaths.value.persistenceKey(forProjectPath: path)
+      let projects = root.appendingPathComponent("projects", isDirectory: true)
+      let generations = projects.appendingPathComponent(".generations", isDirectory: true)
+        .appendingPathComponent(key, isDirectory: true)
+      let firstEffects = generations.appendingPathComponent(
+        "\(firstReceipt.generation).effects.json")
+      let firstMarker = generations.appendingPathComponent(
+        "\(firstReceipt.generation).effects-applied")
+      let secondEffects = generations.appendingPathComponent(
+        "\(secondReceipt.generation).effects.json")
+      try Data().write(to: firstMarker, options: .atomic)
+
+      let stage: EffectCompactionStage
+      switch faultIndex {
+      case 0:
+        stage = .beforeManifestWrite
+      case 1:
+        stage = .duringTemporaryWrite
+      case 2:
+        stage = .beforeTemporarySync
+      case 3:
+        stage = .beforeManifestReplace
+      case 4:
+        stage = .afterManifestSwitch
+      case 5:
+        stage = .beforePruneEffectJournal(firstReceipt.generation)
+      default:
+        stage = .beforePruneAppliedMarker(firstReceipt.generation)
+      }
+      let failure = EffectCompactionFailure(target: stage)
+      let faulted = ProjectPersistence(
+        baseDirectory: root,
+        platformPaths: CurrentPlatformPaths.value,
+        beforeEffectCompactionStage: { try failure.check($0) })
+      XCTAssertEqual(faulted.loadPendingGraphEffects().map(\.plan), [secondPlan])
+      XCTAssertTrue(failure.wasTriggered())
+      XCTAssertTrue(FileManager.default.fileExists(atPath: secondEffects.path))
+      if faultIndex <= 5 {
+        XCTAssertTrue(FileManager.default.fileExists(atPath: firstEffects.path))
+      } else {
+        XCTAssertFalse(FileManager.default.fileExists(atPath: firstEffects.path))
+      }
+      XCTAssertTrue(FileManager.default.fileExists(atPath: firstMarker.path))
+
+      if faultIndex == 4 {
+        try? FileManager.default.removeItem(at: firstEffects)
+      }
+      let restarted = ProjectPersistence(baseDirectory: root)
+      XCTAssertEqual(restarted.loadPendingGraphEffects().map(\.plan), [secondPlan])
+      XCTAssertEqual(restarted.loadPendingGraphEffects().map(\.plan), [secondPlan])
+      XCTAssertFalse(FileManager.default.fileExists(atPath: firstEffects.path))
+      XCTAssertFalse(FileManager.default.fileExists(atPath: firstMarker.path))
+      XCTAssertTrue(FileManager.default.fileExists(atPath: secondEffects.path))
+      let temporaryManifests =
+        (try? FileManager.default.contentsOfDirectory(
+          at: projects, includingPropertiesForKeys: nil))?.filter {
+          $0.lastPathComponent.hasSuffix(".tmp")
+        } ?? []
+      XCTAssertTrue(temporaryManifests.isEmpty)
     }
   }
 

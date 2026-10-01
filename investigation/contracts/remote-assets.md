@@ -191,8 +191,11 @@ migrate on the next save. The chain is capped at 64 generations, 2,048 operation
 graph publication instead of dropping recovery authority or accumulating unbounded
 files. Whole-project deletion atomically selects a deletion tombstone before effects or
 cleanup run. The tombstone remains while any authorized journal is pending. Applied
-markers are durable before manifest compaction; startup repairs a crash between those
-steps and prunes only generations that are neither current nor pending.
+markers are durable before manifest compaction. Startup writes and fsyncs a replacement
+manifest with applied generations removed, atomically switches it, and only then prunes
+the exact no-longer-authorized effect journals and markers. A pre-switch failure leaves
+the old manifest and marker authoritative; a post-switch interruption leaves harmless
+unreferenced files that the next startup removes idempotently.
 
 Before each manifest switch, every carried journal is reconciled against the projected
 authoritative graph. A node incarnation is `(UUID, createdAt)`: constructive session,

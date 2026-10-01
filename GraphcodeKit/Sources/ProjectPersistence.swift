@@ -1,6 +1,10 @@
 import Foundation
 import MailroomKit
 
+#if os(Windows)
+  import WinSDK
+#endif
+
 public enum GraphPersistenceStage: String, Sendable {
   case beforeGraphWrite
   case afterGraphWrite
@@ -8,6 +12,16 @@ public enum GraphPersistenceStage: String, Sendable {
   case afterEffectJournalWrite
   case beforeManifestSwitch
   case afterManifestSwitch
+}
+
+public enum EffectCompactionStage: Equatable, Sendable {
+  case beforeManifestWrite
+  case duringTemporaryWrite
+  case beforeTemporarySync
+  case beforeManifestReplace
+  case afterManifestSwitch
+  case beforePruneEffectJournal(String)
+  case beforePruneAppliedMarker(String)
 }
 
 public struct GraphPersistenceReceipt: Equatable, Sendable {
@@ -78,6 +92,7 @@ public struct ProjectPersistence: Sendable {
   private let beforeGraphTransactionStage:
     @Sendable (LoopGraph, GraphPersistenceStage) throws -> Void
   private let beforeRelocationGenerationCleanup: @Sendable (URL) throws -> Void
+  private let beforeEffectCompactionStage: @Sendable (EffectCompactionStage) throws -> Void
   private let pendingEffectLimits: PendingGraphEffectLimits
 
   public init(baseDirectory: URL) {
@@ -94,6 +109,8 @@ public struct ProjectPersistence: Sendable {
       Void = { _, _ in },
     beforeRelocationGenerationCleanup:
       @escaping @Sendable (URL) throws -> Void = { _ in },
+    beforeEffectCompactionStage:
+      @escaping @Sendable (EffectCompactionStage) throws -> Void = { _ in },
     pendingEffectLimits: PendingGraphEffectLimits = .default
   ) {
     projectsDirectory = baseDirectory.appendingPathComponent("projects", isDirectory: true)
@@ -106,6 +123,7 @@ public struct ProjectPersistence: Sendable {
     self.beforeGraphDelete = beforeGraphDelete
     self.beforeGraphTransactionStage = beforeGraphTransactionStage
     self.beforeRelocationGenerationCleanup = beforeRelocationGenerationCleanup
+    self.beforeEffectCompactionStage = beforeEffectCompactionStage
     self.pendingEffectLimits = pendingEffectLimits
     try? FileManager.default.createDirectory(
       at: projectsDirectory, withIntermediateDirectories: true)
@@ -696,14 +714,23 @@ public struct ProjectPersistence: Sendable {
       do {
         let manifest = loadManifest(path: path)
         let journals = try loadAuthorizedEffectJournals(path: path, manifest: manifest)
-        try compactAppliedEffectAuthorization(
-          path: path, manifest: manifest, journals: journals)
         for journal in journals {
           pending.append(
             PendingGraphEffects(
               receipt: GraphPersistenceReceipt(
                 projectPath: path, generation: journal.generation),
               plan: journal.envelope.plan))
+        }
+        do {
+          try compactAppliedEffectAuthorization(
+            path: path, manifest: manifest, journals: journals)
+        } catch {
+          DaemonLog.shared.record(
+            "graph-effects-compaction-failure",
+            [
+              ("project", directory.lastPathComponent),
+              ("error", String(describing: error)),
+            ])
         }
       } catch {
         DaemonLog.shared.record(
@@ -772,28 +799,128 @@ public struct ProjectPersistence: Sendable {
     let authorized = try pendingEffectGenerationIDs(path: path, manifest: manifest)
     let remaining = journals.map(\.generation)
     let url = manifestURL(forProjectPath: path)
-    pruneAppliedGenerations(
-      path: path,
-      keeping: manifest.generation,
-      pendingEffects: Set(remaining))
+    let manifestNeedsUpdate = authorized != remaining || manifest.version != 2
+    if manifestNeedsUpdate {
+      manifest.version = 2
+      manifest.pendingEffectGenerations = remaining
+      try writeCompactedManifestDurably(manifest, to: url)
+    }
+    try pruneUnauthorizedEffectFiles(path: path, authorized: Set(remaining))
     if manifest.deleted == true, remaining.isEmpty {
-      if authorized != remaining || manifest.version != 2 {
-        manifest.version = 2
-        manifest.pendingEffectGenerations = []
-        try JSONEncoder().encode(manifest).write(to: url, options: .atomic)
+      if FileManager.default.fileExists(atPath: url.path) {
+        try FileManager.default.removeItem(at: url)
       }
-      try FileManager.default.removeItem(at: url)
-      pruneAppliedGenerations(path: path, keeping: nil, pendingEffects: [])
       return
     }
-    guard authorized != remaining || manifest.version != 2 else { return }
-    manifest.version = 2
-    manifest.pendingEffectGenerations = remaining
-    try JSONEncoder().encode(manifest).write(to: url, options: .atomic)
-    pruneAppliedGenerations(
-      path: path,
-      keeping: manifest.generation,
-      pendingEffects: Set(remaining))
+  }
+
+  private func writeCompactedManifestDurably(
+    _ manifest: GenerationManifest,
+    to url: URL
+  ) throws {
+    try beforeEffectCompactionStage(.beforeManifestWrite)
+    let data = try JSONEncoder().encode(manifest)
+    let temporary = url.deletingLastPathComponent().appendingPathComponent(
+      ".\(url.lastPathComponent).\(UUID().uuidString).tmp")
+    let fileManager = FileManager.default
+    guard fileManager.createFile(atPath: temporary.path, contents: nil) else {
+      throw CocoaError(.fileWriteUnknown)
+    }
+    defer {
+      if fileManager.fileExists(atPath: temporary.path) {
+        try? fileManager.removeItem(at: temporary)
+      }
+    }
+    let handle = try FileHandle(forWritingTo: temporary)
+    do {
+      let midpoint = data.count / 2
+      try handle.write(contentsOf: Data(data.prefix(midpoint)))
+      try beforeEffectCompactionStage(.duringTemporaryWrite)
+      try handle.write(contentsOf: Data(data.suffix(from: midpoint)))
+      try beforeEffectCompactionStage(.beforeTemporarySync)
+      try handle.synchronize()
+      try handle.close()
+    } catch {
+      try? handle.close()
+      throw error
+    }
+    try beforeEffectCompactionStage(.beforeManifestReplace)
+    try replaceManifestAtomically(at: url, with: temporary)
+    let committed = try FileHandle(forWritingTo: url)
+    do {
+      try committed.synchronize()
+      try committed.close()
+    } catch {
+      try? committed.close()
+      throw error
+    }
+    try beforeEffectCompactionStage(.afterManifestSwitch)
+  }
+
+  private func replaceManifestAtomically(at destination: URL, with source: URL) throws {
+    #if os(Windows)
+      var sourcePath = Array(source.path.utf16)
+      sourcePath.append(0)
+      var destinationPath = Array(destination.path.utf16)
+      destinationPath.append(0)
+      let replaced = sourcePath.withUnsafeBufferPointer { sourceBuffer in
+        destinationPath.withUnsafeBufferPointer { destinationBuffer in
+          MoveFileExW(
+            sourceBuffer.baseAddress,
+            destinationBuffer.baseAddress,
+            DWORD(MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
+        }
+      }
+      guard replaced else {
+        throw NSError(
+          domain: "Graphcode.ProjectPersistence.Win32",
+          code: Int(GetLastError()))
+      }
+    #else
+      _ = try FileManager.default.replaceItemAt(destination, withItemAt: source)
+    #endif
+  }
+
+  private func pruneUnauthorizedEffectFiles(
+    path: String,
+    authorized: Set<String>
+  ) throws {
+    let directory = generationDirectory(forProjectPath: path)
+    guard
+      let files = try? FileManager.default.contentsOfDirectory(
+        at: directory, includingPropertiesForKeys: nil)
+    else { return }
+    let generations = Set(
+      files.compactMap { url -> String? in
+        let name = url.lastPathComponent
+        let suffix: String
+        if name.hasSuffix(".effects.json") {
+          suffix = ".effects.json"
+        } else if name.hasSuffix(".effects-applied") {
+          suffix = ".effects-applied"
+        } else {
+          return nil
+        }
+        let value = String(name.dropLast(suffix.count))
+        return UUID(uuidString: value) == nil ? nil : value
+      })
+    for generation in generations.sorted() where !authorized.contains(generation) {
+      try beforeEffectCompactionStage(.beforePruneEffectJournal(generation))
+      try removeEffectFileIfPresent(
+        generationEffectsURL(path: path, generation: generation))
+      try beforeEffectCompactionStage(.beforePruneAppliedMarker(generation))
+      try removeEffectFileIfPresent(
+        generationEffectsAppliedURL(path: path, generation: generation))
+    }
+  }
+
+  private func removeEffectFileIfPresent(_ url: URL) throws {
+    guard FileManager.default.fileExists(atPath: url.path) else { return }
+    do {
+      try FileManager.default.removeItem(at: url)
+    } catch let error as CocoaError where error.code == .fileNoSuchFile {
+      return
+    }
   }
 
   /// Throws away a project's loops for good — the "Delete Loops…" half of the sidebar's
