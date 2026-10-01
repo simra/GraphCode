@@ -1122,7 +1122,9 @@ final class WindowsDaemonTests: XCTestCase {
       let root = FileManager.default.temporaryDirectory
         .appendingPathComponent("graphcode-daemon-remote-\(UUID().uuidString)", isDirectory: true)
       defer { try? FileManager.default.removeItem(at: root) }
-      let registry = ProjectRegistry(persistenceDirectory: root)
+      let registry = ProjectRegistry(
+        persistenceDirectory: root,
+        durableSessionStatus: { _, _ in .absent })
       let connection = RecordingDaemonConnection()
       let connectionID = connection.id
       let projectPath = "ssh://alice@[::1]:2200/work/remote-project"

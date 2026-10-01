@@ -190,15 +190,24 @@ acknowledged, then are removed. Existing split graph/Mailroom files migrate on l
 After durable graph success, the host executes the effect journal and idempotently
 publishes retained content before the catalog drops the lease. Session launch and
 termination effects carry stable identifiers and are awaited through throwing backend
-operations. Live-session probes make replay idempotent: an already-live launch and an
-already-absent termination are complete, while a launcher, host, cancellation, or
-post-operation verification failure leaves the generation journal pending. The applied
-marker is written only after every effect completes. A committed graph with pending
-effects is still broadcast and entered into replay as authoritative, but the initiating
-command receives an explicit pending-effects error; attachment leases are finalized and
-deletion cleanup is activated according to that committed graph rather than being
-mistaken for a pre-commit rejection. A restart between those steps uses the persisted
-graph as authority. Existing retained content is verified and never removed by rollback.
+operations. Durable remote probes are tri-state: confirmed present, confirmed absent, or
+throwing unreachable/transport failure, with live and exited husks distinguished inside
+the present state. A failed remote `zmx ls` is unreachable, never absent. Only confirmed
+absence completes termination; live or exited presence invokes kill and requires another
+confirmed-absence probe. Ensure effects accept only live status, so an exited husk is
+relaunched. A lost kill response, timeout, authentication failure, or unreachable host
+leaves the journal pending even if the process may have stopped, so restart can finish
+without guessing or duplicating a confirmed kill. Legacy non-durable Boolean probes
+remain best-effort.
+Live-session probes make replay idempotent: an already-live launch and an already-absent
+termination are complete, while a launcher, host, cancellation, or post-operation
+verification failure leaves the generation journal pending. The applied marker is written
+only after every effect completes. A committed graph with pending effects is still
+broadcast and entered into replay as authoritative, but the initiating command receives
+an explicit pending-effects error; attachment leases are finalized and deletion cleanup
+is activated according to that committed graph rather than being mistaken for a
+pre-commit rejection. A restart between those steps uses the persisted graph as
+authority. Existing retained content is verified and never removed by rollback.
 Successful creation removes only unselected draft files. Cleanup failures release draft
 accounting only after durable cleanup ownership exists and never delete pre-existing
 files or an existing node directory.
@@ -207,10 +216,16 @@ Project relocation writes the destination generation and support sidecars before
 persisting a `supportCommitted` cleanup intent. It then removes only the exact source
 persistence key: bounded known graph, Mailroom, effect-journal, applied-marker, manifest,
 and legacy files are validated without following links and unlinked individually before
-the empty source generation directory is removed. Source and destination persistence-key
-aliases are rejected. A crash before or after cleanup replays the same idempotent intent;
-once `supportCommitted` is durable, recovery never rewrites or removes the authoritative
-destination generation.
+the empty source generation directory is removed. Generation cleanup holds a validated
+parent handle and source-directory handle, opens and deletes children relative to that
+handle, rechecks that the parent's current source entry has the same file identity before
+mutation and final directory deletion, and independently pins the destination generation
+without delete sharing. Cleanup refuses if the source and destination identities match,
+either entry moves, or a pathname is swapped for a directory, symlink, junction, or the
+destination generation. It never re-resolves child paths after validation. Source and
+destination persistence-key aliases are rejected. A crash or refused race cleanup
+preserves `supportCommitted` for retry; once that intent is durable, recovery never
+rewrites or removes the authoritative destination generation.
 
 Every graph mutation is previewed to compute the complete before/after node-ID removal
 delta across arbitrarily nested subgraphs and spawned descendants. Descriptor-bound

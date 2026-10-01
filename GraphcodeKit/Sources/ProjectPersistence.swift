@@ -41,6 +41,7 @@ public struct ProjectPersistence: Sendable {
   private let beforeGraphDelete: @Sendable (String) throws -> Void
   private let beforeGraphTransactionStage:
     @Sendable (LoopGraph, GraphPersistenceStage) throws -> Void
+  private let beforeRelocationGenerationCleanup: @Sendable (URL) throws -> Void
 
   public init(baseDirectory: URL) {
     self.init(baseDirectory: baseDirectory, platformPaths: CurrentPlatformPaths.value)
@@ -53,7 +54,9 @@ public struct ProjectPersistence: Sendable {
     beforeGraphDelete: @escaping @Sendable (String) throws -> Void = { _ in },
     beforeGraphTransactionStage:
       @escaping @Sendable (LoopGraph, GraphPersistenceStage) throws ->
-      Void = { _, _ in }
+      Void = { _, _ in },
+    beforeRelocationGenerationCleanup:
+      @escaping @Sendable (URL) throws -> Void = { _ in }
   ) {
     projectsDirectory = baseDirectory.appendingPathComponent("projects", isDirectory: true)
     generationsDirectory = projectsDirectory.appendingPathComponent(
@@ -64,6 +67,7 @@ public struct ProjectPersistence: Sendable {
     self.beforeGraphWrite = beforeGraphWrite
     self.beforeGraphDelete = beforeGraphDelete
     self.beforeGraphTransactionStage = beforeGraphTransactionStage
+    self.beforeRelocationGenerationCleanup = beforeRelocationGenerationCleanup
     try? FileManager.default.createDirectory(
       at: projectsDirectory, withIntermediateDirectories: true)
     try? FileManager.default.createDirectory(
@@ -713,7 +717,8 @@ public struct ProjectPersistence: Sendable {
         try removeRelocationFileIfPresent(url, maximumBytes: maximumBytes)
       }
       try removeRelocationGenerationDirectoryIfPresent(
-        generationDirectory(forProjectPath: sourcePath))
+        generationDirectory(forProjectPath: sourcePath),
+        destination: generationDirectory(forProjectPath: destinationPath))
       Self.roomDigests.forget(mailroomURL(forProjectPath: sourcePath).path)
     }
   }
@@ -724,27 +729,27 @@ public struct ProjectPersistence: Sendable {
     try FileManager.default.removeItem(at: url)
   }
 
-  private func removeRelocationGenerationDirectoryIfPresent(_ directory: URL) throws {
+  private func removeRelocationGenerationDirectoryIfPresent(
+    _ directory: URL, destination: URL
+  ) throws {
     guard FileManager.default.fileExists(atPath: directory.path) else { return }
-    try SafeLocalFile.validateDirectory(directory)
-    let files = try FileManager.default.contentsOfDirectory(
-      at: directory,
-      includingPropertiesForKeys: [.isRegularFileKey, .isSymbolicLinkKey],
-      options: [])
-    guard files.count <= 4_096 else { throw ProjectRelocationError.recoveryFailed }
-    for file in files {
-      guard file.deletingLastPathComponent().standardizedFileURL == directory.standardizedFileURL,
-        let values = try? file.resourceValues(
-          forKeys: [.isRegularFileKey, .isSymbolicLinkKey]),
-        values.isRegularFile == true, values.isSymbolicLink != true,
-        isGenerationFileName(file.lastPathComponent)
-      else {
-        throw ProjectRelocationError.recoveryFailed
-      }
-      _ = try SafeLocalFile.read(file, maximumBytes: 64 * 1_024 * 1_024)
-      try FileManager.default.removeItem(at: file)
+    let stableDestination = try StableRelocationGenerationDirectory(
+      parentPath: destination.deletingLastPathComponent().path,
+      entryName: destination.lastPathComponent,
+      deletable: false)
+    let stableSource = try StableRelocationGenerationDirectory(
+      parentPath: directory.deletingLastPathComponent().path,
+      entryName: directory.lastPathComponent,
+      deletable: true)
+    guard !stableSource.hasSameIdentity(as: stableDestination) else {
+      throw ProjectRelocationError.sourceIdentityChanged
     }
-    try FileManager.default.removeItem(at: directory)
+    try beforeRelocationGenerationCleanup(directory)
+    try stableDestination.ensureCurrentEntry()
+    try stableSource.remove(
+      expectedName: isGenerationFileName,
+      maximumFileBytes: UInt64(64 * 1_024 * 1_024))
+    try stableDestination.ensureCurrentEntry()
   }
 
   private func isGenerationFileName(_ name: String) -> Bool {

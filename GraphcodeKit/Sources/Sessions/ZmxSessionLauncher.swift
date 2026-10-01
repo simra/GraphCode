@@ -729,10 +729,39 @@ public enum ZmxSessionLauncher {
   /// keystroke can reach.
   static func sessionExists(_ node: LoopNode, projectPath: String? = nil) async -> Bool {
     if let projectPath, let remote = RemoteProjectLocation.parse(projectPath: projectPath) {
-      return await runRemoteRetrying(
-        remoteStatusInvocation(forNode: node, label: "presence", at: remote))
+      switch await remoteStatus(of: node, label: "presence", at: remote) {
+      case .live: return true
+      case .unreachable, .absent, .exited: return false
+      }
     }
     return await sessionTaskState(node) == .alive
+  }
+
+  static func sessionStatus(
+    _ node: LoopNode, projectPath: String? = nil
+  ) async throws -> CLISessionStatus {
+    if let projectPath, let remote = RemoteProjectLocation.parse(projectPath: projectPath) {
+      switch await remoteStatus(of: node, label: "presence", at: remote) {
+      case .unreachable:
+        throw CLISessionError.unavailable("remote session status is unreachable")
+      case .absent:
+        return .absent
+      case .exited:
+        return .exited
+      case .live:
+        return .live
+      }
+    }
+    switch await sessionTaskState(node) {
+    case .alive:
+      return .live
+    case .exited:
+      return .exited
+    case .absent:
+      return .absent
+    case .unknown:
+      throw CLISessionError.unavailable("local session status is unavailable")
+    }
   }
 
   /// What is actually inside the node's zmx session: a running task (`alive`), a
@@ -944,14 +973,35 @@ public enum ZmxSessionLauncher {
   public static func terminateResult(
     _ node: LoopNode, projectPath: String? = nil
   ) async -> Result<Void, CLISessionError> {
-    guard await sessionExists(node, projectPath: projectPath) else {
+    let initial: CLISessionStatus
+    do {
+      initial = try await sessionStatus(node, projectPath: projectPath)
+    } catch let error as CLISessionError {
+      return .failure(error)
+    } catch {
+      return .failure(.failed("session status failed: \(error)"))
+    }
+    guard initial.isPresent else {
       SessionIDStore.remove(forNodeID: node.id)
       return .success(())
     }
-    await kill(node, projectPath: projectPath)
-    guard !(await sessionExists(node, projectPath: projectPath)) else {
-      return .failure(.failed("zmx session remained after terminate"))
+    if let projectPath, let remote = RemoteProjectLocation.parse(projectPath: projectPath) {
+      guard await runRemoteRetrying(remoteKillInvocation(forNode: node, at: remote)) else {
+        return .failure(.unavailable("remote session termination was not acknowledged"))
+      }
+    } else {
+      await kill(node, projectPath: projectPath)
     }
+    do {
+      guard try await sessionStatus(node, projectPath: projectPath) == .absent else {
+        return .failure(.failed("zmx session remained after terminate"))
+      }
+    } catch let error as CLISessionError {
+      return .failure(error)
+    } catch {
+      return .failure(.failed("post-terminate session status failed: \(error)"))
+    }
+    SessionIDStore.remove(forNodeID: node.id)
     return .success(())
   }
 
@@ -2069,13 +2119,16 @@ public enum ZmxSessionLauncher {
     // interprets a `\t` escape, and the two characters would match nothing — every
     // probe would read an existing session as absent.
     let script =
-      "gc_row=$(\(check) 2>/dev/null | grep -F \(quotedCommand(["name=\(name)\t"])) | head -1); "
+      "gc_list=$(\(check) 2>/dev/null); gc_status=$?; "
+      + "if [ \"$gc_status\" -ne 0 ]; then echo '\(remoteProbeMarker) unreachable'; "
+      + "else gc_row=$(printf '%s\\n' \"$gc_list\" | grep -F "
+      + "\(quotedCommand(["name=\(name)\t"])) | head -1); "
       + "if [ -z \"$gc_row\" ] || printf '%s' \"$gc_row\" | grep -q $'\\terr='; then "
       + "echo '\(remoteProbeMarker) absent'; "
       + "elif printf '%s' \"$gc_row\" | grep -q $'\\tended='; then "
       + "gc_done=$(printf '%s' \"$gc_row\" | sed -n 's/.*\\texit_code=\\([0-9][0-9]*\\).*/\\1/p'); "
       + "echo \"\(remoteProbeMarker) exited ${gc_done:-1}\"; "
-      + "else echo \"\(remoteProbeMarker) live $(\(read) 2>/dev/null)\"; fi"
+      + "else echo \"\(remoteProbeMarker) live $(\(read) 2>/dev/null)\"; fi; fi"
     return location.sshInvocation(remoteCommand: location.remoteLoginShellCommand(script))
   }
 

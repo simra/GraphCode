@@ -11,6 +11,16 @@ public enum CLISessionStartOutcome: Equatable, Sendable {
   case started
 }
 
+public enum CLISessionStatus: Equatable, Sendable {
+  case live
+  case exited
+  case absent
+
+  public var isPresent: Bool {
+    self != .absent
+  }
+}
+
 /// The abstraction over Claude Code, Copilot CLI, and Codex —
 /// docs/04-cli-backends.md#clisessionbackend-protocol.
 ///
@@ -66,6 +76,7 @@ public struct CLISessionBackend: Sendable {
     @Sendable (LoopNode, String?) async -> Result<CLISessionStartOutcome, CLISessionError>
   public var terminateResult: @Sendable (LoopNode, String?) async -> Result<Void, CLISessionError>
   public var exists: @Sendable (LoopNode, String?) async -> Bool
+  public var status: @Sendable (LoopNode, String?) async throws -> CLISessionStatus
   public var enumerate: @Sendable () async -> [UUID]
   /// The beats this session has narrated, or `nil` when the backend has no transcript to
   /// read, the loop is remote, or the human hasn't switched the producer on. Folded into
@@ -88,6 +99,7 @@ public struct CLISessionBackend: Sendable {
     )? = nil,
     terminateResult: (@Sendable (LoopNode, String?) async -> Result<Void, CLISessionError>)? = nil,
     exists: (@Sendable (LoopNode, String?) async -> Bool)? = nil,
+    status: (@Sendable (LoopNode, String?) async throws -> CLISessionStatus)? = nil,
     enumerate: (@Sendable () async -> [UUID])? = nil
   ) {
     self.kind = kind
@@ -108,7 +120,12 @@ public struct CLISessionBackend: Sendable {
         await terminate(node, path)
         return .success(())
       }
-    self.exists = exists ?? { _, _ in false }
+    let resolvedExists = exists ?? { _, _ in false }
+    self.exists = resolvedExists
+    self.status =
+      status ?? { node, path in
+        await resolvedExists(node, path) ? .live : .absent
+      }
     self.enumerate = enumerate ?? { [] }
     self.summary = summary
   }
@@ -227,6 +244,9 @@ extension CLISessionBackend {
       exists: { node, projectPath in
         await ZmxSessionLauncher.sessionExists(node, projectPath: projectPath)
       },
+      status: { node, projectPath in
+        try await ZmxSessionLauncher.sessionStatus(node, projectPath: projectPath)
+      },
       enumerate: { await ZmxSessionLauncher.enumerateSessionIDs() }
     )
   }
@@ -260,7 +280,9 @@ extension CLISessionBackend {
       usage: { _, _ in nil },
       startResult: { _, _ in .failure(.unavailable("backend is not spiked")) },
       terminateResult: { _, _ in .success(()) },
-      exists: { _, _ in false }, enumerate: { [] }
+      exists: { _, _ in false },
+      status: { _, _ in .absent },
+      enumerate: { [] }
     )
   }
 

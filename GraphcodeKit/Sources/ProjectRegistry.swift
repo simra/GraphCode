@@ -209,6 +209,8 @@ public actor ProjectRegistry {
   private let startNodeSession:
     (@Sendable (LoopNode, String?) async -> Result<CLISessionStartOutcome, CLISessionError>)?
   private let nodeSessionExists: (@Sendable (LoopNode, String?) async -> Bool)?
+  private let durableSessionStatus:
+    (@Sendable (LoopNode, String?) async throws -> CLISessionStatus)?
   private let findMissingProvider: (@Sendable (LoopNode, String?) async -> LaunchFailure?)?
   private let startQuickChat:
     (@Sendable (LoopNode, String?) async -> Result<CLISessionStartOutcome, CLISessionError>)?
@@ -356,10 +358,12 @@ public actor ProjectRegistry {
     guard sessionLaunchBarrier.isCurrent(token) else {
       throw CLISessionError.unavailable("session launch was superseded")
     }
-    if await nodeSessionExists?(copy, projectPath) == true { return }
+    if try await durableSessionStatus?(copy, projectPath) == .live { return }
     try await launch(copy, projectPath)
     try Task.checkCancellation()
-    if let nodeSessionExists, await !nodeSessionExists(copy, projectPath) {
+    if let durableSessionStatus,
+      try await durableSessionStatus(copy, projectPath) != .live
+    {
       throw CLISessionError.failed(
         "session effect \(effectID.uuidString) completed without a live session")
     }
@@ -372,12 +376,17 @@ public actor ProjectRegistry {
     terminate: @escaping @Sendable (LoopNode, String?) async throws -> Void
   ) async throws {
     try Task.checkCancellation()
-    if await nodeSessionExists?(node, projectPath) == false { return }
+    if try await durableSessionStatus?(node, projectPath) == .absent { return }
     try await terminate(node, projectPath)
     try Task.checkCancellation()
-    if let nodeSessionExists, await nodeSessionExists(node, projectPath) {
-      throw CLISessionError.failed(
-        "session effect \(effectID.uuidString) completed while the session remained live")
+    if let durableSessionStatus {
+      switch try await durableSessionStatus(node, projectPath) {
+      case .absent:
+        return
+      case .live, .exited:
+        throw CLISessionError.failed(
+          "session effect \(effectID.uuidString) completed while the session remained live")
+      }
     }
   }
 
@@ -426,6 +435,9 @@ public actor ProjectRegistry {
       @Sendable (LoopNode, String?) async -> Result<CLISessionStartOutcome, CLISessionError>
     )? = nil,
     nodeSessionExists: (@Sendable (LoopNode, String?) async -> Bool)? = nil,
+    durableSessionStatus: (
+      @Sendable (LoopNode, String?) async throws -> CLISessionStatus
+    )? = nil,
     findMissingProvider: (@Sendable (LoopNode, String?) async -> LaunchFailure?)? = nil,
     evaluatePredicate: (@Sendable (ShellPredicate) async -> Bool)? = ShellPredicateEvaluator
       .evaluate,
@@ -510,6 +522,17 @@ public actor ProjectRegistry {
       nodeSessionExists ?? { node, path in
         await CLISessionBackend.backend(for: node).exists(node, path)
       }
+    if let durableSessionStatus {
+      self.durableSessionStatus = durableSessionStatus
+    } else if let nodeSessionExists {
+      self.durableSessionStatus = { node, path in
+        await nodeSessionExists(node, path) ? .live : .absent
+      }
+    } else {
+      self.durableSessionStatus = { node, path in
+        try await CLISessionBackend.backend(for: node).status(node, path)
+      }
+    }
     self.findMissingProvider =
       findMissingProvider ?? { node, path in
         await ProviderPath.missingProvider(for: node, projectPath: path)

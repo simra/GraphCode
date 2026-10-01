@@ -19,6 +19,30 @@ private final class RelocationTestConnection: @unchecked Sendable, DaemonConnect
     lock.withLock { sent }
   }
 }
+
+private final class RelocationCleanupSwap: @unchecked Sendable {
+  private let lock = NSLock()
+  private var pending = true
+
+  func take() -> Bool {
+    lock.withLock {
+      guard pending else { return false }
+      pending = false
+      return true
+    }
+  }
+}
+
+private func loadGraphRetryingSharingViolation(
+  _ persistence: ProjectPersistence, path: String
+) -> LoopGraph? {
+  for _ in 0..<100 {
+    if let graph = persistence.loadGraph(path: path) { return graph }
+    Thread.sleep(forTimeInterval: 0.01)
+  }
+  return nil
+}
+
 @Suite
 struct ProjectRelocationTests {
   private func fixture() throws -> (root: URL, support: URL, source: URL, destination: URL) {
@@ -44,6 +68,23 @@ struct ProjectRelocationTests {
     return support.appendingPathComponent("projects", isDirectory: true)
       .appendingPathComponent(".generations", isDirectory: true)
       .appendingPathComponent(key, isDirectory: true)
+  }
+
+  private func createJunction(at link: URL, pointingTo target: URL) throws {
+    let process = Process()
+    process.executableURL = URL(
+      fileURLWithPath: "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe")
+    process.arguments = [
+      "-NoProfile", "-NonInteractive", "-Command",
+      "New-Item -ItemType Junction -Path '\(link.path)' -Target '\(target.path)' | Out-Null",
+    ]
+    process.standardOutput = Pipe()
+    process.standardError = Pipe()
+    try process.run()
+    process.waitUntilExit()
+    guard process.terminationStatus == 0 else {
+      throw ProjectRelocationError.preflightFailed
+    }
   }
 
   @Test
@@ -147,7 +188,7 @@ struct ProjectRelocationTests {
         graph: graph,
         persistence: persistence)
       #expect(result.recoveryRequired)
-      #expect(persistence.loadGraph(path: fixture.destination.path) != nil)
+      #expect(loadGraphRetryingSharingViolation(persistence, path: fixture.destination.path) != nil)
       #expect(
         FileManager.default.fileExists(atPath: sourceGenerations.path)
           == (faultPoint == .beforeGenerationCleanup))
@@ -163,6 +204,190 @@ struct ProjectRelocationTests {
       #expect(persistence.loadGraph(path: fixture.destination.path) != nil)
       #expect(recovery.recoverPending(persistence: persistence).isEmpty)
     }
+  }
+
+  @Test
+  func relocationGenerationCleanupRejectsReplacementRaceAndRetries() throws {
+    let fixture = try fixture()
+    defer { try? FileManager.default.removeItem(at: fixture.root) }
+    let paths = WindowsPlatformPaths(homeDirectory: fixture.root)
+    let sourceGenerations = generationDirectory(
+      support: fixture.support, projectPath: fixture.source.path, home: fixture.root)
+    let displaced = sourceGenerations.deletingLastPathComponent()
+      .appendingPathComponent("displaced-\(UUID())", isDirectory: true)
+    let swap = RelocationCleanupSwap()
+    let persistence = ProjectPersistence(
+      baseDirectory: fixture.support,
+      platformPaths: paths,
+      beforeRelocationGenerationCleanup: { directory in
+        guard swap.take() else { return }
+        try FileManager.default.moveItem(at: directory, to: displaced)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+      })
+    let graph = LoopGraph(
+      project: ProjectRef(path: fixture.source.path, name: "source", metadata: .local),
+      nodes: [LoopNode(id: UUID(), title: "Loop", loopType: .turnBased)])
+    try persistence.saveGraphAcknowledged(graph)
+    let coordinator = ProjectRelocationCoordinator(
+      supportDirectory: fixture.support, platformPaths: paths)
+    let plan = try coordinator.prepare(
+      sourcePath: fixture.source.path,
+      destinationPath: fixture.destination.path,
+      graphRevision: 0,
+      persistence: persistence)
+    let result = try coordinator.relocate(
+      ProjectRelocationRequest(
+        operationID: plan.operationID,
+        sourcePath: plan.sourcePath,
+        destinationPath: plan.destinationPath,
+        expectedSourceIdentity: plan.sourceIdentity,
+        expectedGraphRevision: plan.graphRevision),
+      graph: graph, persistence: persistence)
+
+    #expect(result.recoveryRequired)
+    #expect(!FileManager.default.fileExists(atPath: displaced.path))
+    #expect(FileManager.default.fileExists(atPath: sourceGenerations.path))
+    let destinationGenerations = generationDirectory(
+      support: fixture.support, projectPath: fixture.destination.path, home: fixture.root)
+    #expect(FileManager.default.fileExists(atPath: destinationGenerations.path))
+    #expect(persistence.loadGraph(path: fixture.destination.path) != nil)
+
+    let recoveredPersistence = ProjectPersistence(
+      baseDirectory: fixture.support, platformPaths: paths)
+    let statuses = ProjectRelocationCoordinator(
+      supportDirectory: fixture.support, platformPaths: paths
+    ).recoverPending(persistence: recoveredPersistence)
+    #expect(statuses.first?.disposition == .recovered)
+    #expect(!FileManager.default.fileExists(atPath: sourceGenerations.path))
+    #expect(FileManager.default.fileExists(atPath: destinationGenerations.path))
+    #expect(recoveredPersistence.loadGraph(path: fixture.destination.path) != nil)
+  }
+
+  @Test
+  func relocationGenerationCleanupRejectsJunctionIntermediateAndDestinationSubstitution()
+    throws
+  {
+    let fixture = try fixture()
+    defer { try? FileManager.default.removeItem(at: fixture.root) }
+    let paths = WindowsPlatformPaths(homeDirectory: fixture.root)
+    let persistence = ProjectPersistence(
+      baseDirectory: fixture.support, platformPaths: paths)
+    let sourceGraph = LoopGraph(
+      project: ProjectRef(path: fixture.source.path, name: "source", metadata: .local),
+      nodes: [LoopNode(id: UUID(), title: "Source", loopType: .turnBased)])
+    let destinationGraph = LoopGraph(
+      project: ProjectRef(path: fixture.destination.path, name: "destination", metadata: .local),
+      nodes: [LoopNode(id: UUID(), title: "Destination", loopType: .turnBased)])
+    try persistence.saveGraphAcknowledged(sourceGraph)
+    try persistence.saveGraphAcknowledged(destinationGraph)
+    let sourceGenerations = generationDirectory(
+      support: fixture.support, projectPath: fixture.source.path, home: fixture.root)
+    let destinationGenerations = generationDirectory(
+      support: fixture.support, projectPath: fixture.destination.path, home: fixture.root)
+    let displaced = sourceGenerations.deletingLastPathComponent()
+      .appendingPathComponent("displaced-\(UUID())", isDirectory: true)
+    try FileManager.default.moveItem(at: sourceGenerations, to: displaced)
+    try createJunction(at: sourceGenerations, pointingTo: destinationGenerations)
+
+    #expect(throws: ProjectRelocationError.self) {
+      try persistence.cleanupRelocatedProjectPersistence(
+        from: fixture.source.path, to: fixture.destination.path)
+    }
+    #expect(FileManager.default.fileExists(atPath: destinationGenerations.path))
+    #expect(persistence.loadGraph(path: fixture.destination.path) != nil)
+
+    #expect(FileManager.default.fileExists(atPath: displaced.path))
+    #expect(FileManager.default.fileExists(atPath: destinationGenerations.path))
+    #expect(persistence.loadGraph(path: fixture.destination.path) != nil)
+  }
+
+  @Test
+  func relocationGenerationCleanupRejectsDirectDestinationDirectorySubstitution() throws {
+    let fixture = try fixture()
+    defer { try? FileManager.default.removeItem(at: fixture.root) }
+    let paths = WindowsPlatformPaths(homeDirectory: fixture.root)
+    let persistence = ProjectPersistence(
+      baseDirectory: fixture.support, platformPaths: paths)
+    let sourceGraph = LoopGraph(
+      project: ProjectRef(path: fixture.source.path, name: "source", metadata: .local),
+      nodes: [LoopNode(id: UUID(), title: "Source", loopType: .turnBased)])
+    let destinationGraph = LoopGraph(
+      project: ProjectRef(path: fixture.destination.path, name: "destination", metadata: .local),
+      nodes: [LoopNode(id: UUID(), title: "Destination", loopType: .turnBased)])
+    try persistence.saveGraphAcknowledged(sourceGraph)
+    try persistence.saveGraphAcknowledged(destinationGraph)
+    let sourceGenerations = generationDirectory(
+      support: fixture.support, projectPath: fixture.source.path, home: fixture.root)
+    let destinationGenerations = generationDirectory(
+      support: fixture.support, projectPath: fixture.destination.path, home: fixture.root)
+    let displaced = sourceGenerations.deletingLastPathComponent()
+      .appendingPathComponent("displaced-\(UUID())", isDirectory: true)
+    try FileManager.default.moveItem(at: sourceGenerations, to: displaced)
+    try FileManager.default.moveItem(at: destinationGenerations, to: sourceGenerations)
+
+    #expect(throws: ProjectRelocationError.self) {
+      try persistence.cleanupRelocatedProjectPersistence(
+        from: fixture.source.path, to: fixture.destination.path)
+    }
+    #expect(FileManager.default.fileExists(atPath: sourceGenerations.path))
+    #expect(
+      try FileManager.default.contentsOfDirectory(
+        at: sourceGenerations, includingPropertiesForKeys: nil
+      ).contains(where: { $0.lastPathComponent.hasSuffix(".graph.json") }))
+
+    try FileManager.default.moveItem(at: sourceGenerations, to: destinationGenerations)
+    try FileManager.default.moveItem(at: displaced, to: sourceGenerations)
+    try persistence.cleanupRelocatedProjectPersistence(
+      from: fixture.source.path, to: fixture.destination.path)
+    #expect(!FileManager.default.fileExists(atPath: sourceGenerations.path))
+    #expect(FileManager.default.fileExists(atPath: destinationGenerations.path))
+    #expect(persistence.loadGraph(path: fixture.destination.path) != nil)
+  }
+
+  @Test
+  func relocationGenerationCleanupRejectsJunctionParentWithoutFollowingIt() throws {
+    let fixture = try fixture()
+    defer { try? FileManager.default.removeItem(at: fixture.root) }
+    let paths = WindowsPlatformPaths(homeDirectory: fixture.root)
+    let persistence = ProjectPersistence(
+      baseDirectory: fixture.support, platformPaths: paths)
+    let sourceGraph = LoopGraph(
+      project: ProjectRef(path: fixture.source.path, name: "source", metadata: .local),
+      nodes: [LoopNode(id: UUID(), title: "Source", loopType: .turnBased)])
+    let destinationGraph = LoopGraph(
+      project: ProjectRef(path: fixture.destination.path, name: "destination", metadata: .local),
+      nodes: [LoopNode(id: UUID(), title: "Destination", loopType: .turnBased)])
+    try persistence.saveGraphAcknowledged(sourceGraph)
+    try persistence.saveGraphAcknowledged(destinationGraph)
+    let sourceGenerations = generationDirectory(
+      support: fixture.support, projectPath: fixture.source.path, home: fixture.root)
+    let destinationGenerations = generationDirectory(
+      support: fixture.support, projectPath: fixture.destination.path, home: fixture.root)
+    let generationRoot = sourceGenerations.deletingLastPathComponent()
+    let displacedRoot = generationRoot.deletingLastPathComponent()
+      .appendingPathComponent("displaced-generations-\(UUID())", isDirectory: true)
+    try FileManager.default.moveItem(at: generationRoot, to: displacedRoot)
+    try createJunction(at: generationRoot, pointingTo: displacedRoot)
+
+    #expect(throws: ProjectRelocationError.self) {
+      try persistence.cleanupRelocatedProjectPersistence(
+        from: fixture.source.path, to: fixture.destination.path)
+    }
+    #expect(
+      FileManager.default.fileExists(
+        atPath: displacedRoot.appendingPathComponent(sourceGenerations.lastPathComponent).path))
+    #expect(
+      FileManager.default.fileExists(
+        atPath: displacedRoot.appendingPathComponent(destinationGenerations.lastPathComponent).path)
+    )
+
+    try FileManager.default.removeItem(at: generationRoot)
+    try FileManager.default.moveItem(at: displacedRoot, to: generationRoot)
+    try persistence.cleanupRelocatedProjectPersistence(
+      from: fixture.source.path, to: fixture.destination.path)
+    #expect(!FileManager.default.fileExists(atPath: sourceGenerations.path))
+    #expect(FileManager.default.fileExists(atPath: destinationGenerations.path))
+    #expect(persistence.loadGraph(path: fixture.destination.path) != nil)
   }
 
   @Test

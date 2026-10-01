@@ -221,6 +221,80 @@ private actor DurableSessionEffectHarness {
   }
 }
 
+private actor DurableRemoteTerminationHarness {
+  enum TerminationOutcome {
+    case success
+    case failure
+    case responseLostAfterStop
+  }
+
+  private var statuses: [Result<CLISessionStatus, CLISessionError>]
+  private var outcomes: [TerminationOutcome]
+  private var probes = 0
+  private var terminations = 0
+
+  init(
+    statuses: [Result<CLISessionStatus, CLISessionError>],
+    outcomes: [TerminationOutcome] = []
+  ) {
+    self.statuses = statuses
+    self.outcomes = outcomes
+  }
+
+  func status() throws -> CLISessionStatus {
+    probes += 1
+    guard !statuses.isEmpty else {
+      throw CLISessionError.unavailable("synthetic status sequence exhausted")
+    }
+    return try statuses.removeFirst().get()
+  }
+
+  func terminate() throws {
+    terminations += 1
+    let outcome = outcomes.isEmpty ? .success : outcomes.removeFirst()
+    switch outcome {
+    case .success:
+      return
+    case .failure:
+      throw CLISessionError.unavailable("synthetic remote kill outage")
+    case .responseLostAfterStop:
+      throw CLISessionError.unavailable("synthetic remote kill response lost")
+    }
+  }
+
+  func terminationAttempts() -> Int {
+    terminations
+  }
+
+  func statusAttempts() -> Int {
+    probes
+  }
+}
+
+private actor DurableSessionStatusHarness {
+  private var statuses: [CLISessionStatus]
+  private var launches = 0
+
+  init(statuses: [CLISessionStatus]) {
+    self.statuses = statuses
+  }
+
+  func status() throws -> CLISessionStatus {
+    guard !statuses.isEmpty else {
+      throw CLISessionError.unavailable("synthetic status sequence exhausted")
+    }
+    return statuses.removeFirst()
+  }
+
+  func launch() {
+    launches += 1
+  }
+
+  func launchAttempts() -> Int {
+    launches
+  }
+}
+
 final class RemoteAssetTests: XCTestCase {
   private actor Fixture {
     var documents: [String: [(origin: TemplateOrigin, fileName: String, content: String)]] = [:]
@@ -3011,6 +3085,7 @@ final class RemoteAssetTests: XCTestCase {
       for _ in 0..<200 where await harness.terminateAttempts(first.id) == 0 {
         try await Task.sleep(for: .milliseconds(10))
       }
+
       XCTAssertEqual(persistence.loadPendingGraphEffects().count, 1)
       await harness.releaseTermination()
       for _ in 0..<200 where await harness.terminateAttempts(second.id) == 0 {
@@ -3044,6 +3119,167 @@ final class RemoteAssetTests: XCTestCase {
       registry = nil
       _ = registry
     }
+  }
+
+  func testDurableRemoteTerminationRequiresConfirmedAbsenceAcrossTransportFailures()
+    async throws
+  {
+    struct Scenario {
+      var name: String
+      var initialStatuses: [Result<CLISessionStatus, CLISessionError>]
+      var initialOutcomes: [DurableRemoteTerminationHarness.TerminationOutcome]
+      var initialAttempts: Int
+      var retryStatuses: [Result<CLISessionStatus, CLISessionError>]
+      var retryOutcomes: [DurableRemoteTerminationHarness.TerminationOutcome]
+      var finalAttempts: Int
+    }
+    let unreachable = Result<CLISessionStatus, CLISessionError>.failure(
+      .unavailable("synthetic host unreachable"))
+    let scenarios = [
+      Scenario(
+        name: "stopped-before-kill",
+        initialStatuses: [.success(.absent)], initialOutcomes: [], initialAttempts: 0,
+        retryStatuses: [], retryOutcomes: [], finalAttempts: 0),
+      Scenario(
+        name: "unreachable-before-kill",
+        initialStatuses: [unreachable], initialOutcomes: [], initialAttempts: 0,
+        retryStatuses: [.success(.absent)], retryOutcomes: [], finalAttempts: 0),
+      Scenario(
+        name: "unreachable-during-kill",
+        initialStatuses: [.success(.live)], initialOutcomes: [.failure], initialAttempts: 1,
+        retryStatuses: [.success(.exited), .success(.absent)],
+        retryOutcomes: [.success], finalAttempts: 2),
+      Scenario(
+        name: "response-lost-after-stop",
+        initialStatuses: [.success(.live)], initialOutcomes: [.responseLostAfterStop],
+        initialAttempts: 1,
+        retryStatuses: [.success(.absent)], retryOutcomes: [], finalAttempts: 1),
+      Scenario(
+        name: "unreachable-after-kill",
+        initialStatuses: [.success(.exited), unreachable], initialOutcomes: [.success],
+        initialAttempts: 1,
+        retryStatuses: [.success(.absent)], retryOutcomes: [], finalAttempts: 1),
+    ]
+    for (metadataIndex, metadata) in [ProjectMetadata.ssh, .codespace].enumerated() {
+      for scenario in scenarios {
+        let root = FileManager.default.temporaryDirectory
+          .appendingPathComponent(
+            "drt-\(metadataIndex)-\(UUID())",
+            isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let path =
+          metadata.location == .ssh
+          ? "ssh://fixture.example/durable-termination/\(scenario.name)"
+          : root.appendingPathComponent("project", isDirectory: true).path
+        let node = LoopNode(id: UUID(), title: scenario.name, loopType: .turnBased)
+        let persistence = ProjectPersistence(baseDirectory: root)
+        try persistence.saveGraphAcknowledged(
+          LoopGraph(
+            project: ProjectRef(path: path, name: scenario.name, metadata: metadata),
+            nodes: [node]))
+        let plan = GraphPostCommitEffectPlan(
+          projectPath: path,
+          operations: [.terminateSession(effectID: UUID(), node: node)])
+        _ = try persistence.deleteGraphAcknowledged(path: path, effectPlan: plan)
+        XCTAssertEqual(persistence.loadPendingGraphEffects().count, 1, scenario.name)
+        let first = DurableRemoteTerminationHarness(
+          statuses: scenario.initialStatuses, outcomes: scenario.initialOutcomes)
+        var registry: ProjectRegistry? = ProjectRegistry(
+          persistenceDirectory: root,
+          ensureSession: nil,
+          terminateSession: { _, _ in try await first.terminate() },
+          durableSessionStatus: { _, _ in try await first.status() },
+          classifyProject: { _ in metadata })
+        let connection = RemoteAssetTestConnection()
+        await registry!.addConnection(
+          id: connection.id,
+          channel: DaemonConnectionChannel(
+            connection: connection, mode: .v2(version: 2)))
+        for _ in 0..<200 {
+          let probes = await first.statusAttempts()
+          let pending = persistence.loadPendingGraphEffects()
+          if probes > 0 || pending.isEmpty { break }
+          try await Task.sleep(for: .milliseconds(10))
+        }
+        _ = registry
+        let firstProbes = await first.statusAttempts()
+        XCTAssertGreaterThan(firstProbes, 0, scenario.name)
+        let firstAttempts = await first.terminationAttempts()
+        XCTAssertEqual(firstAttempts, scenario.initialAttempts, scenario.name)
+        if scenario.retryStatuses.isEmpty {
+          for _ in 0..<200 where !persistence.loadPendingGraphEffects().isEmpty {
+            try await Task.sleep(for: .milliseconds(10))
+          }
+          XCTAssertTrue(persistence.loadPendingGraphEffects().isEmpty, scenario.name)
+          registry = nil
+          continue
+        }
+        XCTAssertEqual(persistence.loadPendingGraphEffects().count, 1, scenario.name)
+        registry = nil
+
+        let retry = DurableRemoteTerminationHarness(
+          statuses: scenario.retryStatuses, outcomes: scenario.retryOutcomes)
+        registry = ProjectRegistry(
+          persistenceDirectory: root,
+          ensureSession: nil,
+          terminateSession: { _, _ in try await retry.terminate() },
+          durableSessionStatus: { _, _ in try await retry.status() },
+          classifyProject: { _ in metadata })
+        for _ in 0..<200 where !persistence.loadPendingGraphEffects().isEmpty {
+          try await Task.sleep(for: .milliseconds(10))
+        }
+        _ = registry
+        let retryAttempts = await retry.terminationAttempts()
+        XCTAssertEqual(
+          firstAttempts + retryAttempts, scenario.finalAttempts, scenario.name)
+        XCTAssertTrue(persistence.loadPendingGraphEffects().isEmpty, scenario.name)
+        registry = nil
+        _ = registry
+      }
+    }
+  }
+
+  func testDurableEnsureRelaunchesExitedSessionAndRemoteProbeRequiresSuccessfulList()
+    async throws
+  {
+    let root = FileManager.default.temporaryDirectory
+      .appendingPathComponent("des-\(UUID())", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let path = root.appendingPathComponent("project", isDirectory: true).path
+    let node = LoopNode(id: UUID(), title: "Exited", loopType: .timeBased)
+    let persistence = ProjectPersistence(baseDirectory: root)
+    let plan = GraphPostCommitEffectPlan(
+      projectPath: path,
+      operations: [.ensureSession(effectID: UUID(), node: node)])
+    try persistence.saveGraphAcknowledged(
+      LoopGraph(
+        project: ProjectRef(path: path, name: "Project", metadata: .local),
+        nodes: [node]),
+      effectPlan: plan)
+    let harness = DurableSessionStatusHarness(statuses: [.exited, .live])
+    var registry: ProjectRegistry? = ProjectRegistry(
+      persistenceDirectory: root,
+      ensureSession: { _, _ in await harness.launch() },
+      durableSessionStatus: { _, _ in try await harness.status() })
+    for _ in 0..<200 where !persistence.loadPendingGraphEffects().isEmpty {
+      try await Task.sleep(for: .milliseconds(10))
+    }
+    _ = registry
+    let launchAttempts = await harness.launchAttempts()
+    XCTAssertEqual(launchAttempts, 1)
+    XCTAssertTrue(persistence.loadPendingGraphEffects().isEmpty)
+    registry = nil
+
+    let remote = try XCTUnwrap(
+      RemoteProjectLocation.parse(
+        projectPath: "ssh://fixture.example/work/project"))
+    let invocation = ZmxSessionLauncher.remoteStatusInvocation(
+      forNode: node, label: "presence", at: remote)
+    XCTAssertTrue(invocation.joined(separator: " ").contains("gc_status=$?"))
+    XCTAssertEqual(
+      ZmxSessionLauncher.parseRemoteStatus(
+        succeeded: true, output: "\(ZmxSessionLauncher.remoteProbeMarker) unreachable"),
+      .unreachable)
   }
 
   func testCommittedCreateFinalizesAttachmentAndBroadcastsWhenSessionEffectFails() async throws {
