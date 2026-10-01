@@ -5,6 +5,7 @@ public enum GraphPersistenceStage: String, Sendable {
   case beforeGraphWrite
   case afterGraphWrite
   case afterMailroomWrite
+  case afterEffectJournalWrite
   case beforeManifestSwitch
   case afterManifestSwitch
 }
@@ -19,6 +20,41 @@ public struct GraphPersistenceReceipt: Equatable, Sendable {
 public struct PendingGraphEffects: Sendable {
   public var receipt: GraphPersistenceReceipt
   public var plan: GraphPostCommitEffectPlan
+}
+
+public struct PendingGraphEffectLimits: Sendable {
+  public var maximumGenerations: Int
+  public var maximumOperations: Int
+  public var maximumBytes: Int
+
+  public static let `default` = PendingGraphEffectLimits(
+    maximumGenerations: 64,
+    maximumOperations: 2_048,
+    maximumBytes: 8 * 1_024 * 1_024)
+
+  public init(
+    maximumGenerations: Int,
+    maximumOperations: Int,
+    maximumBytes: Int
+  ) {
+    self.maximumGenerations = maximumGenerations
+    self.maximumOperations = maximumOperations
+    self.maximumBytes = maximumBytes
+  }
+}
+
+public enum GraphPersistenceError: Error, Equatable, LocalizedError, Sendable {
+  case pendingEffectsLimitExceeded
+  case pendingEffectsCorrupt
+
+  public var errorDescription: String? {
+    switch self {
+    case .pendingEffectsLimitExceeded:
+      return "pending graph effects reached the durable recovery limit"
+    case .pendingEffectsCorrupt:
+      return "pending graph effects are incomplete or corrupt"
+    }
+  }
 }
 
 /// Reads/writes the on-disk state Phase 4 adds: one JSON file per project's `LoopGraph`
@@ -42,6 +78,7 @@ public struct ProjectPersistence: Sendable {
   private let beforeGraphTransactionStage:
     @Sendable (LoopGraph, GraphPersistenceStage) throws -> Void
   private let beforeRelocationGenerationCleanup: @Sendable (URL) throws -> Void
+  private let pendingEffectLimits: PendingGraphEffectLimits
 
   public init(baseDirectory: URL) {
     self.init(baseDirectory: baseDirectory, platformPaths: CurrentPlatformPaths.value)
@@ -56,7 +93,8 @@ public struct ProjectPersistence: Sendable {
       @escaping @Sendable (LoopGraph, GraphPersistenceStage) throws ->
       Void = { _, _ in },
     beforeRelocationGenerationCleanup:
-      @escaping @Sendable (URL) throws -> Void = { _ in }
+      @escaping @Sendable (URL) throws -> Void = { _ in },
+    pendingEffectLimits: PendingGraphEffectLimits = .default
   ) {
     projectsDirectory = baseDirectory.appendingPathComponent("projects", isDirectory: true)
     generationsDirectory = projectsDirectory.appendingPathComponent(
@@ -68,6 +106,7 @@ public struct ProjectPersistence: Sendable {
     self.beforeGraphDelete = beforeGraphDelete
     self.beforeGraphTransactionStage = beforeGraphTransactionStage
     self.beforeRelocationGenerationCleanup = beforeRelocationGenerationCleanup
+    self.pendingEffectLimits = pendingEffectLimits
     try? FileManager.default.createDirectory(
       at: projectsDirectory, withIntermediateDirectories: true)
     try? FileManager.default.createDirectory(
@@ -78,11 +117,13 @@ public struct ProjectPersistence: Sendable {
     var version: Int
     var generation: String
     var deleted: Bool?
+    var pendingEffectGenerations: [String]?
   }
 
   private struct DurableEffectEnvelope: Codable {
     var version: Int
     var projectPath: String
+    var journalID: String?
     var plan: GraphPostCommitEffectPlan
   }
 
@@ -144,7 +185,11 @@ public struct ProjectPersistence: Sendable {
     let url = manifestURL(forProjectPath: path)
     guard let data = try? SafeLocalFile.read(url, maximumBytes: 4_096),
       let manifest = try? JSONDecoder().decode(GenerationManifest.self, from: data),
-      manifest.version == 1, UUID(uuidString: manifest.generation) != nil
+      manifest.version == 1 || manifest.version == 2,
+      UUID(uuidString: manifest.generation) != nil,
+      manifest.pendingEffectGenerations?.allSatisfy({
+        UUID(uuidString: $0) != nil
+      }) != false
     else { return nil }
     return manifest
   }
@@ -172,6 +217,124 @@ public struct ProjectPersistence: Sendable {
     return graph
   }
 
+  private struct AuthorizedEffectJournal {
+    var generation: String
+    var envelope: DurableEffectEnvelope
+    var data: Data
+  }
+
+  private func pendingEffectGenerationIDs(
+    path: String,
+    manifest: GenerationManifest?
+  ) throws -> [String] {
+    guard let manifest else { return [] }
+    let values: [String]
+    if manifest.version >= 2 {
+      values = manifest.pendingEffectGenerations ?? []
+    } else {
+      let effects = generationEffectsURL(path: path, generation: manifest.generation)
+      let applied = generationEffectsAppliedURL(path: path, generation: manifest.generation)
+      values =
+        FileManager.default.fileExists(atPath: effects.path)
+          && !FileManager.default.fileExists(atPath: applied.path)
+        ? [manifest.generation] : []
+    }
+    guard values.count <= pendingEffectLimits.maximumGenerations,
+      Set(values).count == values.count,
+      values.allSatisfy({ UUID(uuidString: $0) != nil })
+    else {
+      throw GraphPersistenceError.pendingEffectsCorrupt
+    }
+    return values
+  }
+
+  private func loadAuthorizedEffectJournals(
+    path: String,
+    manifest: GenerationManifest? = nil
+  ) throws -> [AuthorizedEffectJournal] {
+    let manifest = manifest ?? loadManifest(path: path)
+    let generations = try pendingEffectGenerationIDs(path: path, manifest: manifest)
+    var journals: [AuthorizedEffectJournal] = []
+    var totalBytes = 0
+    var totalOperations = 0
+    for generation in generations {
+      let effectsURL = generationEffectsURL(path: path, generation: generation)
+      let appliedURL = generationEffectsAppliedURL(path: path, generation: generation)
+      if FileManager.default.fileExists(atPath: appliedURL.path) { continue }
+      let data: Data
+      do {
+        data = try SafeLocalFile.read(effectsURL, maximumBytes: pendingEffectLimits.maximumBytes)
+      } catch {
+        throw GraphPersistenceError.pendingEffectsCorrupt
+      }
+      guard var envelope = try? JSONDecoder().decode(DurableEffectEnvelope.self, from: data),
+        envelope.version == 1,
+        envelope.projectPath == path,
+        envelope.plan.projectPath == path,
+        envelope.journalID.map({ UUID(uuidString: $0) != nil }) != false
+      else {
+        throw GraphPersistenceError.pendingEffectsCorrupt
+      }
+      envelope.journalID = envelope.journalID ?? generation
+      let (newBytes, byteOverflow) = totalBytes.addingReportingOverflow(data.count)
+      let (newOperations, operationOverflow) =
+        totalOperations.addingReportingOverflow(envelope.plan.operations.count)
+      guard !byteOverflow, !operationOverflow,
+        newBytes <= pendingEffectLimits.maximumBytes,
+        newOperations <= pendingEffectLimits.maximumOperations
+      else {
+        throw GraphPersistenceError.pendingEffectsLimitExceeded
+      }
+      totalBytes = newBytes
+      totalOperations = newOperations
+      journals.append(
+        AuthorizedEffectJournal(
+          generation: generation,
+          envelope: envelope,
+          data: data))
+    }
+    return journals
+  }
+
+  private func validatePendingEffectBounds(
+    existing: [AuthorizedEffectJournal],
+    incoming: [Data],
+    incomingOperationCounts: [Int]
+  ) throws {
+    let (generationCount, generationOverflow) =
+      existing.count.addingReportingOverflow(incoming.count)
+    guard !generationOverflow,
+      generationCount <= pendingEffectLimits.maximumGenerations
+    else {
+      throw GraphPersistenceError.pendingEffectsLimitExceeded
+    }
+    var bytes = 0
+    var operations = 0
+    for journal in existing {
+      let (newBytes, byteOverflow) = bytes.addingReportingOverflow(journal.data.count)
+      let (newOperations, operationOverflow) =
+        operations.addingReportingOverflow(journal.envelope.plan.operations.count)
+      guard !byteOverflow, !operationOverflow else {
+        throw GraphPersistenceError.pendingEffectsLimitExceeded
+      }
+      bytes = newBytes
+      operations = newOperations
+    }
+    for (data, operationCount) in zip(incoming, incomingOperationCounts) {
+      let (newBytes, byteOverflow) = bytes.addingReportingOverflow(data.count)
+      let (newOperations, operationOverflow) =
+        operations.addingReportingOverflow(operationCount)
+      guard !byteOverflow, !operationOverflow,
+        newBytes <= pendingEffectLimits.maximumBytes,
+        newOperations <= pendingEffectLimits.maximumOperations
+      else {
+        throw GraphPersistenceError.pendingEffectsLimitExceeded
+      }
+      bytes = newBytes
+      operations = newOperations
+    }
+  }
+
   /// Two files: the graph without its room, rewritten on every change, and the room on
   /// its own, rewritten only when the room changed. The room was 84% of the graph file
   /// (271 KB of 323 KB on the graph that filed #307) and changes only when a post lands,
@@ -195,13 +358,14 @@ public struct ProjectPersistence: Sendable {
     effectPlan: GraphPostCommitEffectPlan? = nil
   ) throws -> GraphPersistenceReceipt {
     try Self.withGenerationLock {
-      try saveGraphTransaction(graph, effectPlan: effectPlan)
+      try saveGraphTransaction(graph, effectPlan: effectPlan, inheritedEffects: [])
     }
   }
 
   private func saveGraphTransaction(
     _ graph: LoopGraph,
-    effectPlan: GraphPostCommitEffectPlan?
+    effectPlan: GraphPostCommitEffectPlan?,
+    inheritedEffects: [DurableEffectEnvelope]
   ) throws -> GraphPersistenceReceipt {
     var slim = graph
     slim.mailroom = []
@@ -213,6 +377,35 @@ public struct ProjectPersistence: Sendable {
     let graphURL = generationGraphURL(path: graph.project.path, generation: generation)
     let roomURL = generationMailroomURL(path: graph.project.path, generation: generation)
     let effectsURL = generationEffectsURL(path: graph.project.path, generation: generation)
+    let existingEffects = try loadAuthorizedEffectJournals(path: graph.project.path)
+    var newEffectFiles: [(generation: String, data: Data, operations: Int)] = []
+    var knownJournalIDs = Set(existingEffects.compactMap(\.envelope.journalID))
+    for inherited in inheritedEffects {
+      var rewritten = inherited
+      guard let journalID = rewritten.journalID, knownJournalIDs.insert(journalID).inserted
+      else { continue }
+      rewritten.projectPath = graph.project.path
+      rewritten.plan.projectPath = graph.project.path
+      let data = try JSONEncoder().encode(rewritten)
+      newEffectFiles.append(
+        (generation: UUID().uuidString, data: data, operations: rewritten.plan.operations.count))
+    }
+    if let effectPlan, !effectPlan.operations.isEmpty {
+      let envelope = DurableEffectEnvelope(
+        version: 1, projectPath: graph.project.path, journalID: generation, plan: effectPlan)
+      newEffectFiles.append(
+        (
+          generation: generation,
+          data: try JSONEncoder().encode(envelope),
+          operations: effectPlan.operations.count
+        ))
+    }
+    try validatePendingEffectBounds(
+      existing: existingEffects,
+      incoming: newEffectFiles.map(\.data),
+      incomingOperationCounts: newEffectFiles.map(\.operations))
+    let pendingEffectGenerations =
+      existingEffects.map(\.generation) + newEffectFiles.map(\.generation)
     var manifestSwitched = false
     do {
       try beforeGraphTransactionStage(graph, .beforeGraphWrite)
@@ -221,19 +414,29 @@ public struct ProjectPersistence: Sendable {
       try beforeGraphTransactionStage(graph, .afterGraphWrite)
       try roomData.write(to: roomURL, options: .atomic)
       try beforeGraphTransactionStage(graph, .afterMailroomWrite)
-      if let effectPlan, !effectPlan.operations.isEmpty {
-        let envelope = DurableEffectEnvelope(
-          version: 1, projectPath: graph.project.path, plan: effectPlan)
-        try JSONEncoder().encode(envelope).write(to: effectsURL, options: .atomic)
+      for effect in newEffectFiles {
+        let url =
+          effect.generation == generation
+          ? effectsURL
+          : generationEffectsURL(path: graph.project.path, generation: effect.generation)
+        try effect.data.write(to: url, options: .atomic)
+        try beforeGraphTransactionStage(graph, .afterEffectJournalWrite)
       }
       try beforeGraphTransactionStage(graph, .beforeManifestSwitch)
-      let manifest = GenerationManifest(version: 1, generation: generation, deleted: false)
+      let manifest = GenerationManifest(
+        version: 2,
+        generation: generation,
+        deleted: false,
+        pendingEffectGenerations: pendingEffectGenerations)
       try JSONEncoder().encode(manifest).write(
         to: manifestURL(forProjectPath: graph.project.path), options: .atomic)
       manifestSwitched = true
     } catch {
       if !manifestSwitched {
-        for url in [graphURL, roomURL, effectsURL]
+        let createdEffects = newEffectFiles.map {
+          generationEffectsURL(path: graph.project.path, generation: $0.generation)
+        }
+        for url in [graphURL, roomURL] + createdEffects
         where FileManager.default.fileExists(atPath: url.path) {
           try? FileManager.default.removeItem(at: url)
         }
@@ -258,7 +461,10 @@ public struct ProjectPersistence: Sendable {
     ] where FileManager.default.fileExists(atPath: url.path) {
       try? FileManager.default.removeItem(at: url)
     }
-    pruneAppliedGenerations(path: graph.project.path, keeping: generation)
+    pruneAppliedGenerations(
+      path: graph.project.path,
+      keeping: generation,
+      pendingEffects: Set(pendingEffectGenerations))
     return GraphPersistenceReceipt(projectPath: graph.project.path, generation: generation)
   }
 
@@ -286,13 +492,29 @@ public struct ProjectPersistence: Sendable {
     let directory = generationDirectory(forProjectPath: path)
     try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
     let hasEffects = effectPlan?.operations.isEmpty == false
+    let existingEffects = try loadAuthorizedEffectJournals(path: path)
+    var effectData: Data?
     if let effectPlan, hasEffects {
-      let envelope = DurableEffectEnvelope(version: 1, projectPath: path, plan: effectPlan)
-      try JSONEncoder().encode(envelope).write(to: effectsURL, options: .atomic)
+      let envelope = DurableEffectEnvelope(
+        version: 1, projectPath: path, journalID: generation, plan: effectPlan)
+      effectData = try JSONEncoder().encode(envelope)
+    }
+    try validatePendingEffectBounds(
+      existing: existingEffects,
+      incoming: effectData.map { [$0] } ?? [],
+      incomingOperationCounts: effectData.map { _ in [effectPlan?.operations.count ?? 0] } ?? [])
+    let pendingEffectGenerations =
+      existingEffects.map(\.generation) + (effectData == nil ? [] : [generation])
+    if let effectData {
+      try effectData.write(to: effectsURL, options: .atomic)
     }
     do {
       try beforeGraphDelete(path)
-      let manifest = GenerationManifest(version: 1, generation: generation, deleted: true)
+      let manifest = GenerationManifest(
+        version: 2,
+        generation: generation,
+        deleted: true,
+        pendingEffectGenerations: pendingEffectGenerations)
       try JSONEncoder().encode(manifest).write(
         to: manifestURL(forProjectPath: path), options: .atomic)
     } catch {
@@ -300,9 +522,14 @@ public struct ProjectPersistence: Sendable {
       throw error
     }
     removeLegacyAuthoritativeGraph(path: path)
-    if !hasEffects {
+    if pendingEffectGenerations.isEmpty {
       try? FileManager.default.removeItem(at: manifestURL(forProjectPath: path))
-      pruneAppliedGenerations(path: path, keeping: nil)
+      pruneAppliedGenerations(path: path, keeping: nil, pendingEffects: [])
+    } else {
+      pruneAppliedGenerations(
+        path: path,
+        keeping: generation,
+        pendingEffects: Set(pendingEffectGenerations))
     }
     return receipt
   }
@@ -361,27 +588,44 @@ public struct ProjectPersistence: Sendable {
         options: [.skipsHiddenFiles])
     else { return [] }
     var pending: [PendingGraphEffects] = []
-    for directory in projectDirectories {
+    for directory in projectDirectories.sorted(by: { $0.lastPathComponent < $1.lastPathComponent })
+    {
       guard
         (try? directory.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true,
         let files = try? FileManager.default.contentsOfDirectory(
           at: directory, includingPropertiesForKeys: [.isRegularFileKey, .isSymbolicLinkKey])
       else { continue }
-      for effectsURL in files where effectsURL.lastPathComponent.hasSuffix(".effects.json") {
-        let generation = String(effectsURL.lastPathComponent.dropLast(".effects.json".count))
-        guard UUID(uuidString: generation) != nil,
-          !FileManager.default.fileExists(
-            atPath: directory.appendingPathComponent("\(generation).effects-applied").path),
-          let data = try? SafeLocalFile.read(effectsURL, maximumBytes: 8 * 1_024 * 1_024),
+      let candidatePath = files.lazy.compactMap { effectsURL -> String? in
+        guard effectsURL.lastPathComponent.hasSuffix(".effects.json"),
+          let data = try? SafeLocalFile.read(
+            effectsURL, maximumBytes: pendingEffectLimits.maximumBytes),
           let envelope = try? JSONDecoder().decode(DurableEffectEnvelope.self, from: data),
-          envelope.version == 1, envelope.plan.projectPath == envelope.projectPath,
-          loadManifest(path: envelope.projectPath)?.generation == generation
-        else { continue }
-        pending.append(
-          PendingGraphEffects(
-            receipt: GraphPersistenceReceipt(
-              projectPath: envelope.projectPath, generation: generation),
-            plan: envelope.plan))
+          envelope.version == 1,
+          platformPaths.persistenceKey(forProjectPath: envelope.projectPath)
+            == directory.lastPathComponent
+        else { return nil }
+        return envelope.projectPath
+      }.first
+      guard let path = candidatePath else { continue }
+      do {
+        let manifest = loadManifest(path: path)
+        let journals = try loadAuthorizedEffectJournals(path: path, manifest: manifest)
+        try compactAppliedEffectAuthorization(
+          path: path, manifest: manifest, journals: journals)
+        for journal in journals {
+          pending.append(
+            PendingGraphEffects(
+              receipt: GraphPersistenceReceipt(
+                projectPath: path, generation: journal.generation),
+              plan: journal.envelope.plan))
+        }
+      } catch {
+        DaemonLog.shared.record(
+          "graph-effects-load-failure",
+          [
+            ("project", directory.lastPathComponent),
+            ("error", String(describing: error)),
+          ])
       }
     }
     return pending
@@ -398,15 +642,31 @@ public struct ProjectPersistence: Sendable {
       path: receipt.projectPath, generation: receipt.generation)
     do {
       try Data().write(to: marker, options: .atomic)
-      let manifest = loadManifest(path: receipt.projectPath)
-      if manifest?.generation == receipt.generation, manifest?.deleted == true {
-        try? FileManager.default.removeItem(at: manifestURL(forProjectPath: receipt.projectPath))
-        pruneAppliedGenerations(path: receipt.projectPath, keeping: nil)
-      } else {
+      guard var manifest = loadManifest(path: receipt.projectPath) else { return }
+      var pending = try pendingEffectGenerationIDs(
+        path: receipt.projectPath, manifest: manifest)
+      pending.removeAll { $0 == receipt.generation }
+      if manifest.deleted == true, pending.isEmpty {
+        manifest.version = 2
+        manifest.pendingEffectGenerations = []
+        try JSONEncoder().encode(manifest).write(
+          to: manifestURL(forProjectPath: receipt.projectPath), options: .atomic)
+        try FileManager.default.removeItem(at: manifestURL(forProjectPath: receipt.projectPath))
         pruneAppliedGenerations(
           path: receipt.projectPath,
-          keeping: manifest?.generation)
+          keeping: nil,
+          pendingEffects: [])
+      } else {
+        manifest.version = 2
+        manifest.pendingEffectGenerations = pending
+        try JSONEncoder().encode(manifest).write(
+          to: manifestURL(forProjectPath: receipt.projectPath), options: .atomic)
+        pruneAppliedGenerations(
+          path: receipt.projectPath,
+          keeping: manifest.generation,
+          pendingEffects: Set(pending))
       }
+
     } catch {
       DaemonLog.shared.record(
         "graph-effects-ack-failure",
@@ -415,6 +675,35 @@ public struct ProjectPersistence: Sendable {
           ("generation", receipt.generation),
         ])
     }
+  }
+
+  private func compactAppliedEffectAuthorization(
+    path: String,
+    manifest: GenerationManifest?,
+    journals: [AuthorizedEffectJournal]
+  ) throws {
+    guard var manifest else { return }
+    let authorized = try pendingEffectGenerationIDs(path: path, manifest: manifest)
+    let remaining = journals.map(\.generation)
+    let url = manifestURL(forProjectPath: path)
+    if manifest.deleted == true, remaining.isEmpty {
+      if authorized != remaining || manifest.version != 2 {
+        manifest.version = 2
+        manifest.pendingEffectGenerations = []
+        try JSONEncoder().encode(manifest).write(to: url, options: .atomic)
+      }
+      try FileManager.default.removeItem(at: url)
+      pruneAppliedGenerations(path: path, keeping: nil, pendingEffects: [])
+      return
+    }
+    guard authorized != remaining || manifest.version != 2 else { return }
+    manifest.version = 2
+    manifest.pendingEffectGenerations = remaining
+    try JSONEncoder().encode(manifest).write(to: url, options: .atomic)
+    pruneAppliedGenerations(
+      path: path,
+      keeping: manifest.generation,
+      pendingEffects: Set(remaining))
   }
 
   /// Throws away a project's loops for good — the "Delete Loops…" half of the sidebar's
@@ -505,7 +794,8 @@ public struct ProjectPersistence: Sendable {
     let manifestURL = projectsDirectory.appendingPathComponent("\(key)\(Self.manifestFileSuffix)")
     guard let data = try? SafeLocalFile.read(manifestURL, maximumBytes: 4_096),
       let manifest = try? JSONDecoder().decode(GenerationManifest.self, from: data),
-      manifest.version == 1, UUID(uuidString: manifest.generation) != nil
+      manifest.version == 1 || manifest.version == 2,
+      UUID(uuidString: manifest.generation) != nil
     else { return nil }
     let graphURL =
       generationsDirectory.appendingPathComponent(key, isDirectory: true)
@@ -517,7 +807,11 @@ public struct ProjectPersistence: Sendable {
     return graph.project.path
   }
 
-  private func pruneAppliedGenerations(path: String, keeping generation: String?) {
+  private func pruneAppliedGenerations(
+    path: String,
+    keeping generation: String?,
+    pendingEffects: Set<String>
+  ) {
     let directory = generationDirectory(forProjectPath: path)
     guard
       let files = try? FileManager.default.contentsOfDirectory(
@@ -530,13 +824,7 @@ public struct ProjectPersistence: Sendable {
         let value = String(name[..<separator])
         return UUID(uuidString: value) == nil ? nil : value
       })
-    for old in generations where old != generation {
-      let effects = generationEffectsURL(path: path, generation: old)
-      let applied = generationEffectsAppliedURL(path: path, generation: old)
-      guard
-        !FileManager.default.fileExists(atPath: effects.path)
-          || FileManager.default.fileExists(atPath: applied.path)
-      else { continue }
+    for old in generations where old != generation && !pendingEffects.contains(old) {
       for url in files where url.lastPathComponent.hasPrefix("\(old).") {
         try? FileManager.default.removeItem(at: url)
       }
@@ -667,7 +955,13 @@ public struct ProjectPersistence: Sendable {
       metadata: graph.project.metadata)
     rewritten = rewritten.enforcingRootProject(project)
 
-    _ = try saveGraphAcknowledged(rewritten)
+    _ = try Self.withGenerationLock {
+      let sourceEffects = try loadAuthorizedEffectJournals(path: sourcePath)
+      return try saveGraphTransaction(
+        rewritten,
+        effectPlan: nil,
+        inheritedEffects: sourceEffects.map(\.envelope))
+    }
 
     try NodeMemory.relocateProjectStorage(
       from: supportSourcePath ?? sourcePath, to: destinationPath,

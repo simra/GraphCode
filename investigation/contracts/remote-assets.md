@@ -181,11 +181,18 @@ sessions, memory, recurrence, replay, broadcasts, and retained assets unchanged.
 
 Graph and Mailroom bytes are written to one generation namespace. An atomic current-
 generation manifest selects both files, so restart observes either the complete old pair
-or the complete new pair. The same generation contains the post-commit effect journal;
-startup replays only a manifest-authorized generation and ignores failed pre-switch
-writes. Whole-project deletion atomically selects a deletion tombstone before effects or
-cleanup run. The tombstone and effect journal remain until idempotent recovery is
-acknowledged, then are removed. Existing split graph/Mailroom files migrate on load.
+or the complete new pair. Manifest version 2 separately authenticates an ordered pending-
+effect generation chain, so every ordinary graph, Mailroom, asset, and deletion save
+carries all unresolved journals forward without copying or changing their stable
+operation IDs. A new effect journal is written before the manifest switch; failed pre-
+switch files are unauthorized and pruned. Existing version-1 current-generation journals
+migrate on the next save. The chain is capped at 64 generations, 2,048 operations, and
+8 MiB of encoded journals per project. A save that would exceed any bound fails before
+graph publication instead of dropping recovery authority or accumulating unbounded
+files. Whole-project deletion atomically selects a deletion tombstone before effects or
+cleanup run. The tombstone remains while any authorized journal is pending. Applied
+markers are durable before manifest compaction; startup repairs a crash between those
+steps and prunes only generations that are neither current nor pending.
 
 After durable graph success, the host executes the effect journal and idempotently
 publishes retained content before the catalog drops the lease. Session launch and
@@ -213,7 +220,13 @@ accounting only after durable cleanup ownership exists and never delete pre-exis
 files or an existing node directory.
 
 Project relocation writes the destination generation and support sidecars before
-persisting a `supportCommitted` cleanup intent. It then removes only the exact source
+persisting a `supportCommitted` cleanup intent. Before the destination manifest becomes
+authoritative, all source-authorized pending journals are copied into the destination
+chain with destination project ownership while preserving operation IDs, journal IDs, and
+order. Retrying relocation deduplicates by the opaque journal ID; legacy journals derive
+that identity from their generation UUID. A crash before source cleanup can expose both
+copies, but stable identities and authoritative session/memory probes make replay
+idempotent. Relocation then removes only the exact source
 persistence key: bounded known graph, Mailroom, effect-journal, applied-marker, manifest,
 and legacy files are validated without following links and unlinked individually before
 the empty source generation directory is removed. Generation cleanup holds a validated

@@ -3383,7 +3383,7 @@ final class RemoteAssetTests: XCTestCase {
 
     for stage in [
       GraphPersistenceStage.beforeGraphWrite, .afterGraphWrite, .afterMailroomWrite,
-      .beforeManifestSwitch,
+      .afterEffectJournalWrite, .beforeManifestSwitch,
     ] {
       failure.fail(at: stage)
       XCTAssertThrowsError(
@@ -3403,6 +3403,357 @@ final class RemoteAssetTests: XCTestCase {
     XCTAssertEqual(
       ProjectPersistence(baseDirectory: root).loadPendingGraphEffects().first?.plan,
       effectPlan)
+  }
+
+  func testPendingEffectChainSurvivesGraphAndMailroomRolloverAndPrunesAppliedPlans() throws {
+    let root = FileManager.default.temporaryDirectory
+      .appendingPathComponent("effect-rollover-\(UUID())", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let path = "ssh://fixture.example/effect-rollover"
+    let project = ProjectRef(path: path, name: "Rollover", metadata: .ssh)
+    let firstNode = LoopNode(id: UUID(), title: "First", loopType: .turnBased)
+    let secondNode = LoopNode(id: UUID(), title: "Second", loopType: .turnBased)
+    let firstPlan = GraphPostCommitEffectPlan(
+      projectPath: path,
+      operations: [.terminateSession(effectID: UUID(), node: firstNode)])
+    let secondPlan = GraphPostCommitEffectPlan(
+      projectPath: path,
+      operations: [.terminateSession(effectID: UUID(), node: secondNode)])
+    let persistence = ProjectPersistence(baseDirectory: root)
+
+    var graph = LoopGraph(project: project, nodes: [firstNode, secondNode])
+    let firstReceipt = try persistence.saveGraphAcknowledged(graph, effectPlan: firstPlan)
+    graph.nodes[0].title = "G2"
+    graph.mailroom = [
+      MailroomPost(
+        id: 1, at: Date(timeIntervalSince1970: 1), authorID: nil,
+        author: "fixture", topic: nil, body: "mailroom rollover")
+    ]
+    let writer = GraphWriter(persistence: persistence)
+    writer.save(graph)
+    writer.flush()
+    graph.nodes[0].title = "G3"
+    let secondReceipt = try persistence.saveGraphAcknowledged(graph, effectPlan: secondPlan)
+
+    let restarted = ProjectPersistence(baseDirectory: root)
+    XCTAssertEqual(restarted.loadPendingGraphEffects().map(\.plan), [firstPlan, secondPlan])
+    restarted.markGraphEffectsApplied(firstReceipt)
+    XCTAssertEqual(restarted.loadPendingGraphEffects().map(\.plan), [secondPlan])
+
+    graph.nodes[0].title = "G4"
+    _ = try restarted.saveGraphAcknowledged(graph)
+    XCTAssertEqual(
+      ProjectPersistence(baseDirectory: root).loadPendingGraphEffects().map(\.plan),
+      [secondPlan])
+    let key = CurrentPlatformPaths.value.persistenceKey(forProjectPath: path)
+    let generationDirectory = root.appendingPathComponent("projects", isDirectory: true)
+      .appendingPathComponent(".generations", isDirectory: true)
+      .appendingPathComponent(key, isDirectory: true)
+    try Data().write(
+      to: generationDirectory.appendingPathComponent(
+        "\(secondReceipt.generation).effects-applied"),
+      options: .atomic)
+    XCTAssertTrue(ProjectPersistence(baseDirectory: root).loadPendingGraphEffects().isEmpty)
+    XCTAssertFalse(
+      FileManager.default.fileExists(
+        atPath: generationDirectory.appendingPathComponent(
+          "\(secondReceipt.generation).effects.json"
+        ).path))
+  }
+
+  func testUnreachableRemoteTerminationRetriesAfterLaterGenerationsAndRestart() async throws {
+    let root = FileManager.default.temporaryDirectory
+      .appendingPathComponent("effect-rollover-remote-\(UUID())", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let path = "ssh://fixture.example/effect-rollover-remote"
+    let node = LoopNode(id: UUID(), title: "Remote", loopType: .turnBased)
+    let plan = GraphPostCommitEffectPlan(
+      projectPath: path,
+      operations: [.terminateSession(effectID: UUID(), node: node)])
+    let persistence = ProjectPersistence(baseDirectory: root)
+    var graph = LoopGraph(
+      project: ProjectRef(path: path, name: "Remote", metadata: .ssh),
+      nodes: [node])
+    _ = try persistence.saveGraphAcknowledged(graph, effectPlan: plan)
+    graph.nodes[0].title = "G2"
+    _ = try persistence.saveGraphAcknowledged(graph)
+    graph.nodes[0].title = "G3"
+    _ = try persistence.saveGraphAcknowledged(graph)
+
+    let harness = DurableSessionEffectHarness()
+    await harness.seedLive([node.id])
+    await harness.failTerminations([node.id: 1])
+    var registry: ProjectRegistry? = ProjectRegistry(
+      persistenceDirectory: root,
+      ensureSession: nil,
+      terminateSession: { value, _ in try await harness.terminate(value) },
+      nodeSessionExists: { value, _ in await harness.exists(value) },
+      classifyProject: { _ in .ssh })
+    for _ in 0..<200 where await harness.terminateAttempts(node.id) == 0 {
+      try await Task.sleep(for: .milliseconds(10))
+    }
+    let firstAttempts = await harness.terminateAttempts(node.id)
+    XCTAssertEqual(firstAttempts, 1)
+    XCTAssertEqual(persistence.loadPendingGraphEffects().map(\.plan), [plan])
+    registry = nil
+
+    registry = ProjectRegistry(
+      persistenceDirectory: root,
+      ensureSession: nil,
+      terminateSession: { value, _ in try await harness.terminate(value) },
+      nodeSessionExists: { value, _ in await harness.exists(value) },
+      classifyProject: { _ in .ssh })
+    for _ in 0..<200 where !persistence.loadPendingGraphEffects().isEmpty {
+      try await Task.sleep(for: .milliseconds(10))
+    }
+    let finalAttempts = await harness.terminateAttempts(node.id)
+    let stillExists = await harness.exists(node)
+    XCTAssertEqual(finalAttempts, 2)
+    XCTAssertFalse(stillExists)
+    XCTAssertTrue(persistence.loadPendingGraphEffects().isEmpty)
+    registry = nil
+    _ = registry
+  }
+
+  func testPendingEffectRolloverFaultsNeverOrphanEarlierAuthorization() throws {
+    for stage in [
+      GraphPersistenceStage.beforeGraphWrite, .afterGraphWrite, .afterMailroomWrite,
+      .beforeManifestSwitch, .afterManifestSwitch,
+    ] {
+      let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("effect-rollover-fault-\(UUID())", isDirectory: true)
+      defer { try? FileManager.default.removeItem(at: root) }
+      let path = "ssh://fixture.example/effect-rollover-fault"
+      let node = LoopNode(id: UUID(), title: "G1", loopType: .turnBased)
+      let plan = GraphPostCommitEffectPlan(
+        projectPath: path,
+        operations: [.terminateSession(effectID: UUID(), node: node)])
+      let failure = RemoteAssetStageFailure()
+      let persistence = ProjectPersistence(
+        baseDirectory: root, platformPaths: CurrentPlatformPaths.value,
+        beforeGraphTransactionStage: { _, reached in try failure.check(reached) })
+      var graph = LoopGraph(
+        project: ProjectRef(path: path, name: "Fault", metadata: .ssh),
+        nodes: [node])
+      _ = try persistence.saveGraphAcknowledged(graph, effectPlan: plan)
+      graph.nodes[0].title = "G2"
+      failure.fail(at: stage)
+      if stage == .afterManifestSwitch {
+        XCTAssertNoThrow(try persistence.saveGraphAcknowledged(graph))
+        XCTAssertEqual(persistence.loadGraph(path: path)?.nodes[0].title, "G2")
+      } else {
+        XCTAssertThrowsError(try persistence.saveGraphAcknowledged(graph))
+        XCTAssertEqual(persistence.loadGraph(path: path)?.nodes[0].title, "G1")
+      }
+      XCTAssertEqual(
+        ProjectPersistence(baseDirectory: root).loadPendingGraphEffects().map(\.plan),
+        [plan])
+    }
+  }
+
+  func testDeletionTombstonePersistsUntilEveryCarriedEffectIsApplied() throws {
+    let root = FileManager.default.temporaryDirectory
+      .appendingPathComponent("effect-rollover-tombstone-\(UUID())", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let path = "C:\\synthetic\\effect-rollover-tombstone"
+    let firstNode = LoopNode(id: UUID(), title: "First", loopType: .turnBased)
+    let secondNode = LoopNode(id: UUID(), title: "Second", loopType: .turnBased)
+    let firstPlan = GraphPostCommitEffectPlan(
+      projectPath: path,
+      operations: [.terminateSession(effectID: UUID(), node: firstNode)])
+    let deletionPlan = GraphPostCommitEffectPlan(
+      projectPath: path,
+      operations: [.terminateSession(effectID: UUID(), node: secondNode)])
+    let persistence = ProjectPersistence(baseDirectory: root)
+    let firstReceipt = try persistence.saveGraphAcknowledged(
+      LoopGraph(
+        project: ProjectRef(path: path, name: "Tombstone"),
+        nodes: [firstNode, secondNode]),
+      effectPlan: firstPlan)
+    let deletionReceipt = try persistence.deleteGraphAcknowledged(
+      path: path, effectPlan: deletionPlan)
+    XCTAssertNil(persistence.loadGraph(path: path))
+    XCTAssertEqual(persistence.loadPendingGraphEffects().map(\.plan), [firstPlan, deletionPlan])
+
+    persistence.markGraphEffectsApplied(deletionReceipt)
+    XCTAssertNil(persistence.loadGraph(path: path))
+    XCTAssertEqual(persistence.loadPendingGraphEffects().map(\.plan), [firstPlan])
+    let key = CurrentPlatformPaths.value.persistenceKey(forProjectPath: path)
+    let projects = root.appendingPathComponent("projects", isDirectory: true)
+    let generations = projects.appendingPathComponent(".generations", isDirectory: true)
+      .appendingPathComponent(key, isDirectory: true)
+    try Data().write(
+      to: generations.appendingPathComponent(
+        "\(firstReceipt.generation).effects-applied"),
+      options: .atomic)
+    let restarted = ProjectPersistence(baseDirectory: root)
+    XCTAssertTrue(restarted.loadPendingGraphEffects().isEmpty)
+    XCTAssertNil(restarted.loadGraph(path: path))
+    XCTAssertFalse(
+      FileManager.default.fileExists(
+        atPath: projects.appendingPathComponent("\(key).current.json").path))
+  }
+
+  func testPendingEffectBoundsBackpressureBeforeGraphPublication() throws {
+    let root = FileManager.default.temporaryDirectory
+      .appendingPathComponent("effect-rollover-bounds-\(UUID())", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let path = "C:\\synthetic\\effect-rollover-bounds"
+    let project = ProjectRef(path: path, name: "Bounds")
+    let firstNode = LoopNode(id: UUID(), title: "G1", loopType: .turnBased)
+    let secondNode = LoopNode(id: UUID(), title: "G2", loopType: .turnBased)
+    let limits = PendingGraphEffectLimits(
+      maximumGenerations: 1, maximumOperations: 1, maximumBytes: 1_024 * 1_024)
+    let persistence = ProjectPersistence(
+      baseDirectory: root,
+      platformPaths: CurrentPlatformPaths.value,
+      pendingEffectLimits: limits)
+    var graph = LoopGraph(project: project, nodes: [firstNode])
+    let firstPlan = GraphPostCommitEffectPlan(
+      projectPath: path,
+      operations: [.ensureSession(effectID: UUID(), node: firstNode)])
+    _ = try persistence.saveGraphAcknowledged(graph, effectPlan: firstPlan)
+
+    graph.nodes = [secondNode]
+    let secondPlan = GraphPostCommitEffectPlan(
+      projectPath: path,
+      operations: [.ensureSession(effectID: UUID(), node: secondNode)])
+    XCTAssertThrowsError(
+      try persistence.saveGraphAcknowledged(graph, effectPlan: secondPlan)
+    ) { error in
+      XCTAssertEqual(error as? GraphPersistenceError, .pendingEffectsLimitExceeded)
+    }
+    XCTAssertEqual(persistence.loadGraph(path: path)?.nodes.map(\.id), [firstNode.id])
+    XCTAssertEqual(persistence.loadPendingGraphEffects().map(\.plan), [firstPlan])
+
+    _ = try persistence.saveGraphAcknowledged(graph)
+    XCTAssertEqual(persistence.loadGraph(path: path)?.nodes.map(\.id), [secondNode.id])
+    XCTAssertEqual(persistence.loadPendingGraphEffects().map(\.plan), [firstPlan])
+
+    for (name, constrainedLimits, constrainedPlan) in [
+      (
+        "operations",
+        PendingGraphEffectLimits(
+          maximumGenerations: 4, maximumOperations: 1, maximumBytes: 1_024 * 1_024),
+        GraphPostCommitEffectPlan(
+          projectPath: path,
+          operations: [
+            .ensureSession(effectID: UUID(), node: firstNode),
+            .ensureSession(effectID: UUID(), node: secondNode),
+          ])
+      ),
+      (
+        "bytes",
+        PendingGraphEffectLimits(
+          maximumGenerations: 4, maximumOperations: 4, maximumBytes: 1),
+        firstPlan
+      ),
+    ] {
+      let constrainedRoot = root.appendingPathComponent(name, isDirectory: true)
+      let constrained = ProjectPersistence(
+        baseDirectory: constrainedRoot,
+        platformPaths: CurrentPlatformPaths.value,
+        pendingEffectLimits: constrainedLimits)
+      XCTAssertThrowsError(
+        try constrained.saveGraphAcknowledged(
+          LoopGraph(project: project, nodes: [firstNode, secondNode]),
+          effectPlan: constrainedPlan)
+      ) { error in
+        XCTAssertEqual(error as? GraphPersistenceError, .pendingEffectsLimitExceeded)
+      }
+      XCTAssertNil(constrained.loadGraph(path: path))
+      XCTAssertTrue(constrained.loadPendingGraphEffects().isEmpty)
+    }
+  }
+
+  func testLegacySingleGenerationJournalMigratesAndUnauthorizedJournalIsPruned() throws {
+    struct LegacyEnvelope: Codable {
+      var version: Int
+      var projectPath: String
+      var plan: GraphPostCommitEffectPlan
+    }
+    let root = FileManager.default.temporaryDirectory
+      .appendingPathComponent("effect-rollover-legacy-\(UUID())", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let path = "C:\\synthetic\\effect-rollover-legacy"
+    let node = LoopNode(id: UUID(), title: "Legacy", loopType: .turnBased)
+    let plan = GraphPostCommitEffectPlan(
+      projectPath: path,
+      operations: [.ensureSession(effectID: UUID(), node: node)])
+    let key = CurrentPlatformPaths.value.persistenceKey(forProjectPath: path)
+    let projects = root.appendingPathComponent("projects", isDirectory: true)
+    let generations = projects.appendingPathComponent(".generations", isDirectory: true)
+      .appendingPathComponent(key, isDirectory: true)
+    try FileManager.default.createDirectory(at: generations, withIntermediateDirectories: true)
+    let legacyGeneration = UUID().uuidString
+    try Data(#"{"version":1,"generation":"\#(legacyGeneration)","deleted":false}"#.utf8)
+      .write(
+        to: projects.appendingPathComponent("\(key).current.json"),
+        options: .atomic)
+    try JSONEncoder().encode(
+      LegacyEnvelope(version: 1, projectPath: path, plan: plan)
+    ).write(
+      to: generations.appendingPathComponent("\(legacyGeneration).effects.json"),
+      options: .atomic)
+
+    let persistence = ProjectPersistence(baseDirectory: root)
+    XCTAssertEqual(persistence.loadPendingGraphEffects().map(\.plan), [plan])
+    let unauthorized = UUID().uuidString
+    try JSONEncoder().encode(
+      LegacyEnvelope(version: 1, projectPath: path, plan: plan)
+    ).write(
+      to: generations.appendingPathComponent("\(unauthorized).effects.json"),
+      options: .atomic)
+    _ = try persistence.saveGraphAcknowledged(
+      LoopGraph(
+        project: ProjectRef(path: path, name: "Legacy"),
+        nodes: [node]))
+
+    XCTAssertEqual(persistence.loadPendingGraphEffects().map(\.plan), [plan])
+    XCTAssertFalse(
+      FileManager.default.fileExists(
+        atPath: generations.appendingPathComponent("\(unauthorized).effects.json").path))
+  }
+
+  func testRelocationCarriesPendingEffectChainBeforeSourceGenerationCleanup() throws {
+    let root = FileManager.default.temporaryDirectory
+      .appendingPathComponent("effect-rollover-relocation-\(UUID())", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let source = root.appendingPathComponent("source", isDirectory: true)
+    let destination = root.appendingPathComponent("destination", isDirectory: true)
+    try FileManager.default.createDirectory(at: source, withIntermediateDirectories: true)
+    try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
+    let node = LoopNode(id: UUID(), title: "Relocate", loopType: .turnBased)
+    let sourcePlan = GraphPostCommitEffectPlan(
+      projectPath: source.path,
+      operations: [.terminateSession(effectID: UUID(), node: node)])
+    let graph = LoopGraph(
+      project: ProjectRef(path: source.path, name: "Source"),
+      nodes: [node])
+    let persistence = ProjectPersistence(baseDirectory: root)
+    _ = try persistence.saveGraphAcknowledged(graph, effectPlan: sourcePlan)
+
+    try persistence.completeProjectRelocation(
+      from: source.path, to: destination.path, graph: graph)
+    try persistence.completeProjectRelocation(
+      from: source.path, to: destination.path, graph: graph)
+    let beforeCleanup = persistence.loadPendingGraphEffects()
+    XCTAssertEqual(beforeCleanup.count, 2)
+    XCTAssertEqual(Set(beforeCleanup.map(\.receipt.projectPath)), [source.path, destination.path])
+    let destinationPending = try XCTUnwrap(
+      beforeCleanup.first { $0.receipt.projectPath == destination.path })
+    XCTAssertEqual(destinationPending.plan.projectPath, destination.path)
+    XCTAssertEqual(destinationPending.plan.operations, sourcePlan.operations)
+
+    try persistence.cleanupRelocatedProjectPersistence(
+      from: source.path, to: destination.path)
+    let restarted = ProjectPersistence(baseDirectory: root)
+    let afterCleanup = restarted.loadPendingGraphEffects()
+    XCTAssertEqual(afterCleanup.count, 1)
+    XCTAssertEqual(afterCleanup.first?.receipt.projectPath, destination.path)
+    XCTAssertEqual(afterCleanup.first?.plan.operations, sourcePlan.operations)
+    restarted.markGraphEffectsApplied(try XCTUnwrap(afterCleanup.first).receipt)
+    XCTAssertTrue(restarted.loadPendingGraphEffects().isEmpty)
   }
 
   func testLegacySessionEffectJournalDecodesWithStableNodeBoundIdentity() throws {
